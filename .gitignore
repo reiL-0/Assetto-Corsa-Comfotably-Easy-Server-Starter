@@ -1,0 +1,22 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.env
+
+# app data
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# frontend
+node_modules/
+/app/static/
+
+# misc
+.DS_Store
+*.log
