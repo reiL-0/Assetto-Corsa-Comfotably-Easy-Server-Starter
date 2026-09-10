@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     # Env (JSON): ACM_CORS_ORIGINS='["https://league.example.com"]'
     cors_origins: list[str] = []
 
+    # AC dedicated server. argv for the binary, e.g. "/opt/ac/acServer".
+    # Empty -> start endpoints refuse.
+    acserver_cmd: str = ""
+    port_range_start: int = 9600
+    port_range_end: int = 9700
+    log_lines: int = 500  # per-instance stdout ring buffer
+
     def resolved_db_path(self) -> str:
         return self.db_path or f"{self.data_dir}/acmanager.db"
 

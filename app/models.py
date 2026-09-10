@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from sqlalchemy import JSON
 from sqlmodel import Field, SQLModel
 
 
@@ -23,7 +24,9 @@ class Server(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    # Phase 1 replaces this blob with a structured server_cfg / entry_list model.
-    config_json: str = "{}"
+    base_port: int  # ports tcp/udp/http/plugin derived as base..base+2
+    # server_cfg.ini as {SECTION: {KEY: value}}; entry_list.ini as [{CAR_0 fields}, ...]
+    config: dict = Field(default_factory=dict, sa_type=JSON)
+    entry_list: list = Field(default_factory=list, sa_type=JSON)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

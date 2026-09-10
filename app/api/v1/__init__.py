@@ -4,6 +4,8 @@ this router. Nothing the UI can do is missing here.
 
 from fastapi import APIRouter
 
+from app.servers import router as servers_router
+
 api_router = APIRouter(prefix="/api/v1")
 
 
@@ -12,6 +14,7 @@ def version() -> dict[str, str]:
     return {"version": "0.0.0-dev", "api": "v1"}
 
 
-# Phase 1+: api_router.include_router(servers.router, prefix="/servers", tags=["servers"])
+api_router.include_router(servers_router)
+
 # Phase 2+: live timing WebSocket, ACSP command endpoints
 # Phase 3+: content + file upload/download endpoints

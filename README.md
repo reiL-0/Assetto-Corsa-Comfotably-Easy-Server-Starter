@@ -37,13 +37,16 @@ a client from that.
 app/
   main.py            FastAPI app + lifespan; CORS, /healthz, routers, optional SPA
   config.py          env-driven settings
-  db.py              SQLite engine, pragmas, init_db
+  db.py              SQLite engine, pragmas, init_db, SessionDep
   models.py          SQLModel tables (User, Server)
+  servers.py         server CRUD + server_cfg.ini/entry_list.ini rendering + start/stop
+  supervisor.py      spawn/stop acServer processes, stdout ring buffer
   api/v1/            versioned public API — the only surface clients use
   web.py             serves app/static SPA with index.html fallback
   static/            built frontend (gitignored; `make web` populates it)
 web/                 React frontend source
 tests/               pytest
+data/instances/<id>/ per-server working dir (cfg/, results/) written on start
 ```
 
 Planned modules (later phases): `app/acsp/` (UDP protocol + client),
@@ -104,11 +107,15 @@ make lint        # ruff
 | `ACM_DB_PATH`      | `<data_dir>/acmanager.db`  | SQLite file path |
 | `ACM_SERVE_UI`     | `true`                     | serve the bundled UI; `false` = pure API |
 | `ACM_CORS_ORIGINS` | `[]`                       | JSON list of allowed cross-origin sites |
+| `ACM_ACSERVER_CMD` | `""`                       | argv for the AC dedicated server; empty = start disabled |
+| `ACM_PORT_RANGE_START` / `ACM_PORT_RANGE_END` | `9600` / `9700` | pool for per-server port blocks (4 apart) |
+| `ACM_LOG_LINES`    | `500`                      | per-instance stdout ring buffer size |
 
 ## Roadmap
 
-0. **Scaffold** — FastAPI app, SQLite + models, versioned API skeleton, SPA shell ← *here*
-1. Config model + `acServer` process lifecycle (MVP core)
+0. **Scaffold** — FastAPI app, SQLite + models, versioned API skeleton, SPA shell ✔
+1. **Server CRUD + config rendering + process lifecycle** ← *here* (start/stop, INI
+   generation, port allocation done; readiness parsing + auto-restart deferred)
 2. ACSP client: live timing, chat, live map, admin actions
 3. Content indexer + checksums + entry-list builder + file transfer endpoints
 4. Results parser + championship engine

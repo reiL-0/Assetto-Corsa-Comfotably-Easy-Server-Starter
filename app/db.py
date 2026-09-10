@@ -1,7 +1,10 @@
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Annotated
 
+from fastapi import Depends
 from sqlalchemy import event
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.config import settings
 
@@ -23,8 +26,16 @@ def _sqlite_pragmas(dbapi_conn, _connection_record) -> None:
 
 
 def init_db() -> None:
-    # Phase 0: create tables straight from the models.
-    # Phase 1 switches to Alembic once the schema starts changing for real.
+    # Phase 1: create tables straight from the models.
+    # Alembic goes in once there is data worth preserving across schema changes.
     import app.models  # noqa: F401  (import registers the tables)
 
     SQLModel.metadata.create_all(engine)
+
+
+def get_session() -> Iterator[Session]:
+    with Session(engine) as session:
+        yield session
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
