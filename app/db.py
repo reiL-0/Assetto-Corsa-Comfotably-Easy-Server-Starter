@@ -1,8 +1,7 @@
-from collections.abc import Iterator
 from pathlib import Path
 
 from sqlalchemy import event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import SQLModel, create_engine
 
 from app.config import settings
 
@@ -29,8 +28,3 @@ def init_db() -> None:
     import app.models  # noqa: F401  (import registers the tables)
 
     SQLModel.metadata.create_all(engine)
-
-
-def get_session() -> Iterator[Session]:
-    with Session(engine) as session:
-        yield session

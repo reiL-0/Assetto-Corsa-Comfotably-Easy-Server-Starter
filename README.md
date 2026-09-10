@@ -35,16 +35,13 @@ a client from that.
 
 ```
 app/
-  main.py            FastAPI app + lifespan; wires CORS, routers, optional SPA
+  main.py            FastAPI app + lifespan; CORS, /healthz, routers, optional SPA
   config.py          env-driven settings
-  db.py              SQLite engine, pragmas, init_db, get_session
+  db.py              SQLite engine, pragmas, init_db
   models.py          SQLModel tables (User, Server)
-  api/
-    health.py        /healthz (unversioned liveness)
-    v1/              versioned public API — the only surface clients use
-      meta.py        GET /api/v1/version
+  api/v1/            versioned public API — the only surface clients use
   web.py             serves app/static SPA with index.html fallback
-  static/            built frontend (placeholder committed until `make web`)
+  static/            built frontend (gitignored; `make web` populates it)
 web/                 React frontend source
 tests/               pytest
 ```

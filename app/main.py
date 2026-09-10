@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.health import router as health_router
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import init_db
@@ -43,18 +42,13 @@ if settings.cors_origins:
         allow_headers=["*"],
     )
 
-app.include_router(health_router)
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 app.include_router(api_router)
 
 if settings.serve_ui:
     mount_spa(app)  # keep last: registers a catch-all route
-
-
-def main() -> None:
-    import uvicorn
-
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port)
-
-
-if __name__ == "__main__":
-    main()
