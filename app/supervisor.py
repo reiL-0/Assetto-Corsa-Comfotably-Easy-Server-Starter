@@ -8,6 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from app import acsp
 from app.config import settings
 
 
@@ -17,6 +18,7 @@ class Instance:
         self.proc = proc
         self.started_at = time.time()
         self.log: deque[str] = deque(maxlen=settings.log_lines)
+        self.acsp: acsp.ACSPClient | None = None
         self._reader = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
@@ -41,6 +43,8 @@ class Instance:
                 self.proc.kill()
                 await self.proc.wait()
         self._reader.cancel()
+        if self.acsp:
+            self.acsp.close()
 
 
 # ponytail: in-memory registry, single process. Lost on manager restart;
@@ -48,7 +52,14 @@ class Instance:
 _instances: dict[int, Instance] = {}
 
 
-async def start(server_id: int, cwd: Path) -> Instance:
+async def start(
+    server_id: int,
+    cwd: Path,
+    *,
+    acsp_local_port: int | None = None,
+    acsp_remote_port: int | None = None,
+    acsp_host: str = "127.0.0.1",
+) -> Instance:
     current = _instances.get(server_id)
     if current and current.running:
         raise RuntimeError("already running")
@@ -61,6 +72,8 @@ async def start(server_id: int, cwd: Path) -> Instance:
         stderr=asyncio.subprocess.STDOUT,
     )
     inst = Instance(server_id, proc)
+    if acsp_local_port and acsp_remote_port:
+        inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host)
     _instances[server_id] = inst
     return inst
 

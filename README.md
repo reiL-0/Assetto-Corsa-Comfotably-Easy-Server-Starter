@@ -40,27 +40,131 @@ app/
   db.py              SQLite engine, pragmas, init_db, SessionDep
   models.py          SQLModel tables (User, Server)
   servers.py         server CRUD + server_cfg.ini/entry_list.ini rendering + start/stop
-  supervisor.py      spawn/stop acServer processes, stdout ring buffer
+  supervisor.py      spawn/stop acServer processes, stdout ring buffer, ACSP client lifecycle
+  acsp.py            ACSP UDP plugin protocol: parse live events, encode admin commands
+  content.py         car/track indexer, checksums, entry-list builder, content/skin zip transfer
+  results.py         parses acServer session result JSON into a normalized classification
+  championship.py    championship CRUD + points standings computed from counted race results
   api/v1/            versioned public API — the only surface clients use
+  admin/servers.html standalone server-browser page (no build step), served at /admin/servers
   web.py             serves app/static SPA with index.html fallback
   static/            built frontend (gitignored; `make web` populates it)
 web/                 React frontend source
 tests/               pytest
+data/content/{cars,tracks}/  installed content, indexed by content.py
 data/instances/<id>/ per-server working dir (cfg/, results/) written on start
 ```
 
-Planned modules (later phases): `app/acsp/` (UDP protocol + client),
-`app/servers/` (acServer process supervision), `app/content/`, `app/results/`,
-`app/championship/`, `app/auth/` (cookie session + Bearer API tokens),
-`app/scheduler/`.
+Planned modules (later phases): `app/auth/` (cookie session + Bearer API
+tokens), `app/scheduler/`.
+
+### ACSP (live timing / chat / live map / admin)
+
+Each server gets a 4-port block (`base`..`base+3`): `tcp`/`udp`, `http`,
+`plugin` (acServer's own `UDP_PLUGIN_LOCAL_PORT`), `plugin_local` (the
+manager's side of the socket, written into `UDP_PLUGIN_ADDRESS`). On
+`start`, `supervisor.start()` opens a UDP endpoint (`acsp.connect`) wired to
+that block alongside the acServer process, and tears it down on `stop`.
+
+`ACSPClient` (in `app/acsp.py`) parses inbound datagrams (session info, car
+connect/disconnect, car position updates, lap completed, chat, client
+events) into dicts, keeping a ring buffer of raw events plus a live
+`session` snapshot and `cars` map. It also encodes outbound commands (chat,
+kick, next/restart session, and the generic `ADMIN_COMMAND` string used for
+ballast/restrictor changes).
+
+API surface, all under `/api/v1/servers/{id}/`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /session` | latest session info snapshot |
+| `GET /cars` | connected cars + last known position/telemetry |
+| `WS /live` | streams new ACSP events as JSON frames (polls every 200ms) |
+| `POST /chat` | `{message, car_id?}` — broadcast or whisper |
+| `POST /kick/{car_id}` | kick a driver |
+| `POST /next_session` / `POST /restart_session` | session control |
+| `POST /admin` | `{command}` — raw console admin command (e.g. `ballast 3 50`) |
+
+All of these 409 if the server isn't running or the plugin socket hasn't
+connected yet.
+
+### Content (indexer, checksums, entry-list builder, file transfer)
+
+Installed content lives under `data/content/{cars,tracks}/`, laid out the
+same way the game itself expects it (`<car>/ui/ui_car.json`,
+`<car>/data.acd`, `<car>/skins/<skin>/`; `<track>/ui/ui_track.json` or
+`<track>/ui/<layout>/ui_track.json` for multi-layout tracks). `content.py`
+indexes that tree, computes the SHA1s acServer itself checks for integrity
+(`data.acd` for cars; `surfaces.ini` + `models[_<layout>].ini` for tracks),
+and validates `{car, skin}` rows into `entry_list.ini`-ready dicts.
+
+API surface under `/api/v1/content/`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /cars`, `GET /tracks` | indexed content with UI metadata + skins/layouts |
+| `GET /cars/{car}/checksum`, `GET /tracks/{track}/checksum` | integrity hashes |
+| `POST /cars`, `POST /tracks` | upload content as a zip (top-level folder = its name) |
+| `GET /cars/{car}.zip`, `GET /tracks/{track}.zip` | download content as a zip |
+| `POST /cars/{car}/skins`, `GET /cars/{car}/skins/{skin}.zip` | skin upload/download |
+| `POST /entry_list` | `[{car, skin}]` -> validated `entry_list.ini` rows |
+
+Uploaded zips are checked against zip-slip (`..` / absolute paths) before
+extraction. Per-server file transfer lives on the servers router:
+`PUT /servers/{id}/server_cfg.ini` and `PUT /servers/{id}/entry_list.ini`
+accept a raw INI body and parse it back into the stored config, and
+`GET /servers/{id}/results[/​{filename}]` lists/downloads session result
+JSON files acServer writes under that instance's `results/` dir.
+
+### Results + championship
+
+`results.py` parses one of those result JSON files into a normalized shape:
+session type/track, a `classification` (acServer's own finishing order,
+annotated with gap-to-leader — total time for races, best lap otherwise),
+and the raw `laps` list. `GET /servers/{id}/results/{filename}/parsed`
+exposes it directly.
+
+A `Championship` (`app/championship.py`) just points at a set of already
+written race result files — no re-simulated standings, no stored totals.
+Adding an event (`POST /championships/{id}/events`, `{server_id, filename}`)
+records which result counts; `GET /championships/{id}/standings` re-reads
+every counted `Race` result on each call and sums points by `DriverGuid`
+using the championship's `points_system` (default top-10 F1-style
+`[25,18,15,12,10,8,6,4,2,1]`), ranking ties by win count.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST/GET/DELETE /championships[/{id}]` | championship CRUD |
+| `POST /championships/{id}/events` | count a race result (validates the file exists) |
+| `GET /championships/{id}/events` | events counted so far |
+| `GET /championships/{id}/standings` | computed points table |
+
+Only `Race`-type sessions score; add a per-event flag if a league wants
+qualifying points too (see the `ponytail:` note in `championship.py`).
 
 ## Prerequisites
 
 - Python 3.12+ — installed (3.14).
-- Node.js + npm — **not installed**. On Arch: `sudo pacman -S nodejs npm`
-  (only to build the React UI; the backend runs headless without it).
+- Node.js + npm — installed (needed only to build the React UI; the backend
+  runs headless without it).
 
 ## First run
+
+```sh
+./start.sh              # same as: ./start.sh start
+./start.sh stop
+./start.sh restart
+./start.sh status
+```
+
+`start.sh` reads `start.conf` (`BUILD_UI=true|false`) to decide whether to
+build and serve the bundled UI or run headless; it checks for Python 3.12+
+always, and for Node/npm only when `BUILD_UI=true`. `start`/`restart` run
+`make install` (+ `make web` if `BUILD_UI=true`), then launch uvicorn
+detached in its own process group, tracked via `.start.pid`, logging to
+`data/server.log`. `stop` signals that process group so the `--reload`
+worker dies with it. Or drive the Makefile targets yourself (foreground,
+no PID tracking):
 
 ```sh
 make install     # creates .venv, installs backend + dev deps
@@ -70,6 +174,10 @@ make run         # backend on http://127.0.0.1:8080  (autoreload)
 - <http://127.0.0.1:8080/healthz> → `{"status":"ok"}`
 - <http://127.0.0.1:8080/api/docs> → interactive API docs
 - <http://127.0.0.1:8080/> → built UI, or an inline placeholder until `make web` is run
+- <http://127.0.0.1:8080/admin/servers> → standalone server-browser admin page
+  (`app/admin/servers.html`, plain HTML/JS + Tailwind CDN, no build step —
+  create/edit/delete servers, start/stop, live status and player count via
+  `fetch()` straight against `/api/v1/servers`)
 
 `data/acmanager.db` is created and its tables built on first start.
 
@@ -114,10 +222,19 @@ make lint        # ruff
 ## Roadmap
 
 0. **Scaffold** — FastAPI app, SQLite + models, versioned API skeleton, SPA shell ✔
-1. **Server CRUD + config rendering + process lifecycle** ← *here* (start/stop, INI
-   generation, port allocation done; readiness parsing + auto-restart deferred)
-2. ACSP client: live timing, chat, live map, admin actions
-3. Content indexer + checksums + entry-list builder + file transfer endpoints
-4. Results parser + championship engine
+1. **Server CRUD + config rendering + process lifecycle** ✔ (start/stop, INI
+   generation, port allocation; readiness parsing + auto-restart deferred)
+2. **ACSP client: live timing, chat, live map, admin actions** ✔ (UDP
+   protocol parse/encode, session+cars snapshot, live WS feed, chat/kick/
+   next/restart/admin-command endpoints; per-server realtime-pos interval
+   tuning + reconnect-on-restart deferred)
+3. **Content indexer + checksums + entry-list builder + file transfer
+   endpoints** ✔ (car/track indexing, SHA1 checksums, entry-list builder, zip
+   upload/download for content+skins, raw INI upload, results
+   listing/download; a real content library to test against is next)
+4. **Results parser + championship engine** ← *here* (result JSON parsing
+   with classification + gaps, championship CRUD, points standings from
+   counted Race results done; qualifying/practice points and drop-weeks
+   deferred)
 5. Auth (cookie session + Bearer API tokens), RBAC, live stewarding
 6. Scheduler, multi-server, optional plugin chaining

@@ -30,3 +30,25 @@ class Server(SQLModel, table=True):
     entry_list: list = Field(default_factory=list, sa_type=JSON)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+DEFAULT_POINTS_SYSTEM = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
+
+
+class Championship(SQLModel, table=True):
+    __tablename__ = "championships"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    points_system: list[int] = Field(default_factory=lambda: list(DEFAULT_POINTS_SYSTEM), sa_type=JSON)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ChampionshipEvent(SQLModel, table=True):
+    __tablename__ = "championship_events"
+
+    id: int | None = Field(default=None, primary_key=True)
+    championship_id: int = Field(foreign_key="championships.id", index=True)
+    server_id: int
+    filename: str  # result JSON under data/instances/<server_id>/results/
+    created_at: datetime = Field(default_factory=_now)

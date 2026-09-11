@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import configparser
 import io
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from app import supervisor
+from app import acsp, supervisor
+from app.acsp import ACSPClient
 from app.config import settings
 from app.db import SessionDep
 from app.models import Server
+from app.results import parse_result_file
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -38,7 +41,9 @@ class ServerOut(BaseModel):
 
 
 def _ports(base: int) -> dict[str, int]:
-    return {"tcp": base, "udp": base, "http": base + 1, "plugin": base + 2}
+    # plugin: acServer's own UDP_PLUGIN_LOCAL_PORT. plugin_local: our side of
+    # the ACSP socket (UDP_PLUGIN_ADDRESS), one pair per 4-port block.
+    return {"tcp": base, "udp": base, "http": base + 1, "plugin": base + 2, "plugin_local": base + 3}
 
 
 def _out(s: Server) -> ServerOut:
@@ -78,6 +83,8 @@ def render_server_cfg(s: Server) -> str:
     server.setdefault("TCP_PORT", p["tcp"])
     server.setdefault("UDP_PORT", p["udp"])
     server.setdefault("HTTP_PORT", p["http"])
+    server.setdefault("UDP_PLUGIN_LOCAL_PORT", p["plugin"])
+    server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
     return _render_ini(sections)
 
 
@@ -168,13 +175,52 @@ def entry_list_ini(server_id: int, sess: SessionDep) -> str:
     return render_entry_list(_get(sess, server_id))
 
 
+@router.put("/{server_id}/server_cfg.ini", response_model=ServerOut)
+async def upload_server_cfg_ini(server_id: int, request: Request, sess: SessionDep) -> ServerOut:
+    """Raw INI in -> parsed into the structured config (headless file-transfer path)."""
+    s = _get(sess, server_id)
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    cp.read_string((await request.body()).decode())
+    s.config = {sec: dict(cp[sec]) for sec in cp.sections()}
+    s.updated_at = datetime.now(UTC)
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
+
+
+@router.put("/{server_id}/entry_list.ini", response_model=ServerOut)
+async def upload_entry_list_ini(server_id: int, request: Request, sess: SessionDep) -> ServerOut:
+    s = _get(sess, server_id)
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    cp.read_string((await request.body()).decode())
+    car_sections = sorted(
+        (sec for sec in cp.sections() if sec.startswith("CAR_")),
+        key=lambda sec: int(sec.split("_", 1)[1]),
+    )
+    s.entry_list = [dict(cp[sec]) for sec in car_sections]
+    s.updated_at = datetime.now(UTC)
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
+
+
 @router.post("/{server_id}/start")
 async def start_server(server_id: int, sess: SessionDep) -> dict:
     s = _get(sess, server_id)
     if not settings.acserver_cmd:
         raise HTTPException(400, "ACM_ACSERVER_CMD is not configured")
+    p = _ports(s.base_port)
     try:
-        inst = await supervisor.start(server_id, _write_instance(s))
+        inst = await supervisor.start(
+            server_id,
+            _write_instance(s),
+            acsp_remote_port=p["plugin"],
+            acsp_local_port=p["plugin_local"],
+        )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"running": inst.running, "pid": inst.proc.pid}
@@ -201,3 +247,123 @@ def logs(server_id: int, sess: SessionDep, tail: int = 200) -> dict:
     _get(sess, server_id)
     inst = supervisor.get(server_id)
     return {"lines": list(inst.log)[-tail:] if inst else []}
+
+
+def result_path(server_id: int, filename: str) -> Path:
+    if "/" in filename or filename in (".", ".."):
+        raise HTTPException(400, "invalid filename")
+    return Path(settings.data_dir) / "instances" / str(server_id) / "results" / filename
+
+
+@router.get("/{server_id}/results")
+def list_results(server_id: int, sess: SessionDep) -> list[str]:
+    _get(sess, server_id)
+    d = Path(settings.data_dir) / "instances" / str(server_id) / "results"
+    return sorted(p.name for p in d.glob("*.json")) if d.exists() else []
+
+
+@router.get("/{server_id}/results/{filename}")
+def download_result(server_id: int, filename: str, sess: SessionDep) -> FileResponse:
+    _get(sess, server_id)
+    p = result_path(server_id, filename)
+    if not p.is_file():
+        raise HTTPException(404, "result not found")
+    return FileResponse(p)
+
+
+@router.get("/{server_id}/results/{filename}/parsed")
+def parsed_result(server_id: int, filename: str, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    p = result_path(server_id, filename)
+    if not p.is_file():
+        raise HTTPException(404, "result not found")
+    return parse_result_file(p)
+
+
+# --- ACSP: live timing, chat, live map, admin actions ----------------------
+
+def _acsp(server_id: int) -> ACSPClient:
+    inst = supervisor.get(server_id)
+    if not inst or not inst.acsp:
+        raise HTTPException(409, "server not running or ACSP plugin not connected")
+    return inst.acsp
+
+
+@router.get("/{server_id}/session")
+def session_info(server_id: int, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    return _acsp(server_id).session
+
+
+@router.get("/{server_id}/cars")
+def cars(server_id: int, sess: SessionDep) -> dict[int, dict]:
+    _get(sess, server_id)
+    return _acsp(server_id).cars
+
+
+class ChatIn(BaseModel):
+    message: str
+    car_id: int | None = None  # None -> broadcast to everyone
+
+
+@router.post("/{server_id}/chat")
+def send_chat(server_id: int, body: ChatIn, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    client = _acsp(server_id)
+    if body.car_id is None:
+        client.send(acsp.encode_broadcast_chat(body.message))
+    else:
+        client.send(acsp.encode_send_chat(body.car_id, body.message))
+    return {"sent": True}
+
+
+@router.post("/{server_id}/kick/{car_id}")
+def kick(server_id: int, car_id: int, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    _acsp(server_id).send(acsp.encode_kick_user(car_id))
+    return {"sent": True}
+
+
+@router.post("/{server_id}/next_session")
+def next_session(server_id: int, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    _acsp(server_id).send(acsp.encode_next_session())
+    return {"sent": True}
+
+
+@router.post("/{server_id}/restart_session")
+def restart_session(server_id: int, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    _acsp(server_id).send(acsp.encode_restart_session())
+    return {"sent": True}
+
+
+class AdminCommandIn(BaseModel):
+    command: str  # e.g. "ballast 3 50", "restrict 3 10" -- console admin commands
+
+
+@router.post("/{server_id}/admin")
+def admin_command(server_id: int, body: AdminCommandIn, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    _acsp(server_id).send(acsp.encode_admin_command(body.command))
+    return {"sent": True}
+
+
+@router.websocket("/{server_id}/live")
+async def live(websocket: WebSocket, server_id: int) -> None:
+    """Streams new ACSP events (session/chat/car updates/laps) as JSON frames."""
+    await websocket.accept()
+    inst = supervisor.get(server_id)
+    if not inst or not inst.acsp:
+        await websocket.close(code=4409, reason="server not running or ACSP not connected")
+        return
+    sent = 0
+    try:
+        while True:
+            events = list(inst.acsp.events)
+            for event in events[sent:]:
+                await websocket.send_json(event)
+            sent = len(events)
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        pass

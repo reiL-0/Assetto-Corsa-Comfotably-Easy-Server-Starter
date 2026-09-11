@@ -49,3 +49,23 @@ def test_crud_and_ini_render():
 def test_start_requires_binary():
     sid = client.post("/api/v1/servers", json={"name": "NoBin"}).json()["id"]
     assert client.post(f"/api/v1/servers/{sid}/start").status_code == 400
+
+
+def test_upload_raw_ini_and_list_results():
+    sid = client.post("/api/v1/servers", json={"name": "RawIni"}).json()["id"]
+
+    cfg_text = "[SERVER]\nNAME=Uploaded\nMAX_CLIENTS=10\n\n"
+    r = client.put(f"/api/v1/servers/{sid}/server_cfg.ini", content=cfg_text)
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["SERVER"]["NAME"] == "Uploaded"
+
+    el_text = "[CAR_0]\nMODEL=car_a\nSKIN=blue\n\n[CAR_1]\nMODEL=car_b\nSKIN=red\n\n"
+    r = client.put(f"/api/v1/servers/{sid}/entry_list.ini", content=el_text)
+    assert r.status_code == 200, r.text
+    assert r.json()["entry_list"] == [
+        {"MODEL": "car_a", "SKIN": "blue"},
+        {"MODEL": "car_b", "SKIN": "red"},
+    ]
+
+    assert client.get(f"/api/v1/servers/{sid}/results").json() == []
+    assert client.get(f"/api/v1/servers/{sid}/results/nope.json").status_code == 404

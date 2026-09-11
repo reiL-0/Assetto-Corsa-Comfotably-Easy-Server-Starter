@@ -1,13 +1,17 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import init_db
 from app.web import mount_spa
+
+ADMIN_SERVERS_HTML = Path(__file__).parent / "admin" / "servers.html"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +50,12 @@ if settings.cors_origins:
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/admin/servers", include_in_schema=False)
+def admin_servers() -> FileResponse:
+    """Standalone server-browser admin page (no build step, plain fetch() to the API)."""
+    return FileResponse(ADMIN_SERVERS_HTML)
 
 
 app.include_router(api_router)
