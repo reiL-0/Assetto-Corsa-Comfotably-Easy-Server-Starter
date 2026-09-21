@@ -1,8 +1,9 @@
+from conftest import ADMIN
 from fastapi.testclient import TestClient
 
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, headers=ADMIN)
 
 
 def test_crud_and_ini_render():

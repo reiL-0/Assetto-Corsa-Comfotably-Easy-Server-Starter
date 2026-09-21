@@ -55,8 +55,57 @@ data/content/{cars,tracks}/  installed content, indexed by content.py
 data/instances/<id>/ per-server working dir (cfg/, results/) written on start
 ```
 
-Planned modules (later phases): `app/auth/` (cookie session + Bearer API
-tokens), `app/scheduler/`.
+Planned modules (later phases): `app/scheduler/`.
+
+### In-game telemetry (OPR Telemetry app)
+
+`clients/OPRTelemetry/` is the AC in-game Python app (moved here from the
+`ACLivemapTrackerAPP` repo). It reads the driver's **own** car (pedals, gear,
+rpm, steer, heading, position) and POSTs it ~8 Hz to
+`POST /api/v1/telemetry/ingest` (copy `clients/OPRTelemetry/` to `<AC>/apps/python/`). The sample is merged into the
+live map: `GET /servers/{id}/cars` returns it under `telemetry` (dropped after 2 s
+without updates) and `WS /live` streams `{"type":"telemetry","car_id",...}` events.
+
+**No login, no token.** The app sends its own SteamID64 (auto-detected from the
+Steam registry on Windows, or `steam_id` in `config.ini`) in the body; the manager
+matches it against the ACSP `driver_guid` of the cars connected right now. Nothing
+to provision per driver.
+
+Replies: `204` ok · `409` driver not connected to a running server · `429` faster
+than 20 Hz · `422` malformed body. Trade-off: the endpoint is public, so anyone who
+knows a connected driver's SteamID64 could feed that car fake pedals/steer. It is
+cosmetic live-map data only; lap times, splits and race position still come solely
+from ACSP / results. `clients/` is excluded from ruff: it runs on AC's embedded
+Python 3.3.
+`python clients/probe.py --url ... --steam-id ...` sends synthetic samples without AC.
+
+### Auth + RBAC
+
+`app/auth.py`. One `tokens` table backs both **cookie sessions** (`POST
+/auth/login`, 30 days, HttpOnly + SameSite=Lax) and **Bearer API tokens**
+(`POST /auth/tokens`, no expiry, plaintext shown once, only the SHA-256 is
+stored). Passwords are scrypt. Roles ascend `driver < steward < admin`.
+
+| Who | Can |
+|-----|-----|
+| driver | read content + championships |
+| steward | + read servers (config/logs/live/results) and moderate: chat, kick, next/restart session, admin command |
+| admin | + every write (servers, content, championships, users) |
+
+Fail-safe default (`guard()` in `auth.py`): every non-GET route is admin-only
+until it is deliberately moved to the `steward` router. `/healthz`,
+`/api/v1/version` and `/auth/login` are public.
+
+**Bootstrap:** while no users exist, `POST /api/v1/users` is open and the
+first user becomes admin:
+
+```sh
+curl -X POST localhost:8080/api/v1/users -H 'content-type: application/json' \
+  -d '{"username":"admin","password":"change-me-please"}'
+```
+
+A remote (cross-origin) frontend should use a Bearer token, not the cookie.
+The `/live` websocket accepts either (browsers can only send the cookie).
 
 ### ACSP (live timing / chat / live map / admin)
 
@@ -232,9 +281,10 @@ make lint        # ruff
    endpoints** ✔ (car/track indexing, SHA1 checksums, entry-list builder, zip
    upload/download for content+skins, raw INI upload, results
    listing/download; a real content library to test against is next)
-4. **Results parser + championship engine** ← *here* (result JSON parsing
+4. **Results parser + championship engine** (result JSON parsing
    with classification + gaps, championship CRUD, points standings from
    counted Race results done; qualifying/practice points and drop-weeks
    deferred)
-5. Auth (cookie session + Bearer API tokens), RBAC, live stewarding
+5. Auth (cookie session + Bearer API tokens) ✔, RBAC ✔ ← *here*; live
+   stewarding (incident log, penalties) still to do
 6. Scheduler, multi-server, optional plugin chaining

@@ -19,6 +19,19 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class Token(SQLModel, table=True):
+    """Cookie sessions (login, expiring) and Bearer API tokens (never expire). Only the hash is stored."""
+
+    __tablename__ = "tokens"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    name: str = "session"
+    expires_at: datetime | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+
 class Server(SQLModel, table=True):
     __tablename__ = "servers"
 

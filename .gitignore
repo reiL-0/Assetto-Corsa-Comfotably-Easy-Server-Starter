@@ -1,23 +1,22 @@
-# python
-.venv/
-__pycache__/
-*.pyc
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.env
 
 # app data
+apps/python/OPRTelemetry/config.ini
+/app/static/
 /data/
 *.db
-*.db-wal
 *.db-shm
-
-# frontend
-node_modules/
-/app/static/
-
-# misc
+*.db-wal
 .DS_Store
+*.egg-info/
+.env
+# frontend
 *.log
+# misc
+node_modules/
+*.pyc
+__pycache__/
+.pytest_cache/
+# python
+.ruff_cache/
 .start.pid
+.venv/

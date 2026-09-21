@@ -84,5 +84,10 @@ async def stop(server_id: int) -> None:
         await inst.stop()
 
 
+def live() -> list[Instance]:
+    """Running instances with a connected ACSP plugin socket."""
+    return [i for i in _instances.values() if i.running and i.acsp]
+
+
 def get(server_id: int) -> Instance | None:
     return _instances.get(server_id)

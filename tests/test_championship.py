@@ -1,12 +1,13 @@
 import json
 from pathlib import Path
 
+from conftest import ADMIN
 from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, headers=ADMIN)
 
 
 def _write_race_result(server_id: int, filename: str, results: list[dict]) -> None:

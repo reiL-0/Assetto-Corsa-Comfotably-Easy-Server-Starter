@@ -2,13 +2,14 @@ import io
 import zipfile
 
 import pytest
+from conftest import ADMIN
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import content
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(app, headers=ADMIN)
 
 
 def _car_zip(name: str, brand: str = "Ferrari") -> bytes:

@@ -27,6 +27,7 @@ packages = ["app"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["clients"]  # runs inside AC's embedded Python 3.3: no f-strings/typing
 
 [tool.pytest.ini_options]
 addopts = "-q"

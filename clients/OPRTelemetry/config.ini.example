@@ -1,0 +1,19 @@
+[backend]
+; URL base del backend de Open Paddock Racing League.
+;   Desarrollo local:  http://localhost:8080
+;   Produccion:        https://<tu-tunel>.trycloudflare.com   (o el dominio real)
+url = http://localhost:8080
+
+; SteamID64 del piloto. Vacio = se detecta solo desde Steam (Windows).
+; Ponelo a mano si la deteccion falla.
+steam_id =
+
+[telemetry]
+; Cada cuantos milisegundos se manda un paquete (100-150 recomendado).
+send_interval_ms = 120
+
+; Timeout de cada request HTTP, en segundos.
+timeout_seconds = 2.0
+
+; 1 = escribe en el log de AC el resultado de cada envio .
+debug = 0

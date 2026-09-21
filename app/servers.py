@@ -8,19 +8,22 @@ import io
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app import acsp, supervisor
 from app.acsp import ACSPClient
+from app.auth import require
 from app.config import settings
 from app.db import SessionDep
 from app.models import Server
 from app.results import parse_result_file
 
 router = APIRouter(prefix="/servers", tags=["servers"])
+# Live moderation actions: stewards may use these; everything else on `router` is admin-write.
+steward = APIRouter(prefix="/servers", tags=["servers"], dependencies=[Depends(require("steward"))])
 
 Scalar = str | int | float | bool
 
@@ -298,7 +301,7 @@ def session_info(server_id: int, sess: SessionDep) -> dict:
 @router.get("/{server_id}/cars")
 def cars(server_id: int, sess: SessionDep) -> dict[int, dict]:
     _get(sess, server_id)
-    return _acsp(server_id).cars
+    return _acsp(server_id).snapshot()
 
 
 class ChatIn(BaseModel):
@@ -306,7 +309,7 @@ class ChatIn(BaseModel):
     car_id: int | None = None  # None -> broadcast to everyone
 
 
-@router.post("/{server_id}/chat")
+@steward.post("/{server_id}/chat")
 def send_chat(server_id: int, body: ChatIn, sess: SessionDep) -> dict:
     _get(sess, server_id)
     client = _acsp(server_id)
@@ -317,21 +320,21 @@ def send_chat(server_id: int, body: ChatIn, sess: SessionDep) -> dict:
     return {"sent": True}
 
 
-@router.post("/{server_id}/kick/{car_id}")
+@steward.post("/{server_id}/kick/{car_id}")
 def kick(server_id: int, car_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     _acsp(server_id).send(acsp.encode_kick_user(car_id))
     return {"sent": True}
 
 
-@router.post("/{server_id}/next_session")
+@steward.post("/{server_id}/next_session")
 def next_session(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     _acsp(server_id).send(acsp.encode_next_session())
     return {"sent": True}
 
 
-@router.post("/{server_id}/restart_session")
+@steward.post("/{server_id}/restart_session")
 def restart_session(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     _acsp(server_id).send(acsp.encode_restart_session())
@@ -342,7 +345,7 @@ class AdminCommandIn(BaseModel):
     command: str  # e.g. "ballast 3 50", "restrict 3 10" -- console admin commands
 
 
-@router.post("/{server_id}/admin")
+@steward.post("/{server_id}/admin")
 def admin_command(server_id: int, body: AdminCommandIn, sess: SessionDep) -> dict:
     _get(sess, server_id)
     _acsp(server_id).send(acsp.encode_admin_command(body.command))
@@ -357,13 +360,14 @@ async def live(websocket: WebSocket, server_id: int) -> None:
     if not inst or not inst.acsp:
         await websocket.close(code=4409, reason="server not running or ACSP not connected")
         return
-    sent = 0
+    sent = inst.acsp.n_events
     try:
         while True:
+            total = inst.acsp.n_events
             events = list(inst.acsp.events)
-            for event in events[sent:]:
+            for event in events[max(0, len(events) - (total - sent)):]:
                 await websocket.send_json(event)
-            sent = len(events)
+            sent = total
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         pass

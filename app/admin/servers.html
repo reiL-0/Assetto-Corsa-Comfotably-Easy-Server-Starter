@@ -164,11 +164,24 @@ tailwind.config = { darkMode: "class", theme: { extend: {
 
 </main>
 
+<dialog id="login" class="bg-surface-container text-on-surface rounded p-6 backdrop:bg-black/70">
+  <form id="login-form" class="flex flex-col gap-3">
+    <input name="username" placeholder="Usuario" autocomplete="username" required class="bg-surface-container-lowest p-2 rounded">
+    <input name="password" type="password" placeholder="Contraseña" autocomplete="current-password" required class="bg-surface-container-lowest p-2 rounded">
+    <button class="bg-primary-container text-on-primary-container p-2 rounded">Entrar</button>
+    <p id="login-err" class="text-error text-sm"></p>
+  </form>
+</dialog>
+
 <script>
 const API = '/api/v1';
 
 async function api(path, opts) {
   const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    const d = document.getElementById('login');
+    if (!d.open) d.showModal();
+  }
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.json()).detail || ''; } catch (_) { detail = await res.text().catch(() => ''); }
@@ -361,6 +374,17 @@ async function checkBackend() {
     el.innerHTML = '<span class="w-2 h-2 rounded-full bg-error inline-block"></span>Backend inaccesible';
   }
 }
+
+document.getElementById('login-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const res = await fetch(API + '/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.fromEntries(new FormData(e.target))),
+  });
+  if (res.ok) { document.getElementById('login').close(); loadServers(); }
+  else document.getElementById('login-err').textContent = 'Credenciales incorrectas';
+};
 
 checkBackend();
 loadServers();

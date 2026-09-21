@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 from collections import deque
+
+TELEMETRY_TTL = 2.0  # s a sample stays in the live map after the app stops sending
+TELEMETRY_MIN_INTERVAL = 0.05  # s; the app sends ~8 Hz
 
 # server -> plugin (events)
 NEW_SESSION = 50
@@ -292,7 +296,9 @@ class ACSPClient(asyncio.DatagramProtocol):
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
         self.events: deque[dict] = deque(maxlen=max_events)
+        self.n_events = 0  # total ever appended; the deque forgets old ones, /live needs a cursor
         self.cars: dict[int, dict] = {}
+        self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
         self.transport: asyncio.DatagramTransport | None = None
 
@@ -305,19 +311,41 @@ class ACSPClient(asyncio.DatagramProtocol):
         except (IndexError, struct.error):
             return
         self._apply(event)
+        self._push(event)
+
+    def _push(self, event: dict) -> None:
         self.events.append(event)
+        self.n_events += 1
 
     def _apply(self, event: dict) -> None:
         t = event["type"]
         if t in ("new_session", "session_info"):
-            self.session = event
-            self.cars.clear()
+            self.session = event  # drivers stay connected across sessions; keep their guid/name
         elif t == "new_connection":
             self.cars[event["car_id"]] = event
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
+
+    def add_telemetry(self, car_id: int, sample: dict) -> bool:
+        """Store an in-game-app sample and stream it. False if it came too soon (rate limit)."""
+        now = time.time()
+        prev = self.telemetry.get(car_id)
+        if prev and now - prev["ts"] < TELEMETRY_MIN_INTERVAL:
+            return False
+        sample = {**sample, "ts": now}
+        self.telemetry[car_id] = sample
+        self._push({"type": "telemetry", "car_id": car_id, **sample})
+        return True
+
+    def snapshot(self) -> dict[int, dict]:
+        """cars + their fresh app telemetry (under `telemetry`)."""
+        now = time.time()
+        return {
+            i: {**c, "telemetry": t} if (t := self.telemetry.get(i)) and now - t["ts"] < TELEMETRY_TTL else c
+            for i, c in self.cars.items()
+        }
 
     def send(self, data: bytes) -> None:
         if self.transport:
