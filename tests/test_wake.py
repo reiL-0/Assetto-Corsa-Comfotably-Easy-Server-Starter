@@ -61,9 +61,10 @@ def _plain_server(mode: str, **cfg):
 async def _http_get(port: int, path: str, agent: str = AC) -> tuple[int, str]:
     r, w = await asyncio.open_connection("127.0.0.1", port)
     w.write(f"GET {path} HTTP/1.1\r\nHost: x\r\nUser-Agent: {agent}\r\n\r\n".encode())
-    raw = await r.read(65536)
+    head = await r.readuntil(b"\r\n\r\n")        # read exactly what the headers announce, as a client of a keep-alive server does
+    length = int(next(l.split(b":")[1] for l in head.split(b"\r\n") if l.lower().startswith(b"content-length")))
+    body = await r.readexactly(length)
     w.close()
-    head, _, body = raw.partition(b"\r\n\r\n")
     return int(head.split()[1]), body.decode()
 
 
@@ -147,6 +148,16 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
         assert [(c["Model"], c["Skin"], c["DriverName"], c["IsConnected"], c["IsEntryList"]) for c in cars] == [
             ("bmw_m3", "red", "reiL", False, True), ("bmw_m3", "", "", False, False)]
         assert (await _http_get(port + 1, "/api/details")) == (200, "")
+        # the same shape as acServer's own answer: compact JSON in UTF-8, Date, keep-alive, many requests on one connection
+        r, wr = await asyncio.open_connection("127.0.0.1", port + 1)
+        for _ in range(2):
+            wr.write(b"GET /INFO HTTP/1.1\r\nHost: x\r\nUser-Agent: Assetto Corsa Launcher\r\n\r\n")
+            head = (await r.readuntil(b"\r\n\r\n")).decode()
+            n = int(next(l.split(":")[1] for l in head.split("\r\n") if l.lower().startswith("content-length")))
+            raw = await r.readexactly(n)
+            assert "Date: " in head and "Connection" not in head and head.startswith("HTTP/1.1 200 OK")
+            assert raw.decode().startswith('{"ip":"","port":') and "Prácticas" in raw.decode() and ", " not in raw.decode()
+        wr.close()
         assert woken == [], "looking at the lobby wakes nothing"
         # the real answer of the running server, once saved, is what the lobby shows (with nobody on)
         wake._instance_dir(sid).mkdir(parents=True, exist_ok=True)

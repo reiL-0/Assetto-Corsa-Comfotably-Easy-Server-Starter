@@ -24,6 +24,7 @@ import logging
 import socket
 import struct
 import time
+from email.utils import formatdate
 from pathlib import Path
 
 from sqlmodel import Session, select
@@ -38,6 +39,7 @@ log = logging.getLogger("acmanager.wake")
 SYNC_EVERY = 5.0  # seconds between looks at which servers should be listened for
 COOLDOWN = 30.0
 START_HOLD = 20.0
+HTTP_IDLE = 15.0     # seconds an HTTP connection may sit without a request
 AC_SEEN_TTL = 15 * 60   # how long an address that asked the lobby as the game does may wake the server
 AC_AGENT = "assetto corsa"
 PING = 0xC8
@@ -88,33 +90,49 @@ def _abort(writer: asyncio.StreamWriter) -> None:
 
 
 def _http_handler(server_id: int, ac_seen):
+    """HTTP the way acServer does it (Go's server): HTTP/1.1 keep-alive, a Date header, compact UTF-8 JSON, 200 with an empty body
+    for anything else. The client closes the connection; the session ends after IDLE seconds without a request. (Closing with a
+    reset while the client still had the body to read made Content Manager lose it: «not enough information».)"""
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        peer = (writer.get_extra_info("peername") or ("?",))[0]
         try:
-            line = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
-            path = line.split(" ")[1] if line.count(" ") >= 2 else ""
-            agent = ""
-            for _ in range(40):   # the headers, up to the blank line
-                h = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
-                if h in ("\r\n", "\n", ""):
+            while True:
+                line = (await asyncio.wait_for(reader.readline(), HTTP_IDLE)).decode(errors="replace")
+                if not line.strip():
                     break
-                if h.lower().startswith("user-agent:"):
-                    agent = h.split(":", 1)[1].strip()
-            peer = (writer.get_extra_info("peername") or ("?",))[0]
-            log.info("lobby query server=%s %s from %s agent=%r", server_id, path, peer, agent)
-            if AC_AGENT in agent.lower() and path.startswith(("/INFO", "/JSON")):
-                ac_seen(peer)
-            with Session(engine) as sess:
-                s = sess.get(Server, server_id)
-                body = json.dumps(facade_info(s)) if path.startswith("/INFO") else json.dumps(facade_cars(s)) if path.startswith("/JSON") else ""
-            data = body.encode()
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: %d\r\n\r\n" % len(data) + data)
-            await writer.drain()
-            await asyncio.wait_for(reader.read(), 2)   # let the client close first (no TIME_WAIT on the port acServer will bind)
+                path = line.split(" ")[1] if line.count(" ") >= 2 else ""
+                agent, close = "", False
+                for _ in range(40):   # the headers, up to the blank line
+                    h = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
+                    if h in ("\r\n", "\n", ""):
+                        break
+                    name, _, value = h.partition(":")
+                    if name.lower() == "user-agent":
+                        agent = value.strip()
+                    elif name.lower() == "connection" and "close" in value.lower():
+                        close = True
+                log.info("lobby query server=%s %s from %s agent=%r", server_id, path, peer, agent)
+                if AC_AGENT in agent.lower() and path.startswith(("/INFO", "/JSON")):
+                    ac_seen(peer)
+                with Session(engine) as sess:
+                    s = sess.get(Server, server_id)
+                    body = _dump(facade_info(s)) if path.startswith("/INFO") else _dump(facade_cars(s)) if path.startswith("/JSON") else ""
+                data = body.encode()
+                date = formatdate(usegmt=True)
+                writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: text/plain; charset=utf-8\r\n".encode()
+                             + (b"Connection: close\r\n" if close else b"") + b"\r\n" + data)
+                await writer.drain()
+                if close:
+                    break
         except (asyncio.TimeoutError, OSError, IndexError, AttributeError):
             pass
         finally:
-            _abort(writer)
+            writer.close()
     return handle
+
+
+def _dump(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))   # as Go writes it
 
 
 class _Udp(asyncio.DatagramProtocol):
