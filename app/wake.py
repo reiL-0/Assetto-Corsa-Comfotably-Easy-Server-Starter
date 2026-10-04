@@ -84,6 +84,15 @@ def _http_handler(server_id: int):
         try:
             line = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
             path = line.split(" ")[1] if line.count(" ") >= 2 else ""
+            agent = ""
+            for _ in range(40):   # the headers, up to the blank line
+                h = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
+                if h in ("\r\n", "\n", ""):
+                    break
+                if h.lower().startswith("user-agent:"):
+                    agent = h.split(":", 1)[1].strip()
+            peer = (writer.get_extra_info("peername") or ("?",))[0]
+            log.info("lobby query server=%s %s from %s agent=%r", server_id, path, peer, agent)
             with Session(engine) as sess:
                 s = sess.get(Server, server_id)
                 body = json.dumps(facade_info(s)) if path.startswith("/INFO") else json.dumps(facade_cars(s)) if path.startswith("/JSON") else ""
@@ -103,6 +112,7 @@ class _Udp(asyncio.DatagramProtocol):
         self.hit = hit
 
     def datagram_received(self, data: bytes, addr) -> None:
+        log.info("udp hit from %s: %d bytes %s", addr[0], len(data), data[:32].hex())
         self.hit()
 
 
@@ -122,6 +132,11 @@ class Waker:
         hit = lambda: loop.create_task(self.trigger(server_id))  # noqa: E731
 
         async def on_tcp(reader, writer) -> None:
+            try:
+                first = await asyncio.wait_for(reader.read(32), 0.3)
+            except (asyncio.TimeoutError, OSError):
+                first = b""
+            log.info("tcp hit from %s: %s", (writer.get_extra_info("peername") or ("?",))[0], first.hex() or "(nothing sent)")
             _abort(writer)
             hit()
 
