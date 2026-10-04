@@ -7,6 +7,7 @@ import configparser
 import io
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -42,6 +43,7 @@ class ServerOut(BaseModel):
     ports: dict[str, int]
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
+    wake: str = "window"
 
 
 def _ports(base: int) -> dict[str, int]:
@@ -58,6 +60,7 @@ def _out(s: Server) -> ServerOut:
         ports=_ports(s.base_port),
         config=s.config,
         entry_list=s.entry_list,
+        wake=s.wake,
     )
 
 
@@ -440,10 +443,26 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
             _write_instance(s),
             acsp_remote_port=p["plugin"],
             acsp_local_port=p["plugin_local"],
+            http_port=p["http"],
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"running": inst.running, "pid": inst.pid}
+
+
+class WakeIn(BaseModel):
+    mode: Literal["off", "window", "always"]
+
+
+@router.put("/{server_id}/wake", response_model=ServerOut)
+def set_wake(server_id: int, body: WakeIn, sess: SessionDep) -> ServerOut:
+    """When a player trying to join a stopped server starts it: never / inside an event's window / always. See app/wake.py."""
+    s = _get(sess, server_id)
+    s.wake = body.mode
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
 
 
 async def adopt_running(sess: Session) -> int:
@@ -453,7 +472,7 @@ async def adopt_running(sess: Session) -> int:
         p = _ports(s.base_port)
         inst = await supervisor.adopt(
             s.id, Path(settings.data_dir) / "instances" / str(s.id),
-            acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list),
+            acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http"],
         )
         n += inst is not None
     return n

@@ -16,6 +16,7 @@ import os
 import shlex
 import signal
 import time
+import urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -27,6 +28,12 @@ IDLE_POLL = 15.0  # seconds between idle checks
 SAMPLE_EVERY = 60.0  # how often the number of players on track is recorded
 WATCH_EVERY = 0.25  # how often the process (and the log file) is looked at
 STOP_GRACE = 10.0  # SIGTERM -> SIGKILL
+INFO_EVERY = 60.0  # how often the server's own /INFO answer is copied to info.json (what app/wake.py shows while it is stopped)
+
+
+def _fetch_info(http_port: int) -> str:
+    with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/INFO", timeout=2) as r:
+        return r.read().decode()
 
 
 def _alive(pid: int) -> bool:
@@ -50,7 +57,7 @@ def _is_our_acserver(pid: int, cwd: Path) -> bool:
 
 class Instance:
     def __init__(self, server_id: int, cwd: Path, *, proc: asyncio.subprocess.Process | None = None, pid: int | None = None,
-                 started_at: float | None = None, log_from: int = 0) -> None:
+                 started_at: float | None = None, log_from: int = 0, http_port: int | None = None) -> None:
         self.server_id = server_id
         self.cwd = cwd
         self.proc = proc  # only for a process this manager spawned; an adopted one is known by its pid alone
@@ -59,11 +66,28 @@ class Instance:
         self.log: deque[str] = deque(maxlen=settings.log_lines)
         self.acsp: acsp.ACSPClient | None = None
         self.exit_code: int | None = None
+        self.http_port = http_port
         self._stopping = False
         self._log_pos = log_from
         self._reader = asyncio.create_task(self._watch())
         self._idle = asyncio.create_task(self._idle_watch()) if settings.idle_stop_seconds else None
         self._sampler = asyncio.create_task(self._sample_online())
+        self._info = asyncio.create_task(self._info_loop()) if http_port else None
+
+    async def _snapshot_info(self) -> None:
+        """Keep the server's own /INFO answer on disk: while it is stopped the manager answers players' lobby queries with it."""
+        try:
+            raw = await asyncio.to_thread(_fetch_info, self.http_port)
+            json.loads(raw)
+            (self.cwd / "info.json").write_text(raw)
+        except (OSError, ValueError):
+            pass
+
+    async def _info_loop(self) -> None:
+        await asyncio.sleep(10)   # acServer takes a few seconds to open its HTTP port
+        while self.running:
+            await self._snapshot_info()
+            await asyncio.sleep(INFO_EVERY)
 
     @property
     def log_path(self) -> Path:
@@ -131,6 +155,8 @@ class Instance:
     async def stop(self, timeout: float = STOP_GRACE, reason: str = "manual") -> None:
         if self.running:
             self._stopping = True
+            if self.http_port:
+                await self._snapshot_info()
             metrics.log(self.server_id, "server_stop", name=reason, value=self.uptime)
             os.kill(self.pid, signal.SIGTERM)
             deadline = time.time() + timeout
@@ -143,7 +169,7 @@ class Instance:
         self.pid_path.unlink(missing_ok=True)
         self._reader.cancel()
         self._tail()
-        for task in (self._idle, self._sampler):
+        for task in (self._idle, self._sampler, self._info):
             if task and task is not asyncio.current_task():
                 task.cancel()
         if self.acsp:
@@ -161,6 +187,7 @@ async def start(
     acsp_local_port: int | None = None,
     acsp_remote_port: int | None = None,
     acsp_host: str = "127.0.0.1",
+    http_port: int | None = None,
 ) -> Instance:
     current = _instances.get(server_id)
     if current and current.running:
@@ -179,7 +206,7 @@ async def start(
             stderr=out,
             start_new_session=True,  # its own session: a signal or exit of the manager does not reach it
         )
-    inst = Instance(server_id, cwd, proc=proc)
+    inst = Instance(server_id, cwd, proc=proc, http_port=http_port)
     (cwd / "server.pid").write_text(json.dumps({"pid": proc.pid, "started_at": inst.started_at}))
     if acsp_local_port and acsp_remote_port:
         inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host)
@@ -196,6 +223,7 @@ async def adopt(
     acsp_remote_port: int | None = None,
     car_slots: int = 0,
     acsp_host: str = "127.0.0.1",
+    http_port: int | None = None,
 ) -> Instance | None:
     """Take back an acServer left running by a previous manager process. None when there is nothing to take back."""
     try:
@@ -207,7 +235,7 @@ async def adopt(
         (cwd / "server.pid").unlink(missing_ok=True)  # stale: the process is gone (or the pid belongs to something else now)
         return None
     log_size = (cwd / "server.log").stat().st_size if (cwd / "server.log").exists() else 0
-    inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384))
+    inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384), http_port=http_port)
     if acsp_local_port and acsp_remote_port:
         inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host, car_slots=car_slots)
     _instances[server_id] = inst

@@ -41,6 +41,7 @@ class Server(SQLModel, table=True):
     # server_cfg.ini as {SECTION: {KEY: value}}; entry_list.ini as [{CAR_0 fields}, ...]
     config: dict = Field(default_factory=dict, sa_type=JSON)
     entry_list: list = Field(default_factory=list, sa_type=JSON)
+    wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

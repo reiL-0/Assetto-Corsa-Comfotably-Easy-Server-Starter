@@ -195,16 +195,20 @@ With `duration_min` the schedule is `running` until `start_at + duration`: 5 min
 the server is stopped (`server_stop` with reason `event_end`, Discord notice) and the schedule is `done`. Without it the schedule is
 `done` once started and only the idle stop (`ACM_IDLE_STOP_SECONDS`) ends the session.
 
-### Wake on connect (`app/wake.py`)
+### Stopped but open: wake on connect (`app/wake.py`)
 
-A stopped server costs nothing (an empty running acServer is ~5 MB and ~0 % CPU, but the point is not to leave them on). Inside an
-event's **window** (from 1 h before `start_at` until its end, or 3 h after the start when there is no duration) a stopped server is
-woken by a player trying to join. While the window is open and the server is stopped, the manager listens on the server's game port
-(UDP and TCP, same number); the first datagram or connection closes the listeners, calls `schedule.wake` and leaves the port to
-acServer. If the event is not on the server yet it is loaded as a start would (`loaded = true`, so the real start time does not restart
-it and kick the early arrivals); if it is (a server stopped by idle or a crash mid-event) it is simply started. The first attempt gets
-no answer; the player retries a few seconds later. Outside a window nothing listens, so a port scan cannot start anything; inside one:
-at most 3 wakes an hour and 30 s between two. Each wake logs a `wake` activity row.
+A stopped server can still look open and empty in the lobby, and a player trying to join starts it. Per server, `PUT /servers/{id}/wake {mode}`
+(`Server.wake`, shown in Control AC): `off`; `window` (default: only inside an event's window, from 1 h before `start_at` until its end, or 3 h
+after the start when there is no duration); `always` (any time, the server starts as it was left). While a stopped server is allowed to wake, the
+manager holds its ports:
+- **HTTP port (game port + 1):** answers like acServer with nobody on: `/INFO` from `data/instances/<id>/info.json` (a copy of the real answer the supervisor
+  saves every minute and just before a stop; built from the config if it never ran) with `clients` 0 and the first session in full; `/JSON|<guid>` with the entry
+  list's cars and skins; anything else 200 empty. Looking at the lobby wakes nothing.
+- **Game port (UDP and TCP, same number):** the first datagram or connection (the TCP one is reset, not closed, so no TIME_WAIT keeps acServer from binding)
+  closes all the listeners, calls `schedule.wake` and leaves the ports to acServer. The first attempt gets no answer; the player retries a few seconds later.
+  With an event window the event is loaded as a start would (`loaded = true`, so the real start does not restart it and kick the early arrivals); if it is already
+  loaded (idle stop or crash mid-event) or the mode is `always`, the server is simply started.
+Outside the allowed times nothing listens, so a port scan cannot start anything; at most 6 wakes an hour and 30 s between two. Each wake logs a `wake` activity row.
 
 ### Results + championship
 

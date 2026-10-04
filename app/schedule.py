@@ -11,7 +11,8 @@ told; at the end the server is stopped as soon as nobody is on it (at most END_G
 started and only the idle stop ends the session.
 
 The window of an event (`open_window`) is from EARLY minutes before the start until its end (3 h after the start when no
-duration is set). Inside it a stopped server is woken by `wake` when a player tries to connect (app/wake.py).
+duration is set). Inside it a stopped server is woken by `wake` when a player tries to connect (app/wake.py); a server whose
+`wake` mode is `always` is also started, as it was left, with no event.
 """
 
 from __future__ import annotations
@@ -143,6 +144,14 @@ async def wake(server_id: int, now: float | None = None) -> bool:
     with Session(engine) as sess:
         sc = open_window(sess, server_id, now)
         ev, srv = (sess.get(Event, sc.event_id), sess.get(Server, sc.server_id)) if sc else (None, None)
+        if sess.get(Server, server_id) and sess.get(Server, server_id).wake == "always" and not sc:   # no event: start it as it was left
+            try:
+                await start_server(server_id, sess)
+            except HTTPException as e:
+                log.warning("wake of server %s failed: %s", server_id, e.detail)
+                return False
+            metrics.log(server_id, "wake", name="always")
+            return True
         if not sc or not ev or not srv:
             return False
         try:
