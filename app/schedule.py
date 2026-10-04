@@ -7,7 +7,7 @@ that is more than LATE seconds overdue (the manager was down) is marked `missed`
 Starting restarts the server: whoever is on it is disconnected.
 
 With a `duration_min` the schedule stays `running` until `start_at + duration`: 5 minutes before, the in-game chat is
-told; at the end the server is stopped (a Discord notice goes out) and the schedule is `done`. Without a duration it is `done` as soon as it has
+told; at the end the server is stopped as soon as nobody is on it (at most END_GRACE later, whoever is still there) (a Discord notice goes out) and the schedule is `done`. Without a duration it is `done` as soon as it has
 started and only the idle stop ends the session.
 
 The window of an event (`open_window`) is from EARLY minutes before the start until its end (3 h after the start when no
@@ -36,6 +36,7 @@ TICK = 20
 LATE = 600
 EARLY = 60 * 60  # seconds before the start from which a connection attempt wakes the server
 END_WARNING = 5 * 60
+END_GRACE = 60 * 60  # at the end of the event the server waits for the people still on it, at most this long
 NO_DURATION_WINDOW = 3 * 60 * 60
 
 
@@ -204,6 +205,8 @@ async def _tick_running(sc: Schedule, ev: Event, srv: Server, now: float) -> Non
             inst.acsp.send(acsp.encode_broadcast_chat("El evento termina en 5 minutos"))
     if now >= end:
         if inst and inst.running:
+            if inst.acsp and inst.acsp.cars and now < end + END_GRACE:   # a race that overran: let it finish, stop when the last one leaves
+                return
             await inst.stop(reason="event_end")
         sc.state = "done"
         discord.announce(f"🔚 **{ev.title}** terminó: servidor {srv.name} detenido")

@@ -220,3 +220,19 @@ def test_saved_event_keeps_the_entry_list():
     sid = _server()
     r = api.post(f"{V}/events/{eid}/run", json={"server_id": sid, "restart": False})
     assert r.status_code == 200 and r.json()["entry_list"][0]["DRIVERNAME"] == "Ana"
+
+
+def test_a_timed_race_is_written_as_time_not_laps_and_both_are_refused():
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "practice_min": 0, "qualify_min": 0, "race_laps": 0, "race_min": 90, "restart": False})
+    assert r.status_code == 200, r.text
+    race = r.json()["config"]["RACE"]
+    assert race["LAPS"] == 0 and race["TIME"] == 90
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    assert "[RACE]" in ini and "TIME=90" in ini and "LAPS=0" in ini
+    both = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_laps": 5, "race_min": 90, "restart": False})
+    assert both.status_code == 422
+    laps = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_laps": 5, "race_min": 0, "restart": False}).json()
+    assert laps["config"]["RACE"]["LAPS"] == 5 and "TIME" not in laps["config"]["RACE"]
+

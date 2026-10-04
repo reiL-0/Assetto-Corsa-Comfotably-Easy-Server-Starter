@@ -308,6 +308,7 @@ class SessionIn(BaseModel):
     practice_min: int | None = Field(default=None, ge=0, le=720)
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
+    race_min: int | None = Field(default=None, ge=0, le=1440)  # a timed race (endurance) instead of laps; not both
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
@@ -317,6 +318,8 @@ class SessionIn(BaseModel):
     def _has_cars(self) -> SessionIn:
         if not self.cars and not self.entries:
             raise ValueError("choose cars or fill the entry list")
+        if self.race_laps and self.race_min:
+            raise ValueError("a race is by laps or by time, not both")
         return self
 
 
@@ -368,7 +371,7 @@ def _apply_options(cfg: dict, srv: dict, o: OptionsIn) -> None:
 
 async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> AppliedOut:
     server_id = s.id
-    if not (body.practice_min or body.qualify_min or body.race_laps):
+    if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
         raise HTTPException(400, "enable at least one session (practice, qualify or race)")
     cars = list(dict.fromkeys(e.model for e in body.entries)) if body.entries else body.cars
     skins = _check_content(body, cars)
@@ -396,6 +399,8 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
         cfg["QUALIFY"] = {"NAME": "Qualify", "TIME": body.qualify_min, "IS_OPEN": 1}
     if body.race_laps:
         cfg["RACE"] = {"NAME": "Race", "LAPS": body.race_laps, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
+    elif body.race_min:   # timed race: acServer ends it when the time is up (LAPS=0)
+        cfg["RACE"] = {"NAME": "Race", "LAPS": 0, "TIME": body.race_min, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
     _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)

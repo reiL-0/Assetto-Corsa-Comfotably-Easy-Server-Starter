@@ -86,6 +86,7 @@ def test_failed_start_is_reported(monkeypatch):
 class _FakeAcsp:
     def __init__(self):
         self.sent = []
+        self.cars = {}
 
     def send(self, data):
         self.sent.append(data)
@@ -169,4 +170,24 @@ def test_silent_past_marks_the_reminders_already_due_as_sent_and_info_travels_wi
     assert r.json()["sent"] == [1440] and r.json()["info"] == "📍 1.2.3.4:9600"      # the day-before notice is covered; 1 h and 10 min are still to come
     said = [m for m in _tick(r.json()["start_at"] - 3000, monkeypatch, []) if "📍" in m]   # (other tests' schedules share the database)
     assert len(said) == 1 and said[0].endswith("\n📍 1.2.3.4:9600") and _row(r.json()["id"]).sent == [1440, 60]
+
+
+def test_the_end_of_the_event_waits_for_whoever_is_still_racing(monkeypatch):
+    sid, sc = _setup(100, reminders=(), duration=30)
+    t0, inst = sc["start_at"], _FakeInstance()
+    inst.acsp.cars = {0: {"car_id": 0}}
+    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: inst)
+    _tick(t0 + 1, monkeypatch, [])
+    _tick(t0 + 1800 + 5, monkeypatch, [])                         # the event is over but a car is still on track
+    assert inst.running and _row(sc["id"]).state == "running"
+    inst.acsp.cars = {}                                           # the last one leaves
+    _tick(t0 + 1800 + 60, monkeypatch, [])
+    assert not inst.running and inst.stopped_for == "event_end" and _row(sc["id"]).state == "done"
+    sid, sc = _setup(100, reminders=(), duration=30)              # ...and it never waits forever
+    inst2 = _FakeInstance()
+    inst2.acsp.cars = {0: {"car_id": 0}}
+    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: inst2)
+    _tick(sc["start_at"] + 1, monkeypatch, [])
+    _tick(sc["start_at"] + 1800 + schedule.END_GRACE + 1, monkeypatch, [])
+    assert not inst2.running
 
