@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     port_range_start: int = 9600
     port_range_end: int = 9700
     log_lines: int = 500  # per-instance stdout ring buffer
+    # Stop an instance after this many seconds with no connected cars (0 = never).
+    # A stopped server is started again via POST /servers/{id}/start.
+    idle_stop_seconds: int = 0
 
     def resolved_db_path(self) -> str:
         return self.db_path or f"{self.data_dir}/acmanager.db"

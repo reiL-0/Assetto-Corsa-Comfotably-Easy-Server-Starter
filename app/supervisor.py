@@ -11,6 +11,8 @@ from pathlib import Path
 from app import acsp
 from app.config import settings
 
+IDLE_POLL = 15.0  # seconds between idle checks
+
 
 class Instance:
     def __init__(self, server_id: int, proc: asyncio.subprocess.Process) -> None:
@@ -20,11 +22,23 @@ class Instance:
         self.log: deque[str] = deque(maxlen=settings.log_lines)
         self.acsp: acsp.ACSPClient | None = None
         self._reader = asyncio.create_task(self._drain())
+        self._idle = asyncio.create_task(self._idle_watch()) if settings.idle_stop_seconds else None
 
     async def _drain(self) -> None:
         assert self.proc.stdout is not None
         async for raw in self.proc.stdout:
             self.log.append(raw.decode(errors="replace").rstrip("\n"))
+
+    async def _idle_watch(self) -> None:
+        """Stop the process once ACSP has shown no connected cars for idle_stop_seconds."""
+        last_active = time.time()
+        while self.running:
+            await asyncio.sleep(IDLE_POLL)
+            # no ACSP socket = can't tell, so never counts as idle
+            if not self.acsp or self.acsp.cars:
+                last_active = time.time()
+            elif time.time() - last_active > settings.idle_stop_seconds:
+                await self.stop()
 
     @property
     def running(self) -> bool:
@@ -43,6 +57,8 @@ class Instance:
                 self.proc.kill()
                 await self.proc.wait()
         self._reader.cancel()
+        if self._idle and self._idle is not asyncio.current_task():
+            self._idle.cancel()
         if self.acsp:
             self.acsp.close()
 

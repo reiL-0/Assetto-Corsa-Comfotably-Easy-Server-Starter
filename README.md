@@ -264,9 +264,10 @@ make lint        # ruff
 | `ACM_DB_PATH`      | `<data_dir>/acmanager.db`  | SQLite file path |
 | `ACM_SERVE_UI`     | `true`                     | serve the bundled UI; `false` = pure API |
 | `ACM_CORS_ORIGINS` | `[]`                       | JSON list of allowed cross-origin sites |
-| `ACM_ACSERVER_CMD` | `""`                       | argv for the AC dedicated server; empty = start disabled |
+| `ACM_ACSERVER_CMD` | `""`                       | argv for the AC dedicated server; empty = start disabled. Its directory must hold `content/` and `system/` (symlinked into each instance) |
 | `ACM_PORT_RANGE_START` / `ACM_PORT_RANGE_END` | `9600` / `9700` | pool for per-server port blocks (4 apart) |
 | `ACM_LOG_LINES`    | `500`                      | per-instance stdout ring buffer size |
+| `ACM_IDLE_STOP_SECONDS` | `0`                   | stop an instance after N s with no connected cars (0 = never); restart via `POST /servers/{id}/start` |
 
 ## Roadmap
 
