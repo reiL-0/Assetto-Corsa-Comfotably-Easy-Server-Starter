@@ -74,9 +74,9 @@ def facade_info(s: Server) -> dict:
 
 
 def facade_cars(s: Server) -> dict:
-    """Body of /JSON|<guid>: the entry list's cars and skins, nobody connected."""
+    """Body of /JSON|<guid>: the entry list's cars and skins, nobody connected (checked byte for byte against the running acServer's)."""
     return {"Cars": [{"Model": e.get("MODEL", ""), "Skin": e.get("SKIN", ""), "DriverName": e.get("DRIVERNAME", ""), "DriverTeam": e.get("TEAM", ""),
-                      "DriverNation": "", "IsConnected": False, "IsRequestedGUID": False, "IsEntryList": bool(e.get("DRIVERNAME"))}
+                      "DriverNation": "", "IsConnected": False, "IsRequestedGUID": False, "IsEntryList": True}   # acServer says True for every slot of the entry list, named or not
                      for e in s.entry_list]}
 
 

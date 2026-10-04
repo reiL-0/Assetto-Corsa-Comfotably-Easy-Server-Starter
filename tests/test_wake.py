@@ -146,7 +146,7 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
         assert info["timeleft"] == 15 * 60 and info["port"] == port and info["cport"] == port + 1
         cars = json.loads((await _http_get(port + 1, "/JSON|76561190000000001"))[1])["Cars"]
         assert [(c["Model"], c["Skin"], c["DriverName"], c["IsConnected"], c["IsEntryList"]) for c in cars] == [
-            ("bmw_m3", "red", "reiL", False, True), ("bmw_m3", "", "", False, False)]
+            ("bmw_m3", "red", "reiL", False, True), ("bmw_m3", "", "", False, True)]   # as acServer: every slot is «entry list»
         assert (await _http_get(port + 1, "/api/details")) == (200, "")
         # the same shape as acServer's own answer: compact JSON in UTF-8, Date, keep-alive, many requests on one connection
         r, wr = await asyncio.open_connection("127.0.0.1", port + 1)
