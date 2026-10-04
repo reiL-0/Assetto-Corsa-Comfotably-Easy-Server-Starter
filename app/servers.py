@@ -20,7 +20,7 @@ from app.db import SessionDep
 from app.live import acsp
 from app.live.acsp import ACSPClient
 from app.models import Server
-from app.results import parse_result_file
+from app.results import apply_penalties, parse_result_file, penalties_for
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 # Live moderation actions: stewards may use these; everything else on `router` is admin-write.
@@ -487,12 +487,14 @@ def download_result(server_id: int, filename: str, sess: SessionDep) -> FileResp
 
 
 @router.get("/{server_id}/results/{filename}/parsed")
-def parsed_result(server_id: int, filename: str, sess: SessionDep) -> dict:
+def parsed_result(server_id: int, filename: str, sess: SessionDep, raw: bool = False) -> dict:
+    """The classification with the stewards' penalties applied (`raw=true`: exactly what acServer wrote)."""
     _get(sess, server_id)
     p = result_path(server_id, filename)
     if not p.is_file():
         raise HTTPException(404, "result not found")
-    return parse_result_file(p)
+    parsed = parse_result_file(p)
+    return parsed if raw else apply_penalties(parsed, penalties_for(sess, server_id, filename))
 
 
 # --- ACSP: live timing, chat, live map, admin actions ----------------------

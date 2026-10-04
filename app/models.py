@@ -58,6 +58,23 @@ class Event(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class Penalty(SQLModel, table=True):
+    """A steward's decision on one driver in one result file. The result file itself is never edited:
+    penalties are applied when it is read (app.results.apply_penalties)."""
+
+    __tablename__ = "penalties"
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    filename: str = Field(index=True)  # result JSON under data/instances/<server_id>/results/
+    driver_guid: str
+    kind: str  # time | position | dsq | grid | points
+    value: int = 0  # time: ms added; position / grid: places lost; points: championship points taken; dsq: unused
+    reason: str
+    created_by: str = ""
+    created_at: datetime = Field(default_factory=_now)
+
+
 DEFAULT_POINTS_SYSTEM = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 
 

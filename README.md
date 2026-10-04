@@ -264,6 +264,8 @@ All under `/api/v1` (steward reads, admin writes; events carry passwords).
 | `GET/POST /events`, `GET/PUT/DELETE /events/{id}` | Saved events (presets): a `SessionIn` under a title and notes |
 | `POST /events/{id}/duplicate` | Copy |
 | `POST /events/{id}/run {server_id, restart}` | Apply the event to a server, re-checking the content installed *now* |
+| `GET /servers/{id}/results/{file}/parsed` | Classification with the stewards' penalties applied (`original_position`, `time_penalty_ms`, `penalties`, `disqualified`) and `grid` (driver order for the next race); `?raw=true` is exactly what acServer wrote |
+| `GET/POST /servers/{id}/results/{file}/penalties`, `DELETE .../{penalty_id}` | Stewards' decisions (steward role, not just admin). `kind`: `time` (value = seconds added to the race time), `position` (places lost), `dsq`, `grid` (places lost on the next grid only), `points` (championship points taken); a `reason` is required; the driver must be in that result. The result file is never edited |
 | `GET /content/tracks`, `GET /content/cars` | Installed content, with `usable` (acServer can load it) and, for tracks, `base` + layouts |
 | `POST /content/uploads {kind}` → `PUT /content/uploads/{id}?offset=N` (parts) → `POST .../complete` | Archive in parts under the proxy's request cap, resumable by offset |
 | `POST /content/uploads/from-link {kind, url}` | The server downloads a MediaFire / Google Drive / Dropbox link (known hosts only) |
@@ -281,6 +283,10 @@ out, legal tyres, max ballast, start rule, contacts per km, race-over / results-
 and duration, ban mode, client send rate, a list of `weather` blocks (graphics name, ambient, road *above* ambient, wind) and the
 `dynamic_track` grip section. Names are the INI keys in lower case. A field left out keeps what the server has now; `weather` replaces
 all `[WEATHER_n]` blocks when sent. Every range is validated (422 otherwise).
+
+Championship standings use the penalised classification: a disqualified driver scores nothing, `points` penalties are subtracted
+(shown as `penalty_points`), and a time penalty can change who gets the points. With time penalties the order is laps first, then
+total time (a driver who did not finish with `TotalTime` 0 would sort first among equals; review those by hand).
 
 A weekend (practice → qualify → race, looping) already runs natively in one acServer session list; `reversed_grid`
 maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs uses the entry order (see above).

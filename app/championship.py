@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from app.db import SessionDep
 from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipEvent
-from app.results import parse_result_file
+from app.results import apply_penalties, parse_result_file, penalties_for
 from app.servers import result_path
 
 router = APIRouter(prefix="/championships", tags=["championships"])
@@ -101,20 +101,22 @@ def standings(championship_id: int, sess: SessionDep) -> list[dict]:
         p = result_path(e.server_id, e.filename)
         if not p.is_file():
             continue
-        parsed = parse_result_file(p)
+        parsed = apply_penalties(parse_result_file(p), penalties_for(sess, e.server_id, e.filename))
         if parsed["type"] != "Race":
             continue  # ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
         for entry in parsed["classification"]:
             guid = entry["driver_guid"]
             if not guid:
                 continue
-            points = c.points_system[entry["position"] - 1] if entry["position"] <= len(c.points_system) else 0
+            pos = entry["position"]  # after penalties; None = disqualified, scores nothing
+            points = c.points_system[pos - 1] if pos and pos <= len(c.points_system) else 0
             row = totals.setdefault(
-                guid, {"driver_guid": guid, "driver_name": entry["driver_name"], "points": 0, "wins": 0}
+                guid, {"driver_guid": guid, "driver_name": entry["driver_name"], "points": 0, "wins": 0, "penalty_points": 0}
             )
             row["driver_name"] = entry["driver_name"]
-            row["points"] += points
-            row["wins"] += entry["position"] == 1
+            row["points"] += points - entry["points_penalty"]
+            row["penalty_points"] += entry["points_penalty"]
+            row["wins"] += pos == 1
 
     ranked = sorted(totals.values(), key=lambda r: (-r["points"], -r["wins"]))
     for i, row in enumerate(ranked):
