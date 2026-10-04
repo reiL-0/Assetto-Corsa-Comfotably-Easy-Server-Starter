@@ -291,9 +291,10 @@ def encode_get_session_info(index: int = -1) -> bytes:
     return _cmd(GET_SESSION_INFO, struct.pack("<h", index))
 
 
-def encode_set_session_info(index: int, name: str, session_type: int, laps: int, time_s: int, wait_s: int) -> bytes:
-    """Redefine session `index`: name, type (1 practice, 2 qualify, 3 race), laps, length and pre-race wait, both in seconds."""
-    return _cmd(SET_SESSION_INFO, bytes([index]), _write_string(name), bytes([session_type]), struct.pack("<3I", laps, time_s, wait_s))
+def encode_set_session_info(index: int, name: str, session_type: int, laps: int, time_min: int, wait_s: int) -> bytes:
+    """Redefine session `index`: name, type (1 practice, 2 qualify, 3 race), laps, length in MINUTES (checked against a running server: the time left
+    of the session being played is this length minus what has elapsed) and the pre-race wait in seconds."""
+    return _cmd(SET_SESSION_INFO, bytes([index]), _write_string(name), bytes([session_type]), struct.pack("<3I", laps, time_min, wait_s))
 
 
 def encode_get_car_info(car_id: int) -> bytes:
@@ -313,6 +314,7 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
+        self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
         self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
         self.events: deque[dict] = deque(maxlen=max_events)
         self.n_events = 0  # total ever appended; the deque forgets old ones, /live needs a cursor
@@ -344,6 +346,11 @@ class ACSPClient(asyncio.DatagramProtocol):
         self._record(event)
         if t in ("new_session", "session_info"):
             self.session = event  # drivers stay connected across sessions; keep their guid/name
+            from app import timeline   # (late: timeline needs this module's encoders)
+            timeline.on_session_event(self.server_id, event)
+            if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
+                self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
+                self.restore_when_session_changes = None
         elif t == "new_connection":
             self.cars[event["car_id"]] = event
         elif t == "connection_closed":

@@ -29,7 +29,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from app import schedule, supervisor
+from app import schedule, supervisor, timeline
 from app.config import settings
 from app.db import engine
 from app.models import Server
@@ -70,6 +70,9 @@ def facade_info(s: Server) -> dict:
                 "pit": False, "inverted": 0}
     info.update(clients=0, session=0)
     info["timeleft"] = (info["durations"][0] * 60) if info.get("durations") else 0   # the first session, in full
+    pos = timeline.server_position(s)
+    if pos:   # the session clock keeps running while the server is off (app/timeline.py)
+        info.update(session=pos["index"], timeleft=int(pos["remaining_s"]))
     return info
 
 

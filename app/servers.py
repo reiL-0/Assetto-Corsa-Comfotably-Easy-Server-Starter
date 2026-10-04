@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
-from app import content, integrity, supervisor
+from app import content, integrity, supervisor, timeline
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
@@ -412,6 +412,7 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
     s.config = cfg
+    s.anchor_index = s.anchor_at = None   # a new session set-up: the clock starts over with the next start
     if body.entries:
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
@@ -452,6 +453,7 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+    timeline.start_resume(server_id)   # if the server's session clock has run while it was off, move it to where the clock is
     return {"running": inst.running, "pid": inst.pid}
 
 
@@ -602,7 +604,7 @@ class SetSessionIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     session_type: int = Field(ge=1, le=3)
     laps: int = Field(default=0, ge=0, le=999)
-    time_s: int = Field(default=0, ge=0, le=86400)
+    time_min: int = Field(default=0, ge=0, le=1440)
     wait_s: int = Field(default=0, ge=0, le=600)
 
 
@@ -610,7 +612,7 @@ class SetSessionIn(BaseModel):
 def set_session_info(server_id: int, body: SetSessionIn, sess: SessionDep) -> dict:
     """Redefine one session of the running server (ACSP SET_SESSION_INFO): name, type, laps, length in seconds."""
     _get(sess, server_id)
-    _acsp(server_id).send(acsp.encode_set_session_info(body.index, body.name, body.session_type, body.laps, body.time_s, body.wait_s))
+    _acsp(server_id).send(acsp.encode_set_session_info(body.index, body.name, body.session_type, body.laps, body.time_min, body.wait_s))
     return {"sent": True}
 
 
