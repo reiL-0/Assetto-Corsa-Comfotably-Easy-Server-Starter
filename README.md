@@ -165,6 +165,10 @@ accept a raw INI body and parse it back into the stored config, and
 `GET /servers/{id}/results[/​{filename}]` lists/downloads session result
 JSON files acServer writes under that instance's `results/` dir.
 
+### Deploying
+
+`./deploy.sh` deploys the committed `app/` to the VPS (refuses with uncommitted changes): runs the test suite locally, imports the staged package with the production venv, saves what runs to `/opt/acm/releases` (newest 5), `rsync`s it over `/opt/acm/app/app` (keeping `static/`), restarts `acm` and waits for `/healthz`; if it does not answer within 20 s the saved copy is put back. `/opt/acm/app/DEPLOYED` holds the revision running. A restart is safe for running games (see below). If `pyproject.toml` changed, new dependencies have to be installed in the server venv by hand (the script warns).
+
 ### Servers outlive the manager
 
 `app/supervisor.py` starts each acServer in its own session with its output in `data/instances/<id>/server.log` (the previous run is kept as `server.log.1`) and its pid in `server.pid`. A manager restart therefore does not drop anyone: at boot (`servers.adopt_running`) every server whose pid file points at a live acServer in that instance directory is taken back: log followed again, ACSP socket re-bound, and `GET_CAR_INFO` sent for every slot so the people already on it reappear (`car_info` fills the board without counting a join). Uptime is kept; the event logged is `server_adopted`, not a start. A stale pid file (process gone, or pid reused by something else) is deleted. If the process disappears while adopted it counts as a crash (exit code unknown). The systemd unit must have `KillMode=process`, otherwise systemd kills the servers on `restart`/`stop`:
