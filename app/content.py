@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import download
+from app import download, metrics
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -323,6 +323,7 @@ def _finish(uid: str) -> None:
         u["state"], u["error"] = "error", f"{type(e).__name__}: {e}"
     finally:
         u["path"].unlink(missing_ok=True)
+    metrics.log(0, "import_ok" if u["state"] == "done" else "import_error", name=u["result"] or u["kind"], track=u["kind"])
 
 
 @router.post("/uploads/{uid}/complete", status_code=202)
@@ -352,6 +353,7 @@ def _fetch_then_finish(uid: str, url: str) -> None:
     except Exception as e:  # noqa: BLE001 - whatever went wrong must reach the panel as text
         u["state"], u["error"] = "error", f"download failed: {e}"
         u["path"].unlink(missing_ok=True)
+        metrics.log(0, "import_error", name=u["kind"], track="download")
         return
     u["state"] = "extracting"
     _finish(uid)

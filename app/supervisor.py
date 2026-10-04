@@ -8,10 +8,12 @@ import time
 from collections import deque
 from pathlib import Path
 
+from app import metrics
 from app.config import settings
 from app.live import acsp
 
 IDLE_POLL = 15.0  # seconds between idle checks
+SAMPLE_EVERY = 60.0  # how often the number of players on track is recorded
 
 
 class Instance:
@@ -21,13 +23,25 @@ class Instance:
         self.started_at = time.time()
         self.log: deque[str] = deque(maxlen=settings.log_lines)
         self.acsp: acsp.ACSPClient | None = None
+        self._stopping = False
         self._reader = asyncio.create_task(self._drain())
         self._idle = asyncio.create_task(self._idle_watch()) if settings.idle_stop_seconds else None
+        self._sampler = asyncio.create_task(self._sample_online())
 
     async def _drain(self) -> None:
         assert self.proc.stdout is not None
         async for raw in self.proc.stdout:
             self.log.append(raw.decode(errors="replace").rstrip("\n"))
+        rc = await self.proc.wait()
+        if not self._stopping and rc not in (0, -15):  # it ended on its own and not by a stop/terminate
+            metrics.log(self.server_id, "server_crash", value=rc, name=f"up {int(self.uptime)}s")
+
+    async def _sample_online(self) -> None:
+        """One sample a minute of how many are on track: the series behind peak / player-minutes."""
+        while self.running:
+            await asyncio.sleep(SAMPLE_EVERY)
+            if self.running and self.acsp:
+                metrics.log(self.server_id, "online", value=sum(1 for d in self.acsp.board.drivers if d.connected))
 
     async def _idle_watch(self) -> None:
         """Stop the process once ACSP has shown no connected cars for idle_stop_seconds."""
@@ -38,7 +52,7 @@ class Instance:
             if not self.acsp or self.acsp.cars:
                 last_active = time.time()
             elif time.time() - last_active > settings.idle_stop_seconds:
-                await self.stop()
+                await self.stop(reason="idle")
 
     @property
     def running(self) -> bool:
@@ -48,8 +62,10 @@ class Instance:
     def uptime(self) -> float:
         return time.time() - self.started_at
 
-    async def stop(self, timeout: float = 10.0) -> None:
+    async def stop(self, timeout: float = 10.0, reason: str = "manual") -> None:
         if self.running:
+            self._stopping = True
+            metrics.log(self.server_id, "server_stop", name=reason, value=self.uptime)
             self.proc.terminate()
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout)
@@ -57,8 +73,9 @@ class Instance:
                 self.proc.kill()
                 await self.proc.wait()
         self._reader.cancel()
-        if self._idle and self._idle is not asyncio.current_task():
-            self._idle.cancel()
+        for task in (self._idle, self._sampler):
+            if task and task is not asyncio.current_task():
+                task.cancel()
         if self.acsp:
             self.acsp.close()
 
@@ -91,6 +108,7 @@ async def start(
     if acsp_local_port and acsp_remote_port:
         inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host)
     _instances[server_id] = inst
+    metrics.log(server_id, "server_start")
     return inst
 
 

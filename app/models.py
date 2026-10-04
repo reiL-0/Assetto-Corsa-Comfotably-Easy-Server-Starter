@@ -75,6 +75,24 @@ class Penalty(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class Activity(SQLModel, table=True):
+    """What happened on the servers, for the metrics panel. Append-only; history cannot be rebuilt, so it starts
+    accumulating from the day this exists. kinds: join, leave, lap, session, online (a sample of how many are on
+    track, one a minute), server_start, server_stop, server_crash, import_ok, import_error, http_5xx."""
+
+    __tablename__ = "activity"
+
+    id: int | None = Field(default=None, primary_key=True)
+    ts: float = Field(index=True)  # epoch seconds
+    server_id: int = 0
+    kind: str = Field(index=True)
+    guid: str | None = None
+    name: str | None = None  # driver / session / reason / path, depending on the kind
+    car: str | None = None
+    track: str | None = None
+    value: float | None = None  # lap ms, players online, exit code, http status...
+
+
 DEFAULT_POINTS_SYSTEM = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 
 

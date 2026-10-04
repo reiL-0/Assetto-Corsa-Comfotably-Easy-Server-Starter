@@ -2,10 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from app import metrics
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import init_db
@@ -23,6 +24,7 @@ log = logging.getLogger("acmanager")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    metrics.purge()
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     yield
@@ -45,6 +47,19 @@ if settings.cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+@app.middleware("http")
+async def count_server_errors(request: Request, call_next):
+    """Every 5xx lands in the metrics log (including the ones raised as exceptions)."""
+    try:
+        response = await call_next(request)
+    except Exception:
+        metrics.log(0, "http_5xx", name=request.url.path[:120], value=500)
+        raise
+    if response.status_code >= 500:
+        metrics.log(0, "http_5xx", name=request.url.path[:120], value=response.status_code)
+    return response
 
 
 @app.get("/healthz", include_in_schema=False)

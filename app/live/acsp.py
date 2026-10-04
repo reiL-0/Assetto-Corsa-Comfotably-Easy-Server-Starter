@@ -12,6 +12,7 @@ import struct
 import time
 from collections import deque
 
+from app import metrics
 from app.live.board import LiveBoard
 
 TELEMETRY_TTL = 2.0  # s a sample stays in the live map after the app stops sending
@@ -333,6 +334,7 @@ class ACSPClient(asyncio.DatagramProtocol):
     def _apply(self, event: dict) -> None:
         t = event["type"]
         self.board.apply(event)
+        self._record(event)
         if t in ("new_session", "session_info"):
             self.session = event  # drivers stay connected across sessions; keep their guid/name
         elif t == "new_connection":
@@ -341,6 +343,21 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.cars.pop(event["car_id"], None)
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
+
+    def _record(self, e: dict) -> None:
+        """Feed the metrics log with the events worth counting."""
+        t, sid = e["type"], self.server_id
+        track = self.board.session.get("track")
+        if t == "new_connection":
+            metrics.log(sid, "join", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
+        elif t == "connection_closed":
+            metrics.log(sid, "leave", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
+        elif t == "lap_completed":
+            d = self.board._by_car(e["car_id"])
+            metrics.log(sid, "lap", guid=d.guid if d else None, name=d.name if d else None, car=d.model if d else None,
+                        track=track, value=e["laptime_ms"])
+        elif t == "new_session":
+            metrics.log(sid, "session", name=e["name"], track=track, value=e["session_type"])
 
     def add_telemetry(self, car_id: int, sample: dict) -> bool:
         """Store an in-game-app sample and stream it. False if it came too soon (rate limit)."""

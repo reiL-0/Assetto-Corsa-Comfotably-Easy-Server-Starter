@@ -291,6 +291,16 @@ total time (a driver who did not finish with `TotalTime` 0 would sort first amon
 A weekend (practice → qualify → race, looping) already runs natively in one acServer session list; `reversed_grid`
 maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs uses the entry order (see above).
 
+## Metrics (activity log)
+
+`app/metrics.py` keeps an append-only `activity` table so the site's admin panel has history (it starts the day it is switched on and
+is purged after 120 days). Recorded: `join` / `leave` / `lap` / `session` from ACSP, `online` (players on track, one sample a minute
+per running server), `server_start` / `server_stop` (with reason `manual` or `idle`) / `server_crash` (the process ended by itself,
+`value` = exit code), `import_ok` / `import_error` (content uploads and links) and `http_5xx` (any 5xx of this API).
+`GET /api/v1/metrics/activity?days=14&tz=-360&hours=48` (steward) returns per-day peak players, player-minutes, laps, distinct drivers,
+sessions, crashes and errors, a 10-minute online series, top tracks / cars / drivers and the latest incidents; `tz` is minutes east of
+UTC and decides where a day ends.
+
 ## Config (env vars)
 
 | Var                | Default                    | Meaning |
