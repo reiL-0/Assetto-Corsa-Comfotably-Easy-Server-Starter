@@ -31,6 +31,28 @@ def init_db() -> None:
     import app.models  # noqa: F401  (import registers the tables)
 
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Forward-only migration: ALTER TABLE ... ADD COLUMN for model columns an existing table lacks (create_all only creates
+    whole tables). A NOT NULL column needs a constant default: 0 / '' / '[]' by type."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
+                if not col.nullable:
+                    kind = col.type.python_type
+                    ddl += " NOT NULL DEFAULT " + {int: "0", bool: "0", float: "0", str: "''", list: "'[]'", dict: "'{}'"}.get(kind, "''")
+                conn.exec_driver_sql(ddl)
 
 
 def get_session() -> Iterator[Session]:

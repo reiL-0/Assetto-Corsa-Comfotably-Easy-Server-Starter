@@ -20,7 +20,7 @@ from app.models import Server
 
 log = logging.getLogger("acmanager.discord")
 KINDS = ("server_start", "server_stop", "server_crash")
-STOP_REASONS = {"manual": "detenido", "idle": "detenido por inactividad (sin pilotos)"}
+STOP_REASONS = {"manual": "detenido", "idle": "detenido por inactividad (sin pilotos)", "event_end": "detenido al terminar el evento"}
 
 
 def _span(seconds: float) -> str:

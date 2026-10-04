@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
-from app import metrics, schedule, servers
+from app import metrics, schedule, servers, wake
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
@@ -34,8 +34,10 @@ async def lifespan(_app: FastAPI):
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     ticker = asyncio.create_task(schedule.run_forever())
+    waking = asyncio.create_task(wake.run_forever())
     yield
     ticker.cancel()
+    waking.cancel()
 
 
 app = FastAPI(

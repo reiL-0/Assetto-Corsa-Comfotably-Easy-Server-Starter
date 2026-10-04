@@ -69,7 +69,10 @@ class Schedule(SQLModel, table=True):
     start_at: float = Field(index=True)  # unix seconds, UTC
     reminders: list[int] = Field(default_factory=lambda: [60, 10], sa_type=JSON)  # minutes before start_at
     sent: list[int] = Field(default_factory=list, sa_type=JSON)  # the reminders already posted
-    state: str = "pending"  # pending | done | failed | missed
+    duration_min: int | None = None  # how long the event lasts; the server is stopped when it is over (None = idle stop only)
+    loaded: bool = False  # the event's session is already on the server (a player woke it early, or it started)
+    end_warned: bool = False  # the "ends in 5 minutes" chat message went out
+    state: str = "pending"  # pending | running (started, waiting for its end) | done | failed | missed
     result: str = ""  # why it failed / was missed
     created_at: datetime = Field(default_factory=_now)
 
