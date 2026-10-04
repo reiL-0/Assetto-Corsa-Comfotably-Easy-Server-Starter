@@ -62,3 +62,20 @@ def test_add_event_requires_existing_result_file():
     cid = client.post("/api/v1/championships", json={"name": "Empty Cup"}).json()["id"]
     r = client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "missing.json"})
     assert r.status_code == 404
+
+
+def test_edit_points_system_and_remove_a_counted_race():
+    sid = client.post("/api/v1/servers", json={"name": "ChampEdit"}).json()["id"]
+    _write_race_result(sid, "r.json", [{"DriverName": "Al", "DriverGuid": "7", "TotalTime": 1}])
+    cid = client.post("/api/v1/championships", json={"name": "C"}).json()["id"]
+    ev = client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "r.json"}).json()
+
+    r = client.patch(f"/api/v1/championships/{cid}", json={"name": "C2", "points_system": [50, 30]})
+    assert r.status_code == 200 and r.json()["name"] == "C2"
+    assert client.get(f"/api/v1/championships/{cid}/standings").json()[0]["points"] == 50   # new table applies on read
+
+    assert client.delete(f"/api/v1/championships/{cid}/events/{ev['id']}").status_code == 204
+    assert client.get(f"/api/v1/championships/{cid}/standings").json() == []
+    assert client.delete(f"/api/v1/championships/{cid}/events/{ev['id']}").status_code == 404
+    assert client.patch("/api/v1/championships/9999", json={"name": "x"}).status_code == 404
+

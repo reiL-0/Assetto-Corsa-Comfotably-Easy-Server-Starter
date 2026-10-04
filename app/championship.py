@@ -49,6 +49,16 @@ def get(championship_id: int, sess: SessionDep) -> Championship:
     return _get(sess, championship_id)
 
 
+@router.patch("/{championship_id}", response_model=Championship)
+def update(championship_id: int, body: ChampionshipIn, sess: SessionDep) -> Championship:
+    c = _get(sess, championship_id)
+    c.name, c.points_system = body.name, body.points_system
+    sess.add(c)
+    sess.commit()
+    sess.refresh(c)
+    return c
+
+
 @router.delete("/{championship_id}", status_code=204)
 def delete(championship_id: int, sess: SessionDep) -> None:
     c = _get(sess, championship_id)
@@ -79,6 +89,15 @@ def add_event(championship_id: int, body: EventIn, sess: SessionDep) -> Champion
     sess.commit()
     sess.refresh(e)
     return e
+
+
+@router.delete("/{championship_id}/events/{event_id}", status_code=204)
+def remove_event(championship_id: int, event_id: int, sess: SessionDep) -> None:
+    e = sess.get(ChampionshipEvent, event_id)
+    if not e or e.championship_id != championship_id:
+        raise HTTPException(404, "event not found")
+    sess.delete(e)
+    sess.commit()
 
 
 @router.get("/{championship_id}/events", response_model=list[ChampionshipEvent])

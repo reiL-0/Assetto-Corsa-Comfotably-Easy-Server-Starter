@@ -183,9 +183,10 @@ using the championship's `points_system` (default top-10 F1-style
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST/GET/DELETE /championships[/{id}]` | championship CRUD |
+| `POST/GET/PATCH/DELETE /championships[/{id}]` | championship CRUD (PATCH replaces name + points table; standings follow on the next read) |
 | `POST /championships/{id}/events` | count a race result (validates the file exists) |
 | `GET /championships/{id}/events` | events counted so far |
+| `DELETE /championships/{id}/events/{event_id}` | stop counting a race |
 | `GET /championships/{id}/standings` | computed points table |
 
 Only `Race`-type sessions score; add a per-event flag if a league wants
