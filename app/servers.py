@@ -218,8 +218,64 @@ async def upload_entry_list_ini(server_id: int, request: Request, sess: SessionD
     return _out(s)
 
 
-DEFAULT_WEATHER = {"GRAPHICS": "3_clear", "BASE_TEMPERATURE_AMBIENT": 18, "BASE_TEMPERATURE_ROAD": 24,
+DEFAULT_WEATHER = {"GRAPHICS": "3_clear", "BASE_TEMPERATURE_AMBIENT": 18, "BASE_TEMPERATURE_ROAD": 6,
                    "VARIATION_AMBIENT": 1, "VARIATION_ROAD": 1}
+
+
+class WeatherIn(BaseModel):
+    """One [WEATHER_n] block. acServer cycles through them; the name is only sent to the clients (they need it installed)."""
+
+    graphics: str = Field(default="3_clear", pattern=r"^[\w.\-]{1,60}$")
+    ambient: int = Field(default=18, ge=-10, le=50)  # °C
+    road: int = Field(default=6, ge=-20, le=50)  # °C ABOVE the ambient (acServer's BASE_TEMPERATURE_ROAD is relative)
+    ambient_var: int = Field(default=1, ge=0, le=20)
+    road_var: int = Field(default=1, ge=0, le=20)
+    wind_min: int = Field(default=0, ge=0, le=60)  # km/h
+    wind_max: int = Field(default=0, ge=0, le=60)
+    wind_direction: int = Field(default=0, ge=0, le=359)  # degrees
+    wind_direction_var: int = Field(default=0, ge=0, le=359)
+
+
+class DynamicTrackIn(BaseModel):
+    session_start: int = Field(default=95, ge=0, le=100)  # grip % when the session starts
+    randomness: int = Field(default=2, ge=0, le=100)
+    session_transfer: int = Field(default=90, ge=0, le=100)  # % of the grip carried to the next session
+    lap_gain: int = Field(default=130, ge=0, le=1000)  # laps for the track to gain one grip point
+
+
+class OptionsIn(BaseModel):
+    """server_cfg.ini [SERVER] options. A field left out (None) keeps whatever the server has now; names are the
+    INI keys in lower case, so `field.upper()` is the key."""
+
+    sun_angle: int | None = Field(default=None, ge=-80, le=80)  # time of day: 0 = 13:00, 16 degrees per hour
+    time_of_day_mult: int | None = Field(default=None, ge=0, le=100)  # clock speed
+    abs_allowed: int | None = Field(default=None, ge=0, le=2)  # 0 off, 1 factory, 2 forced on
+    tc_allowed: int | None = Field(default=None, ge=0, le=2)
+    stability_allowed: bool | None = None
+    autoclutch_allowed: bool | None = None
+    tyre_blankets_allowed: bool | None = None
+    force_virtual_mirror: bool | None = None
+    damage_multiplier: int | None = Field(default=None, ge=0, le=100)  # %
+    fuel_rate: int | None = Field(default=None, ge=0, le=500)  # % of normal consumption
+    tyre_wear_rate: int | None = Field(default=None, ge=0, le=500)
+    allowed_tyres_out: int | None = Field(default=None, ge=-1, le=4)  # wheels outside the line before a cut; -1 = never
+    legal_tyres: str | None = Field(default=None, pattern=r"^[\w;]{0,60}$")  # e.g. "SV;S;M;H"
+    max_ballast_kg: int | None = Field(default=None, ge=0, le=500)
+    start_rule: int | None = Field(default=None, ge=0, le=2)  # 0 locked until green, 1 teleport to pits, 2 drive-through
+    race_gas_penalty_disabled: bool | None = None
+    max_contacts_per_km: int | None = Field(default=None, ge=-1, le=50)  # -1 = off
+    race_over_time: int | None = Field(default=None, ge=0, le=3600)  # s the race stays open after the winner
+    result_screen_time: int | None = Field(default=None, ge=0, le=600)
+    qualify_max_wait_perc: int | None = Field(default=None, ge=100, le=1000)
+    race_pit_window_start: int | None = Field(default=None, ge=0, le=720)  # minutes; 0 and 0 = no window
+    race_pit_window_end: int | None = Field(default=None, ge=0, le=720)
+    kick_quorum: int | None = Field(default=None, ge=0, le=100)  # % of votes
+    voting_quorum: int | None = Field(default=None, ge=0, le=100)
+    vote_duration: int | None = Field(default=None, ge=1, le=300)
+    blacklist_mode: int | None = Field(default=None, ge=0, le=2)  # 0 plain kick, 1 until restart, 2 permanent ban
+    client_send_interval_hz: int | None = Field(default=None, ge=10, le=60)
+    weather: list[WeatherIn] | None = Field(default=None, max_length=10)  # None = keep the current blocks
+    dynamic_track: DynamicTrackIn | None = None
 
 
 class EntryIn(BaseModel):
@@ -246,6 +302,7 @@ class SessionIn(BaseModel):
     cars: list[str] = []  # open slots are spread over these; ignored when `entries` is given
     max_clients: int = Field(default=10, ge=1, le=50)  # ...as is this: the entry list sets the slot count
     entries: list[EntryIn] = Field(default_factory=list, max_length=50)
+    options: OptionsIn = Field(default_factory=OptionsIn)
     locked: bool = False  # only the Steam IDs in `entries` may join (LOCKED_ENTRY_LIST)
     pickup: bool = True  # drivers without a reserved slot pick a free one on joining
     practice_min: int | None = Field(default=None, ge=0, le=720)
@@ -291,6 +348,24 @@ async def apply_session(server_id: int, body: SessionIn, sess: SessionDep) -> Ap
     return await apply_to_server(sess, _get(sess, server_id), body)
 
 
+def _apply_options(cfg: dict, srv: dict, o: OptionsIn) -> None:
+    """Write every option the form sent; leave the rest of the file alone."""
+    for field, value in o.model_dump(exclude={"weather", "dynamic_track"}, exclude_none=True).items():
+        srv[field.upper()] = int(value) if isinstance(value, bool) else value
+    if o.weather is not None:
+        for name in [k for k in cfg if k.startswith("WEATHER_")]:
+            del cfg[name]
+        for i, w in enumerate(o.weather):
+            cfg[f"WEATHER_{i}"] = {
+                "GRAPHICS": w.graphics, "BASE_TEMPERATURE_AMBIENT": w.ambient, "BASE_TEMPERATURE_ROAD": w.road,
+                "VARIATION_AMBIENT": w.ambient_var, "VARIATION_ROAD": w.road_var,
+                "WIND_BASE_SPEED_MIN": w.wind_min, "WIND_BASE_SPEED_MAX": max(w.wind_min, w.wind_max),
+                "WIND_BASE_DIRECTION": w.wind_direction, "WIND_VARIATION_DIRECTION": w.wind_direction_var,
+            }
+    if o.dynamic_track is not None:
+        cfg["DYNAMIC_TRACK"] = {k.upper(): v for k, v in o.dynamic_track.model_dump().items()}
+
+
 async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> AppliedOut:
     server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps):
@@ -321,6 +396,7 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
         cfg["QUALIFY"] = {"NAME": "Qualify", "TIME": body.qualify_min, "IS_OPEN": 1}
     if body.race_laps:
         cfg["RACE"] = {"NAME": "Race", "LAPS": body.race_laps, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
+    _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
     s.config = cfg

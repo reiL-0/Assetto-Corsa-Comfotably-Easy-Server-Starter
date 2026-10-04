@@ -275,6 +275,13 @@ Steam IDs in (`LOCKED_ENTRY_LIST`, rejected if nobody has one) and `pickup` lets
 qualifying session the race grid follows the entry order, so the panel can order the table by a previous result's classification
 (`GET /servers/{id}/results/{file}/parsed`) and invert the first N before applying. Fixed setups are not handled.
 
+`options` (`OptionsIn`) carries the rest of `server_cfg.ini`: `sun_angle` (time of day, 0 = 13:00, 16° per hour), clock speed, ABS/TC
+(0 off, 1 factory, 2 forced), stability / auto-clutch / tyre blankets / virtual mirror, damage / fuel / tyre-wear %, wheels allowed
+out, legal tyres, max ballast, start rule, contacts per km, race-over / results-screen / qualify-wait times, pit window, vote quorums
+and duration, ban mode, client send rate, a list of `weather` blocks (graphics name, ambient, road *above* ambient, wind) and the
+`dynamic_track` grip section. Names are the INI keys in lower case. A field left out keeps what the server has now; `weather` replaces
+all `[WEATHER_n]` blocks when sent. Every range is validated (422 otherwise).
+
 A weekend (practice → qualify → race, looping) already runs natively in one acServer session list; `reversed_grid`
 maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs uses the entry order (see above).
 
