@@ -8,7 +8,7 @@ A stopped server that the manager shows in the lobby (app/wake.py) must not free
   qualify, race, in that order, as acServer plays them), looping when `LOOP_MODE` is on; it says which session it is and how long is left
   (None: never ran, or the cycle ended with no loop).
 - The lobby (`wake.facade_info`) shows that position.
-- On a start (`resume`, after `servers.start_server`) the real acServer is moved to that position through ACSP: the target session is
+- On a start (`resume`, after `servers.start_server`, which reads the clock before spawning acServer) the real acServer is moved to that position through ACSP: the target session is
   redefined to the minutes that are left (`SET_SESSION_INFO`; its unit is minutes, and the running session's time left is that
   length minus what has elapsed) and `NEXT_SESSION` is sent until it is the current one. The original definition is put back
   as soon as the next session starts. Granularity: a minute.
@@ -104,8 +104,12 @@ def definition(seg: Seg, minutes: int | None = None) -> bytes:
     return acsp.encode_set_session_info(seg.index, seg.name, seg.type, seg.laps, seg.minutes if minutes is None else minutes, seg.wait)
 
 
-async def resume(server_id: int, now: float | None = None, settle: float = 0.8) -> dict | None:
-    """After a start: move the real acServer to where the clock is. Returns the position used (None: it starts as it is)."""
+async def resume(server_id: int, planned: dict | None, planned_at: float, settle: float = 0.8) -> dict | None:
+    """After a start: move the real acServer to where the clock was. `planned` is the position read BEFORE the server was started
+    (`planned_at`: when): the real server's own first `new_session` re-anchors the clock to «now», so the clock cannot be read afterwards.
+    Returns the position used (None: it starts as it is)."""
+    if not planned:
+        return None
     inst = supervisor.get(server_id)
     for _ in range(60):   # the plugin socket needs a moment to hear the server
         if inst and inst.acsp and inst.acsp.session:
@@ -115,19 +119,20 @@ async def resume(server_id: int, now: float | None = None, settle: float = 0.8) 
         return None
     with Session(engine) as sess:
         s = sess.get(Server, server_id)
-        pos = server_position(s, now) if s else None
         segs = segments(s.config) if s else []
-    if not pos:
+    if not segs:
         return None
     cur = int(inst.acsp.session.get("current_session_index", 0))
-    target, left = pos["index"], pos["remaining_s"]
+    target, left = planned["index"], planned["remaining_s"] - (time.time() - planned_at)   # what was left, minus the time the start took
+    elapsed = segs[target].secs - left
     if left < 30:   # about to end: the next one, in full
-        target, left = (target + 1) % len(segs), None
-    if target == cur and pos["elapsed_s"] < 20:
+        target, left, elapsed = (target + 1) % len(segs), None, 0
+    if target == cur and elapsed < 20:
         return None
     seg = segs[target]
     if left is not None and seg.minutes and not seg.laps:   # redefine the length to what is left; the original comes back when the next session starts
-        inst.acsp.send(definition(seg, max(1, round(left / 60))))
+        already = inst.acsp.session.get("elapsed_ms", 0) / 1000 if target == cur else 0   # a session already running keeps counting from its own start
+        inst.acsp.send(definition(seg, max(1, round((left + already) / 60))))
         inst.acsp.restore_when_session_changes = (target, definition(seg))
     for _ in range((target - cur) % len(segs)):
         await asyncio.sleep(settle)
@@ -136,8 +141,8 @@ async def resume(server_id: int, now: float | None = None, settle: float = 0.8) 
     return {"index": target, "remaining_s": left}
 
 
-def start_resume(server_id: int) -> None:
+def start_resume(server_id: int, planned: dict | None, planned_at: float) -> None:
     """Fire and forget (keeps a reference so the task is not collected)."""
-    task = asyncio.create_task(resume(server_id))
+    task = asyncio.create_task(resume(server_id, planned, planned_at))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)

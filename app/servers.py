@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import configparser
 import io
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -442,6 +443,7 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
     if not settings.acserver_cmd:
         raise HTTPException(400, "ACM_ACSERVER_CMD is not configured")
     integrity.gate(sess, s)   # 409 in «require» mode when the content differs from its seal
+    planned, planned_at = timeline.server_position(s), time.time()   # where the session clock is, read before acServer re-anchors it
     p = _ports(s.base_port)
     try:
         inst = await supervisor.start(
@@ -453,7 +455,7 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
-    timeline.start_resume(server_id)   # if the server's session clock has run while it was off, move it to where the clock is
+    timeline.start_resume(server_id, planned, planned_at)   # if the session clock ran while the server was off, move it to where the clock is
     return {"running": inst.running, "pid": inst.pid}
 
 

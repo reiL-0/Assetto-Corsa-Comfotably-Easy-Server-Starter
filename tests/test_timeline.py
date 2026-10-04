@@ -81,6 +81,11 @@ class _Inst:
         self.acsp.session = {"current_session_index": current}
 
 
+def _planned(sid):
+    with Session(engine) as s:
+        return timeline.server_position(s.get(Server, sid))
+
+
 def _anchor(sid, index, minutes_ago):
     with Session(engine) as s:
         srv = s.get(Server, sid)
@@ -95,7 +100,7 @@ def test_a_start_moves_the_real_server_to_where_the_clock_is(monkeypatch):
     inst = _Inst(sid, 0)
     monkeypatch.setattr(timeline.supervisor, "get", lambda _id: inst)
     _anchor(sid, 0, 20)                                        # practice began 20 min ago: qualifying, 10 min left
-    got = asyncio.run(timeline.resume(sid, settle=0))
+    got = asyncio.run(timeline.resume(sid, _planned(sid), time.time(), settle=0))
     assert got["index"] == 1 and abs(got["remaining_s"] - 10 * M) < 3
     assert inst.acsp.transport.sent == [timeline.definition(segs[1], 10), acsp.encode_next_session()]
     # ...and the original length comes back as soon as the next session starts, not before
@@ -107,20 +112,37 @@ def test_a_start_moves_the_real_server_to_where_the_clock_is(monkeypatch):
     assert timeline.definition(segs[1]) != timeline.definition(segs[1], 10)
 
 
+def test_the_real_servers_own_first_session_does_not_hide_where_the_clock_was(monkeypatch):
+    """What went wrong the first time: acServer starts «Practice» at once, that re-anchored the clock to now, and the start found nothing to catch up."""
+    sid = _server(CFG)
+    inst = _Inst(sid, 0)
+    monkeypatch.setattr(timeline.supervisor, "get", lambda _id: inst)
+    _anchor(sid, 0, 12.3)                                            # practice began 12 min 18 s ago: 2 min 42 s left
+    planned, at = _planned(sid), time.time()                        # (read by start_server before spawning)
+    timeline.on_session_event(sid, {"type": "new_session", "session_index": 0, "current_session_index": 0, "elapsed_ms": 0})   # the fresh practice
+    assert abs(_planned(sid)["remaining_s"] - 15 * M) < 3          # the clock now says «just started»...
+    got = asyncio.run(timeline.resume(sid, planned, at, settle=0))
+    assert got["index"] == 0 and abs(got["remaining_s"] - 162) < 3  # ...but the start used the position read before
+    assert inst.acsp.transport.sent == [timeline.definition(timeline.segments(CFG)[0], 3)]   # practice shortened to 3 min (rounded), no jump needed
+    inst.acsp.transport.sent.clear()
+    inst.acsp.session = {"current_session_index": 0, "elapsed_ms": 50000}                    # the fresh practice has been running 50 s already:
+    asyncio.run(timeline.resume(sid, planned, at, settle=0))                                  # (162 + 50) / 60 -> 4 min total, so about 162 s are left
+    assert inst.acsp.transport.sent == [timeline.definition(timeline.segments(CFG)[0], 4)]
+
+
 def test_resume_edge_cases(monkeypatch):
     sid = _server(CFG)
     inst = _Inst(sid, 0)
     monkeypatch.setattr(timeline.supervisor, "get", lambda _id: inst)
+    run = lambda: asyncio.run(timeline.resume(sid, _planned(sid), time.time(), settle=0))   # noqa: E731
     _anchor(sid, 0, 0.1)
-    assert asyncio.run(timeline.resume(sid, settle=0)) is None and inst.acsp.transport.sent == []   # just started: nothing to move
-    _anchor(sid, 0, 14.8)                                                                           # 12 s of practice left: the next, in full
-    got = asyncio.run(timeline.resume(sid, settle=0))
+    assert run() is None and inst.acsp.transport.sent == []                                           # just started: nothing to move
+    _anchor(sid, 0, 14.8)                                                                             # 12 s of practice left: the next, in full
+    got = run()
     assert got == {"index": 1, "remaining_s": None} and inst.acsp.transport.sent == [acsp.encode_next_session()]
     inst.acsp.transport.sent.clear()
     inst.acsp.session = {"current_session_index": 0}
-    _anchor(sid, 0, 31 + 5)                                                                         # into the second race (laps: no length to change)
-    got = asyncio.run(timeline.resume(sid, settle=0))
+    _anchor(sid, 0, 31 + 5)                                                                           # into the second race (laps: no length to change)
+    got = run()
     assert got["index"] == 2 and inst.acsp.transport.sent == [acsp.encode_next_session()] * 2
-    inst2 = _Inst(_server({"SERVER": {}}), 0)
-    monkeypatch.setattr(timeline.supervisor, "get", lambda _id: inst2)
-    assert asyncio.run(timeline.resume(sid + 1, settle=0)) is None                                  # no sessions configured
+    assert asyncio.run(timeline.resume(sid, None, time.time(), settle=0)) is None                     # no position: starts as it is
