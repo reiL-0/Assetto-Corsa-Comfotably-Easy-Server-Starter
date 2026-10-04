@@ -39,6 +39,7 @@ GET_CAR_INFO = 201
 SEND_CHAT = 202
 BROADCAST_CHAT = 203
 GET_SESSION_INFO = 204
+SET_SESSION_INFO = 205
 KICK_USER = 206
 NEXT_SESSION = 207
 RESTART_SESSION = 208
@@ -288,6 +289,11 @@ def encode_admin_command(command: str) -> bytes:
 
 def encode_get_session_info(index: int = -1) -> bytes:
     return _cmd(GET_SESSION_INFO, struct.pack("<h", index))
+
+
+def encode_set_session_info(index: int, name: str, session_type: int, laps: int, time_s: int, wait_s: int) -> bytes:
+    """Redefine session `index`: name, type (1 practice, 2 qualify, 3 race), laps, length and pre-race wait, both in seconds."""
+    return _cmd(SET_SESSION_INFO, bytes([index]), _write_string(name), bytes([session_type]), struct.pack("<3I", laps, time_s, wait_s))
 
 
 def encode_get_car_info(car_id: int) -> bytes:

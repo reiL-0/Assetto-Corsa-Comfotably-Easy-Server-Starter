@@ -597,6 +597,23 @@ def restart_session(server_id: int, sess: SessionDep) -> dict:
     return {"sent": True}
 
 
+class SetSessionIn(BaseModel):
+    index: int = Field(ge=0, le=7)
+    name: str = Field(min_length=1, max_length=40)
+    session_type: int = Field(ge=1, le=3)
+    laps: int = Field(default=0, ge=0, le=999)
+    time_s: int = Field(default=0, ge=0, le=86400)
+    wait_s: int = Field(default=0, ge=0, le=600)
+
+
+@steward.post("/{server_id}/session_info")
+def set_session_info(server_id: int, body: SetSessionIn, sess: SessionDep) -> dict:
+    """Redefine one session of the running server (ACSP SET_SESSION_INFO): name, type, laps, length in seconds."""
+    _get(sess, server_id)
+    _acsp(server_id).send(acsp.encode_set_session_info(body.index, body.name, body.session_type, body.laps, body.time_s, body.wait_s))
+    return {"sent": True}
+
+
 class AdminCommandIn(BaseModel):
     command: str  # e.g. "ballast 3 50", "restrict 3 10" -- console admin commands
 
