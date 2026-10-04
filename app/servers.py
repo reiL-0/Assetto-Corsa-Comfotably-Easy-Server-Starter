@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from app import content, supervisor
@@ -222,6 +222,19 @@ DEFAULT_WEATHER = {"GRAPHICS": "3_clear", "BASE_TEMPERATURE_AMBIENT": 18, "BASE_
                    "VARIATION_AMBIENT": 1, "VARIATION_ROAD": 1}
 
 
+class EntryIn(BaseModel):
+    """One slot of the entry list. With a `guid` only that driver can take it (needs the list locked or not)."""
+
+    model: str
+    skin: str = ""
+    driver_name: str = Field(default="", max_length=60)
+    team: str = Field(default="", max_length=60)
+    guid: str = Field(default="", pattern=r"^(\d{17}(;\d{17})*)?$")  # SteamID64; several joined by ';' share the car
+    ballast: int = Field(default=0, ge=0, le=300)  # kg
+    restrictor: int = Field(default=0, ge=0, le=100)  # %
+    spectator: bool = False
+
+
 class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
@@ -230,8 +243,11 @@ class SessionIn(BaseModel):
     admin_password: str | None = None  # None = keep the current one
     track: str
     track_config: str = ""
-    cars: list[str] = Field(min_length=1)
-    max_clients: int = Field(ge=1, le=50)
+    cars: list[str] = []  # open slots are spread over these; ignored when `entries` is given
+    max_clients: int = Field(default=10, ge=1, le=50)  # ...as is this: the entry list sets the slot count
+    entries: list[EntryIn] = Field(default_factory=list, max_length=50)
+    locked: bool = False  # only the Steam IDs in `entries` may join (LOCKED_ENTRY_LIST)
+    pickup: bool = True  # drivers without a reserved slot pick a free one on joining
     practice_min: int | None = Field(default=None, ge=0, le=720)
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
@@ -240,12 +256,18 @@ class SessionIn(BaseModel):
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
 
+    @model_validator(mode="after")
+    def _has_cars(self) -> SessionIn:
+        if not self.cars and not self.entries:
+            raise ValueError("choose cars or fill the entry list")
+        return self
+
 
 class AppliedOut(ServerOut):
     restarted: bool
 
 
-def _check_content(body: SessionIn) -> dict[str, list[str]]:
+def _check_content(body: SessionIn, wanted: list[str]) -> dict[str, list[str]]:
     """Track, layout and cars must be installed and loadable by acServer. Returns each car's skins."""
     tracks = {t["track"]: t for t in content.list_tracks()}
     t = tracks.get(body.track)
@@ -257,10 +279,10 @@ def _check_content(body: SessionIn) -> dict[str, list[str]]:
     if layouts and not body.track_config and not (content._tracks_dir() / body.track / "data" / "surfaces.ini").is_file():
         raise HTTPException(400, f"{body.track} needs a layout: {', '.join(layouts)}")
     cars = {c["car"]: c for c in content.list_cars() if c["usable"]}
-    missing = [c for c in body.cars if c not in cars]
+    missing = [c for c in wanted if c not in cars]
     if missing:
         raise HTTPException(400, f"cars not installed: {', '.join(missing)}")
-    return {c: cars[c]["skins"] for c in body.cars}
+    return {c: cars[c]["skins"] for c in wanted}
 
 
 @router.post("/{server_id}/apply", response_model=AppliedOut)
@@ -273,15 +295,23 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps):
         raise HTTPException(400, "enable at least one session (practice, qualify or race)")
-    skins = _check_content(body)
+    cars = list(dict.fromkeys(e.model for e in body.entries)) if body.entries else body.cars
+    skins = _check_content(body, cars)
+    guids = [g for e in body.entries for g in e.guid.split(";") if g]
+    if len(guids) != len(set(guids)):
+        raise HTTPException(400, "a Steam ID appears in more than one entry")
+    if body.locked and not guids:
+        raise HTTPException(400, "a locked entry list needs at least one entry with a Steam ID (nobody could join)")
     cfg = {name: dict(kv) for name, kv in s.config.items()}
     srv = cfg.setdefault("SERVER", {})
+    slots = len(body.entries) or body.max_clients
     srv.update(NAME=body.name, PASSWORD=body.password, TRACK=body.track, CONFIG_TRACK=body.track_config,
-               CARS=";".join(body.cars), MAX_CLIENTS=body.max_clients)
+               CARS=";".join(cars), MAX_CLIENTS=slots, LOCKED_ENTRY_LIST=int(body.locked),
+               PICKUP_MODE_ENABLED=int(body.pickup))
     if body.admin_password is not None:
         srv["ADMIN_PASSWORD"] = body.admin_password
     srv.update(LOOP_MODE=int(body.loop), REVERSED_GRID_RACE_POSITIONS=body.reversed_grid)
-    for key, value in (("SLEEP_TIME", 1), ("PICKUP_MODE_ENABLED", 1), ("REGISTER_TO_LOBBY", 0)):
+    for key, value in (("SLEEP_TIME", 1), ("REGISTER_TO_LOBBY", 0)):
         srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics
     for sec in ("PRACTICE", "QUALIFY", "RACE"):
         cfg.pop(sec, None)
@@ -294,11 +324,17 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
     s.config = cfg
-    # one slot per client, cars taken in turns; the skin is the pack's first one (clients pick their own in pickup mode)
-    s.entry_list = [
-        {"MODEL": car, "SKIN": (skins[car] or [""])[0]}
-        for car in (body.cars[i % len(body.cars)] for i in range(body.max_clients))
-    ]
+    if body.entries:
+        s.entry_list = [
+            {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
+             "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast, "RESTRICTOR": e.restrictor}
+            for e in body.entries
+        ]
+    else:  # one open slot per client, cars taken in turns; the skin is the pack's first (clients pick their own)
+        s.entry_list = [
+            {"MODEL": car, "SKIN": (skins[car] or [""])[0]}
+            for car in (cars[i % len(cars)] for i in range(body.max_clients))
+        ]
     s.updated_at = datetime.now(UTC)
     sess.add(s)
     sess.commit()

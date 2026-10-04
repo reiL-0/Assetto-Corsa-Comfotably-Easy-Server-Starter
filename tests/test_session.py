@@ -165,3 +165,58 @@ def test_apply_can_restart_the_server(tmp_path, monkeypatch):
             assert again["restarted"] and supervisor.get(sid).proc.pid != pid  # old process replaced
         finally:
             one_loop.post(f"{V}/servers/{sid}/stop")
+
+
+G1, G2, G3 = "76561199003234525", "76561198418379726", "76561198000000001"
+ENTRIES = [
+    {"model": "bmw", "driver_name": "Ana", "team": "Rojo", "guid": G1, "ballast": 20, "restrictor": 5},
+    {"model": "audi", "driver_name": "Beto", "team": "Azul", "guid": f"{G2};{G3}", "spectator": False},
+    {"model": "bmw"},  # an open slot
+]
+
+
+def test_entry_list_with_drivers_ballast_and_locking():
+    _install()
+    sid = _server()
+    form = {**FORM, "cars": [], "max_clients": 30, "entries": ENTRIES, "locked": True, "pickup": False}
+    r = api.post(f"{V}/servers/{sid}/apply", json=form)
+    assert r.status_code == 200
+    srv = r.json()["config"]["SERVER"]
+    assert srv["MAX_CLIENTS"] == 3 and srv["CARS"] == "bmw;audi"  # the list sets slots and cars, not the form's numbers
+    assert srv["LOCKED_ENTRY_LIST"] == 1 and srv["PICKUP_MODE_ENABLED"] == 0
+    e = r.json()["entry_list"]
+    assert (e[0]["DRIVERNAME"], e[0]["TEAM"], e[0]["GUID"], e[0]["BALLAST"], e[0]["RESTRICTOR"]) == ("Ana", "Rojo", G1, 20, 5)
+    assert e[0]["SKIN"] == "red" and e[1]["GUID"] == f"{G2};{G3}" and e[2]["GUID"] == ""
+    ini = api.get(f"{V}/servers/{sid}/entry_list.ini").text
+    assert f"GUID={G1}" in ini and "BALLAST=20" in ini and "RESTRICTOR=5" in ini and "TEAM=Rojo" in ini
+    # plain anonymous slots still work and pickup defaults on
+    r = api.post(f"{V}/servers/{sid}/apply", json=FORM)
+    assert r.json()["config"]["SERVER"]["PICKUP_MODE_ENABLED"] == 1 and r.json()["config"]["SERVER"]["LOCKED_ENTRY_LIST"] == 0
+
+
+def test_entry_list_is_validated():
+    _install()
+    sid = _server()
+
+    def post(**patch):
+        return api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": ENTRIES, **patch})
+
+    assert post(entries=[ENTRIES[0], {**ENTRIES[0], "driver_name": "otra"}]).status_code == 400  # same Steam ID twice
+    assert post(entries=[ENTRIES[0], {**ENTRIES[1], "guid": f"{G3};{G1}"}]).status_code == 400  # ...inside a shared one
+    assert post(entries=[{"model": "bmw"}], locked=True).status_code == 400  # locked but nobody could join
+    assert post(entries=[{"model": "ghost", "guid": G1}]).status_code == 400  # car not installed
+    for bad in ({"guid": "123"}, {"guid": "abcdefghijklmnopq"}, {"ballast": 301}, {"restrictor": 101}, {"ballast": -1}):
+        assert post(entries=[{**ENTRIES[0], **bad}]).status_code == 422, bad
+    assert post(entries=[]).status_code == 422  # neither cars nor entries
+    assert post(entries=ENTRIES * 20).status_code == 422  # 60 slots
+
+
+def test_saved_event_keeps_the_entry_list():
+    _install()
+    body = {"title": "Liga rojo", "session": {**FORM, "cars": [], "entries": ENTRIES, "locked": True}}
+    eid = api.post(f"{V}/events", json=body).json()["id"]
+    got = api.get(f"{V}/events/{eid}").json()["session"]
+    assert got["locked"] is True and got["entries"][0]["guid"] == G1 and got["entries"][0]["ballast"] == 20
+    sid = _server()
+    r = api.post(f"{V}/events/{eid}/run", json={"server_id": sid, "restart": False})
+    assert r.status_code == 200 and r.json()["entry_list"][0]["DRIVERNAME"] == "Ana"

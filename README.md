@@ -260,7 +260,7 @@ All under `/api/v1` (steward reads, admin writes; events carry passwords).
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /servers/{id}/apply` | Build `server_cfg.ini` + entry list from a form (`SessionIn`: name, passwords, track + layout, cars, slots, practice/qualify/race, `reversed_grid`, `loop`), check the content is installed and loadable, optionally restart |
+| `POST /servers/{id}/apply` | Build `server_cfg.ini` + entry list from a form (`SessionIn`: name, passwords, track + layout, cars or an explicit `entries` list, practice/qualify/race, `reversed_grid`, `loop`, `locked`, `pickup`), check the content is installed and loadable, optionally restart |
 | `GET/POST /events`, `GET/PUT/DELETE /events/{id}` | Saved events (presets): a `SessionIn` under a title and notes |
 | `POST /events/{id}/duplicate` | Copy |
 | `POST /events/{id}/run {server_id, restart}` | Apply the event to a server, re-checking the content installed *now* |
@@ -269,8 +269,14 @@ All under `/api/v1` (steward reads, admin writes; events carry passwords).
 | `POST /content/uploads/from-link {kind, url}` | The server downloads a MediaFire / Google Drive / Dropbox link (known hosts only) |
 | `GET /content/uploads/{id}` | Progress: `downloading` / `uploading` / `extracting` / `done` / `error` |
 
+`entries` (`EntryIn`): one slot each with `model`, `skin`, `driver_name`, `team`, `guid` (SteamID64; several joined by `;` share a
+car), `ballast` (kg), `restrictor` (%) and `spectator`. A slot with a `guid` is reserved for that driver; `locked` lets only those
+Steam IDs in (`LOCKED_ENTRY_LIST`, rejected if nobody has one) and `pickup` lets everyone else take a free slot. With no
+qualifying session the race grid follows the entry order, so the panel can order the table by a previous result's classification
+(`GET /servers/{id}/results/{file}/parsed`) and invert the first N before applying. Fixed setups are not handled.
+
 A weekend (practice → qualify → race, looping) already runs natively in one acServer session list; `reversed_grid`
-maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs needs GUID-locked entries (not built yet).
+maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs uses the entry order (see above).
 
 ## Config (env vars)
 
