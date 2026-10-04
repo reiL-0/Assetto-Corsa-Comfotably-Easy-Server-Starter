@@ -1,3 +1,6 @@
+import shlex
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +31,10 @@ class Settings(BaseSettings):
     # Stop an instance after this many seconds with no connected cars (0 = never).
     # A stopped server is started again via POST /servers/{id}/start.
     idle_stop_seconds: int = 0
+
+    def acserver_dir(self) -> Path | None:
+        """Directory of the acServer binary (holds `content/`, `system/`), or None when no binary is configured."""
+        return Path(shlex.split(self.acserver_cmd)[0]).resolve().parent if self.acserver_cmd else None
 
     def resolved_db_path(self) -> str:
         return self.db_path or f"{self.data_dir}/acmanager.db"

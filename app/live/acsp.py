@@ -12,6 +12,8 @@ import struct
 import time
 from collections import deque
 
+from app.live.board import LiveBoard
+
 TELEMETRY_TTL = 2.0  # s a sample stays in the live map after the app stops sending
 TELEMETRY_MIN_INTERVAL = 0.05  # s; the app sends ~8 Hz
 
@@ -43,6 +45,9 @@ ADMIN_COMMAND = 209
 
 COLLISION_WITH_CAR = 10
 COLLISION_WITH_ENV = 11
+
+
+POS_INTERVAL_MS = 200  # car positions to ask the server for (5 Hz is plenty for a map)
 
 
 def _read_string(buf: bytes, pos: int) -> tuple[str, int]:
@@ -306,7 +311,9 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.cars: dict[int, dict] = {}
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
+        self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.transport: asyncio.DatagramTransport | None = None
+        self._hello: asyncio.Task | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -325,6 +332,7 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def _apply(self, event: dict) -> None:
         t = event["type"]
+        self.board.apply(event)
         if t in ("new_session", "session_info"):
             self.session = event  # drivers stay connected across sessions; keep their guid/name
         elif t == "new_connection":
@@ -357,7 +365,20 @@ class ACSPClient(asyncio.DatagramProtocol):
         if self.transport:
             self.transport.sendto(data)
 
+    async def hello(self) -> None:
+        """The plugin socket is bound right after acServer is spawned, so its startup packets are lost and it does not
+        know us yet. Ask for the session and for car positions until it answers (it only sends positions on request)."""
+        for _ in range(30):
+            self.send(encode_get_session_info(-1))
+            self.send(encode_realtime_pos_interval(POS_INTERVAL_MS))
+            await asyncio.sleep(1)
+            if self.session:
+                self.send(encode_realtime_pos_interval(POS_INTERVAL_MS))
+                return
+
     def close(self) -> None:
+        if self._hello:
+            self._hello.cancel()
         if self.transport:
             self.transport.close()
 
@@ -373,4 +394,5 @@ async def connect(
         local_addr=(host, local_port),
         remote_addr=(host, remote_port),
     )
+    protocol._hello = asyncio.create_task(protocol.hello())
     return protocol

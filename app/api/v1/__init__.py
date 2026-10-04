@@ -8,6 +8,7 @@ from app.auth import guard
 from app.auth import router as auth_router
 from app.championship import router as championship_router
 from app.content import router as content_router
+from app.live.acsm import router as acsm_router
 from app.servers import router as servers_router
 from app.servers import steward as steward_router
 from app.telemetry import router as telemetry_router
@@ -26,5 +27,6 @@ api_router.include_router(auth_router)
 api_router.include_router(servers_router, dependencies=[Depends(guard("steward"))])
 api_router.include_router(steward_router)
 api_router.include_router(telemetry_router)  # public: the in-game app has no login, it sends its SteamID64
+api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only
 api_router.include_router(content_router, dependencies=[Depends(guard())])
 api_router.include_router(championship_router, dependencies=[Depends(guard())])

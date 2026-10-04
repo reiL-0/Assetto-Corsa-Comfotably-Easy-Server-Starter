@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import configparser
 import io
-import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,11 +13,12 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from app import acsp, supervisor
-from app.acsp import ACSPClient
+from app import supervisor
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
+from app.live import acsp
+from app.live.acsp import ACSPClient
 from app.models import Server
 from app.results import parse_result_file
 
@@ -118,7 +118,7 @@ def _write_instance(s: Server) -> Path:
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     (d / "results").mkdir(exist_ok=True)
     # acServer reads content/ and system/ relative to its cwd: share the install's copies.
-    bin_dir = Path(shlex.split(settings.acserver_cmd)[0]).resolve().parent
+    bin_dir = settings.acserver_dir()
     for name in ("content", "system"):
         link = d / name
         if not link.exists() and (bin_dir / name).is_dir():

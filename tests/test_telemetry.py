@@ -1,7 +1,8 @@
 
 from fastapi.testclient import TestClient
 
-from app import acsp, supervisor
+from app import supervisor
+from app.live import acsp
 from app.main import app
 
 V = "/api/v1"

@@ -115,7 +115,7 @@ manager's side of the socket, written into `UDP_PLUGIN_ADDRESS`). On
 `start`, `supervisor.start()` opens a UDP endpoint (`acsp.connect`) wired to
 that block alongside the acServer process, and tears it down on `stop`.
 
-`ACSPClient` (in `app/acsp.py`) parses inbound datagrams (session info, car
+`ACSPClient` (in `app/live/acsp.py`; see `app/live/README.md`) parses inbound datagrams (session info, car
 connect/disconnect, car position updates, lap completed, chat, client
 events) into dicts, keeping a ring buffer of raw events plus a live
 `session` snapshot and `cars` map. It also encodes outbound commands (chat,
@@ -267,6 +267,7 @@ make lint        # ruff
 | `ACM_ACSERVER_CMD` | `""`                       | argv for the AC dedicated server; empty = start disabled. Its directory must hold `content/` and `system/` (symlinked into each instance) |
 | `ACM_PORT_RANGE_START` / `ACM_PORT_RANGE_END` | `9600` / `9700` | pool for per-server port blocks (4 apart) |
 | `ACM_LOG_LINES`    | `500`                      | per-instance stdout ring buffer size |
+| (content dir) | | with `ACM_ACSERVER_CMD` set, `content/` **is the acServer's own** (uploads land where the server reads them); otherwise `<data_dir>/content`. Big archives: copy to `<data_dir>/inbox/` and `POST /content/tracks/import {"file": "x.rar"}` (Cloudflare caps uploads at 100 MB). `.rar` needs `bsdtar` (`apt install libarchive-tools`). |
 | `ACM_IDLE_STOP_SECONDS` | `0`                   | stop an instance after N s with no connected cars (0 = never); restart via `POST /servers/{id}/start` |
 
 ## Roadmap

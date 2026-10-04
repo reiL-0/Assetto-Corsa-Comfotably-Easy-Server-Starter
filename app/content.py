@@ -6,15 +6,16 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 import tempfile
 import zipfile
-from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 
@@ -29,7 +30,24 @@ def _safe(name: str) -> str:
 
 
 def _content_dir() -> Path:
-    d = Path(settings.data_dir) / "content"
+    """The acServer's own `content/` when a binary is configured (what a server reads is what gets uploaded);
+    otherwise a private library under the data dir."""
+    ac = settings.acserver_dir()
+    d = ac / "content" if ac else Path(settings.data_dir) / "content"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _scratch() -> Path:
+    """Work area for unpacking: on disk (Debian's /tmp is RAM) and on the same filesystem as the data."""
+    d = Path(settings.data_dir) / "scratch"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def inbox_dir() -> Path:
+    """Drop big archives here (scp/sftp) and import them by name: Cloudflare caps request bodies at 100 MB."""
+    d = Path(settings.data_dir) / "inbox"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -144,20 +162,50 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
     )
 
 
-async def _unzip_upload(file: UploadFile, dest_parent: Path) -> str:
-    """Extracts an uploaded zip (single top-level dir = the content's name)."""
-    data = await file.read()
-    with zipfile.ZipFile(BytesIO(data)) as zf:
-        names = zf.namelist()
-        if not names:
-            raise HTTPException(400, "empty archive")
-        root = _safe(names[0].split("/")[0])
-        for n in names:
-            if n.startswith("/") or ".." in Path(n).parts:
-                raise HTTPException(400, f"unsafe archive path: {n!r}")
+def _extract(archive: Path, dest_parent: Path) -> str:
+    """Unpacks a .zip or .rar (single top-level dir = the content's name) into `dest_parent`. Returns that name.
+    Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it."""
+    with archive.open("rb") as fh:
+        magic = fh.read(8)
+    scratch = Path(tempfile.mkdtemp(dir=_scratch()))
+    try:
+        if magic[:4] == b"PK\x03\x04":
+            with zipfile.ZipFile(archive) as zf:
+                for n in zf.namelist():
+                    if n.startswith("/") or ".." in Path(n).parts:
+                        raise HTTPException(400, f"unsafe archive path: {n!r}")
+                zf.extractall(scratch)
+        elif magic[:6] == b"Rar!\x1a\x07":
+            if not shutil.which("bsdtar"):
+                raise HTTPException(501, "rar needs bsdtar (apt install libarchive-tools)")
+            r = subprocess.run(["bsdtar", "-xf", str(archive), "-C", str(scratch)], capture_output=True, text=True, check=False)
+            if r.returncode:
+                raise HTTPException(400, f"cannot read rar: {r.stderr.strip()[:200]}")
+        else:
+            raise HTTPException(400, "not a zip or rar archive")
+        for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
+            if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
+                raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
+        tops = [p for p in scratch.iterdir()]
+        if len(tops) != 1 or not tops[0].is_dir():
+            raise HTTPException(400, "archive must contain exactly one top-level folder (the content's name)")
+        root = _safe(tops[0].name)
         dest_parent.mkdir(parents=True, exist_ok=True)
-        zf.extractall(dest_parent)
-    return root
+        shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+        return root
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+async def _unzip_upload(file: UploadFile, dest_parent: Path) -> str:
+    """Streams an uploaded .zip/.rar to disk (tracks are hundreds of MB) and unpacks it."""
+    with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
+        while chunk := await file.read(1 << 20):
+            tmp.write(chunk)
+    try:
+        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent)
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
 
 
 # --- routes ------------------------------------------------------------------
@@ -205,6 +253,19 @@ def get_track_checksum(track: str, config: str | None = None) -> dict:
 @router.get("/tracks/{track}.zip")
 def download_track(track: str) -> FileResponse:
     return _zip_response(_tracks_dir() / _safe(track), f"{track}.zip")
+
+
+class InboxIn(BaseModel):
+    file: str  # a file name inside the inbox dir
+
+
+@router.post("/tracks/import", status_code=201)
+async def import_track(body: InboxIn) -> dict:
+    """Unpack a .zip/.rar that was copied to the server's inbox (for archives over the proxy's upload limit)."""
+    src = inbox_dir() / _safe(body.file)
+    if not src.is_file():
+        raise HTTPException(404, f"{body.file!r} is not in the inbox")
+    return {"track": await run_in_threadpool(_extract, src, _tracks_dir())}
 
 
 @router.post("/tracks", status_code=201)

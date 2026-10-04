@@ -8,8 +8,8 @@ import time
 from collections import deque
 from pathlib import Path
 
-from app import acsp
 from app.config import settings
+from app.live import acsp
 
 IDLE_POLL = 15.0  # seconds between idle checks
 

@@ -1,7 +1,7 @@
 import asyncio
 import struct
 
-from app import acsp
+from app.live import acsp
 
 
 def test_read_string_matches_hand_built_buffer():
@@ -119,8 +119,10 @@ def test_connect_sends_and_receives_over_real_socket():
             try:
                 client.send(acsp.encode_broadcast_chat("hi all"))
                 await asyncio.sleep(0.1)
-                assert len(received) == 1
-                assert received[0][0] == acsp.BROADCAST_CHAT
+                ids = [r[0] for r in received]
+                assert acsp.BROADCAST_CHAT in ids
+                # connect() greets the server: it asks for the session and for car positions
+                assert acsp.GET_SESSION_INFO in ids and acsp.REALTIMEPOS_INTERVAL in ids
             finally:
                 transport.close()
         finally:

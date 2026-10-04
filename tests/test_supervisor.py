@@ -2,8 +2,9 @@ import asyncio
 import shlex
 import sys
 
-from app import acsp, supervisor
+from app import supervisor
 from app.config import settings
+from app.live import acsp
 
 
 def test_start_capture_stop(tmp_path, monkeypatch):
