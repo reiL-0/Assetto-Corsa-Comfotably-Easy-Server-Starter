@@ -204,10 +204,13 @@ manager holds its ports:
 - **HTTP port (game port + 1):** answers like acServer with nobody on: `/INFO` from `data/instances/<id>/info.json` (a copy of the real answer the supervisor
   saves every minute and just before a stop; built from the config if it never ran) with `clients` 0 and the first session in full; `/JSON|<guid>` with the entry
   list's cars and skins; anything else 200 empty. Looking at the lobby wakes nothing.
-- **Game port (UDP and TCP, same number):** the first datagram or connection (the TCP one is reset, not closed, so no TIME_WAIT keeps acServer from binding)
-  closes all the listeners, calls `schedule.wake` and leaves the ports to acServer. The first attempt gets no answer; the player retries a few seconds later.
-  With an event window the event is loaded as a start would (`loaded = true`, so the real start does not restart it and kick the early arrivals); if it is already
-  loaded (idle stop or crash mid-event) or the mode is `always`, the server is simply started.
+- **Game port, only for Assetto Corsa:** the game or Content Manager first asks the lobby (`/INFO`, `/JSON|...`, user agent «Assetto Corsa Launcher»); a TCP connection to the
+  game port wakes the server only from an address that did so in the last 15 min (it is reset, not closed, so no TIME_WAIT keeps acServer from binding the port). Anything
+  else (a port scan, a browser, `curl`) is ignored. UDP never wakes anything: its one legitimate packet is the game's ping `0xC8`, answered like acServer does (`0xC8` + the HTTP
+  port, 2 bytes little endian, e.g. `c8 81 25` for 9601) so Content Manager shows the stopped server as reachable and Join is clickable. A wake closes all the listeners, calls
+  `schedule.wake` and leaves the ports to acServer. The first connection gets no answer; the player retries a few seconds later. With an event window the event is loaded as a start
+  would (`loaded = true`, so the real start does not restart it and kick the early arrivals); if it is already loaded (idle stop or crash mid-event) or the mode is `always`, the
+  server is simply started.
 Outside the allowed times nothing listens, so a port scan cannot start anything; at most 6 wakes an hour and 30 s between two. Each wake logs a `wake` activity row.
 
 ### Results + championship

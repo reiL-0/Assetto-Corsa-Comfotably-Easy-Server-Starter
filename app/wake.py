@@ -8,8 +8,12 @@ While a server is stopped and its wake mode allows it, the manager itself holds 
 - the game port (UDP and TCP, the same number): the first datagram or connection closes all the listeners, starts the
   server (`schedule.wake`) and leaves the ports to acServer. That first attempt gets no answer, the player tries again
   a few seconds later.
-Outside the allowed times nothing listens, so a port scan cannot start anything. Limited to MAX_PER_HOUR wakes and
-COOLDOWN seconds between two.
+Only Assetto Corsa wakes it. A player's game or Content Manager first asks the lobby (`/INFO`, `/JSON|…`, user agent
+«Assetto Corsa Launcher»); a connection to the game port is accepted as a wake only from an address that did that in the
+last AC_SEEN_TTL seconds. UDP never wakes anything: the one thing the game sends there is the ping `0xC8`, which the
+manager answers like acServer does (`0xC8` + the HTTP port, little endian) so Content Manager shows the server as
+reachable (Join clickable); anything else is ignored. Outside the allowed times nothing listens, so a port scan cannot
+start anything. Limited to MAX_PER_HOUR wakes and COOLDOWN seconds between two.
 """
 
 from __future__ import annotations
@@ -33,6 +37,9 @@ from app.servers import _ports
 log = logging.getLogger("acmanager.wake")
 SYNC_EVERY = 5.0  # seconds between looks at which servers should be listened for
 COOLDOWN = 30.0
+AC_SEEN_TTL = 15 * 60   # how long an address that asked the lobby as the game does may wake the server
+AC_AGENT = "assetto corsa"
+PING = 0xC8
 MAX_PER_HOUR = 6
 HOST = "0.0.0.0"  # tests aim it at loopback
 
@@ -79,7 +86,7 @@ def _abort(writer: asyncio.StreamWriter) -> None:
     writer.close()
 
 
-def _http_handler(server_id: int):
+def _http_handler(server_id: int, ac_seen):
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             line = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
@@ -93,6 +100,8 @@ def _http_handler(server_id: int):
                     agent = h.split(":", 1)[1].strip()
             peer = (writer.get_extra_info("peername") or ("?",))[0]
             log.info("lobby query server=%s %s from %s agent=%r", server_id, path, peer, agent)
+            if AC_AGENT in agent.lower() and path.startswith(("/INFO", "/JSON")):
+                ac_seen(peer)
             with Session(engine) as sess:
                 s = sess.get(Server, server_id)
                 body = json.dumps(facade_info(s)) if path.startswith("/INFO") else json.dumps(facade_cars(s)) if path.startswith("/JSON") else ""
@@ -108,19 +117,30 @@ def _http_handler(server_id: int):
 
 
 class _Udp(asyncio.DatagramProtocol):
-    def __init__(self, hit) -> None:
-        self.hit = hit
+    """UDP on the game port: answers the game's ping, ignores the rest. It never wakes the server."""
+
+    def __init__(self, pong: bytes) -> None:
+        self.pong, self.transport = pong, None
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
 
     def datagram_received(self, data: bytes, addr) -> None:
-        log.info("udp hit from %s: %d bytes %s", addr[0], len(data), data[:32].hex())
-        self.hit()
+        if data == bytes([PING]):
+            self.transport.sendto(self.pong, addr)
 
 
 class Waker:
     def __init__(self) -> None:
         self.listening: dict[int, tuple[asyncio.DatagramTransport, asyncio.AbstractServer, asyncio.AbstractServer | None]] = {}
         self.woken: dict[int, list[float]] = {}
+        self.ac_seen: dict[str, float] = {}   # address -> when it last asked the lobby as the game does
         self._busy: set[int] = set()
+
+    def _note_ac(self, ip: str) -> None:
+        now = time.time()
+        self.ac_seen = {a: t for a, t in self.ac_seen.items() if now - t < AC_SEEN_TTL}
+        self.ac_seen[ip] = now
 
     def _allowed(self, server_id: int, now: float) -> bool:
         recent = [t for t in self.woken.get(server_id, []) if now - t < 3600]
@@ -132,15 +152,15 @@ class Waker:
         hit = lambda: loop.create_task(self.trigger(server_id))  # noqa: E731
 
         async def on_tcp(reader, writer) -> None:
-            try:
-                first = await asyncio.wait_for(reader.read(32), 0.3)
-            except (asyncio.TimeoutError, OSError):
-                first = b""
-            log.info("tcp hit from %s: %s", (writer.get_extra_info("peername") or ("?",))[0], first.hex() or "(nothing sent)")
+            ip = (writer.get_extra_info("peername") or ("?",))[0]
+            known = time.time() - self.ac_seen.get(ip, 0) < AC_SEEN_TTL
+            log.info("tcp connection to the game port of server %s from %s: %s", server_id, ip, "Assetto Corsa, waking" if known else "not the game, ignored")
             _abort(writer)
-            hit()
+            if known:
+                hit()
 
-        udp, _ = await loop.create_datagram_endpoint(lambda: _Udp(hit), local_addr=(HOST, port))
+        pong = bytes([PING]) + (http_port or 0).to_bytes(2, "little")
+        udp, _ = await loop.create_datagram_endpoint(lambda: _Udp(pong), local_addr=(HOST, port))
         try:
             tcp = await asyncio.start_server(on_tcp, HOST, port)
         except OSError:
@@ -149,7 +169,7 @@ class Waker:
         http = None
         if http_port:
             try:
-                http = await asyncio.start_server(_http_handler(server_id), HOST, http_port)
+                http = await asyncio.start_server(_http_handler(server_id, self._note_ac), HOST, http_port)
             except OSError as e:   # waking matters more than the lobby look: go on without it
                 log.info("cannot answer the lobby on %s for server %s: %s", http_port, server_id, e)
         self.listening[server_id] = (udp, tcp, http)
