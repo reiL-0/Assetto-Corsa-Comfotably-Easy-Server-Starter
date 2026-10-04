@@ -198,3 +198,27 @@ def test_cooldown_and_limits_and_wake_modes(monkeypatch):
     monkeypatch.setattr(schedule.supervisor, "get", lambda _id: None)
     assert asyncio.run(schedule.wake(alw)) is True and started == [alw]      # "always" with no event: started as it was left
     assert asyncio.run(schedule.wake(win)) is False and asyncio.run(schedule.wake(off)) is False
+
+
+def test_starting_a_server_by_hand_frees_the_ports_first(monkeypatch):
+    """Pressing «Iniciar» while the manager holds the ports must not leave acServer without its HTTP / game ports."""
+    _setup(monkeypatch)
+    sid, port = _plain_server("always")
+
+    async def scenario():
+        wake.waker.close()
+        w = wake.waker
+        await w.sync()
+        assert sid in w.listening
+        for hook in wake.supervisor.before_start:      # what supervisor.start does right before spawning
+            hook(sid)
+        await asyncio.sleep(0.1)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u, socket.socket() as t1, socket.socket() as t2:
+            u.bind(("127.0.0.1", port)), t1.bind(("127.0.0.1", port)), t2.bind(("127.0.0.1", port + 1))   # all three are free now
+        await w.sync()
+        assert sid not in w.listening, "and they are not taken back while it starts"
+        w.holdoff[sid] = 0
+        w.close()
+
+    asyncio.run(scenario())
+

@@ -178,6 +178,7 @@ class Instance:
 
 # ponytail: in-memory registry, single process. After a manager restart `adopt` rebuilds it from the pid files.
 _instances: dict[int, Instance] = {}
+before_start: list = []   # called with the server id right before an acServer is spawned (app/wake.py frees the ports it holds for it)
 
 
 async def start(
@@ -194,6 +195,10 @@ async def start(
         raise RuntimeError("already running")
     if not settings.acserver_cmd:
         raise RuntimeError("ACM_ACSERVER_CMD is not configured")
+    for hook in before_start:
+        hook(server_id)
+    if before_start:
+        await asyncio.sleep(0.1)   # (closing a UDP endpoint takes effect on the next loop iteration)
     log_path = cwd / "server.log"
     if log_path.exists():
         log_path.replace(cwd / "server.log.1")  # the previous run stays readable for one more start

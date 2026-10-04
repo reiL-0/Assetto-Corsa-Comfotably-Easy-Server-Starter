@@ -37,6 +37,7 @@ from app.servers import _ports
 log = logging.getLogger("acmanager.wake")
 SYNC_EVERY = 5.0  # seconds between looks at which servers should be listened for
 COOLDOWN = 30.0
+START_HOLD = 20.0
 AC_SEEN_TTL = 15 * 60   # how long an address that asked the lobby as the game does may wake the server
 AC_AGENT = "assetto corsa"
 PING = 0xC8
@@ -134,8 +135,15 @@ class Waker:
     def __init__(self) -> None:
         self.listening: dict[int, tuple[asyncio.DatagramTransport, asyncio.AbstractServer, asyncio.AbstractServer | None]] = {}
         self.woken: dict[int, list[float]] = {}
+        self.holdoff: dict[int, float] = {}   # server id -> do not hold its ports before this time (it is starting)
         self.ac_seen: dict[str, float] = {}   # address -> when it last asked the lobby as the game does
         self._busy: set[int] = set()
+
+    def release(self, server_id: int) -> None:
+        """The server is about to be started by someone else (the panel, a schedule): free its ports for acServer, and do not take them
+        back until it is up."""
+        self._unbind(server_id)
+        self.holdoff[server_id] = time.time() + START_HOLD
 
     def _note_ac(self, ip: str) -> None:
         now = time.time()
@@ -199,7 +207,7 @@ class Waker:
             for s in sess.exec(select(Server)).all():
                 inst = supervisor.get(s.id)
                 allowed = s.wake == "always" or (s.wake == "window" and schedule.open_window(sess, s.id, now))
-                if allowed and not (inst and inst.running) and self._allowed(s.id, now):
+                if allowed and not (inst and inst.running) and self._allowed(s.id, now) and now >= self.holdoff.get(s.id, 0):
                     want[s.id] = (_ports(s.base_port)["udp"], _ports(s.base_port)["http"])
         for sid in set(self.listening) - set(want):
             self._unbind(sid)
@@ -216,6 +224,7 @@ class Waker:
 
 
 waker = Waker()
+supervisor.before_start.append(waker.release)   # any start of a server frees the ports the waker holds for it
 
 
 async def run_forever() -> None:
