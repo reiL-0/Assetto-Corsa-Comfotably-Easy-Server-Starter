@@ -91,13 +91,28 @@ def set_anchor(server_id: int, index: int, at: float) -> None:
 
 
 def on_session_event(server_id: int, event: dict) -> None:
-    """From the ACSP client: a session started, or the current session was described. Never raises."""
+    """From the ACSP client: a session started, or the current session was described. Never raises.
+
+    A session that `resume` shortened (the real one is `time_min` long, the configured one longer) is anchored as if it had started
+    that much earlier, so the clock ends it when the real one ends."""
     try:
         cur = event.get("current_session_index", event.get("session_index"))
         if event["type"] == "new_session" or event.get("session_index") == cur:
-            set_anchor(server_id, int(cur), time.time() - event.get("elapsed_ms", 0) / 1000)
+            shorter = 0
+            with Session(engine) as sess:
+                s = sess.get(Server, server_id)
+                segs = segments(s.config) if s else []
+            if int(cur) < len(segs) and segs[int(cur)].minutes and event.get("time_min"):
+                shorter = max(0, segs[int(cur)].minutes * 60 - int(event["time_min"]) * 60)
+            set_anchor(server_id, int(cur), time.time() - event.get("elapsed_ms", 0) / 1000 - shorter)
     except Exception:
         log.exception("could not store the session anchor")
+
+
+def config_durations(config: dict) -> list[int]:
+    """What /INFO calls `durations`: minutes of practice and qualify, laps (or minutes when timed) of the race."""
+    return [int(sec.get("TIME") or 0) if name != "RACE" else int(sec.get("LAPS") or sec.get("TIME") or 0)
+            for name, _ in TYPES if (sec := config.get(name))]
 
 
 def definition(seg: Seg, minutes: int | None = None) -> bytes:

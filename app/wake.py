@@ -69,6 +69,8 @@ def facade_info(s: Server) -> dict:
                 "pickup": bool(int(srv.get("PICKUP_MODE_ENABLED", 1))), "tport": ports["udp"], "timed": False, "extra": False,
                 "pit": False, "inverted": 0}
     info.update(clients=0, session=0)
+    if timeline.config_durations(s.config):   # the snapshot may have been taken while a session was shortened to catch up with the clock
+        info["durations"] = timeline.config_durations(s.config)
     info["timeleft"] = (info["durations"][0] * 60) if info.get("durations") else 0   # the first session, in full
     pos = timeline.server_position(s)
     if pos:   # the session clock keeps running while the server is off (app/timeline.py)

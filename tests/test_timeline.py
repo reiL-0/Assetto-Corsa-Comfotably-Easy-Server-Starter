@@ -146,3 +146,28 @@ def test_resume_edge_cases(monkeypatch):
     got = run()
     assert got["index"] == 2 and inst.acsp.transport.sent == [acsp.encode_next_session()] * 2
     assert asyncio.run(timeline.resume(sid, None, time.time(), settle=0)) is None                     # no position: starts as it is
+
+
+def test_a_shortened_session_ends_on_the_clock_when_the_real_one_ends():
+    sid = _server(CFG)                                 # qualify is configured for 15 min
+    timeline.on_session_event(sid, {"type": "new_session", "session_index": 1, "current_session_index": 1, "elapsed_ms": 0, "time_min": 9})   # resume made it 9
+    with Session(engine) as s:
+        srv = s.get(Server, sid)
+        pos = timeline.server_position(srv)
+    assert pos["index"] == 1 and abs(pos["remaining_s"] - 9 * M) < 3                                  # the clock and the real session agree
+    timeline.on_session_event(sid, {"type": "session_info", "session_index": 1, "current_session_index": 1, "elapsed_ms": 30000, "time_min": 9})
+    with Session(engine) as s:
+        assert abs(timeline.server_position(s.get(Server, sid))["remaining_s"] - (9 * M - 30)) < 3
+    timeline.on_session_event(sid, {"type": "new_session", "session_index": 1, "current_session_index": 1, "elapsed_ms": 0, "time_min": 15})   # a normal one
+    with Session(engine) as s:
+        assert abs(timeline.server_position(s.get(Server, sid))["remaining_s"] - 15 * M) < 3
+
+
+def test_the_lobby_durations_are_the_configured_ones_not_a_shortened_snapshot():
+    import json
+    sid = _server(CFG)
+    wake._instance_dir(sid).mkdir(parents=True, exist_ok=True)
+    (wake._instance_dir(sid) / "info.json").write_text(json.dumps({"name": "x", "durations": [15, 9, 20], "session": 1, "clients": 3, "timeleft": 5}))
+    with Session(engine) as s:
+        info = wake.facade_info(s.get(Server, sid))
+    assert info["durations"] == [15, 15, 5] and info["clients"] == 0 and info["timeleft"] == 15 * M   # (laps race: 5 laps)

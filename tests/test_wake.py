@@ -159,11 +159,11 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
             assert raw.decode().startswith('{"ip":"","port":') and "Prácticas" in raw.decode() and ", " not in raw.decode()
         wr.close()
         assert woken == [], "looking at the lobby wakes nothing"
-        # the real answer of the running server, once saved, is what the lobby shows (with nobody on)
+        # the real answer of the running server, once saved, is what the lobby shows (with nobody on); the session lengths are the configured ones
         wake._instance_dir(sid).mkdir(parents=True, exist_ok=True)
         (wake._instance_dir(sid) / "info.json").write_text(json.dumps({**info, "name": "Real", "clients": 5, "session": 2, "durations": [10, 10, 30], "timeleft": 7}))
         got = json.loads((await _http_get(port + 1, "/INFO"))[1])
-        assert got["name"] == "Real" and got["clients"] == 0 and got["session"] == 0 and got["timeleft"] == 600
+        assert got["name"] == "Real" and got["clients"] == 0 and got["session"] == 0 and got["durations"] == [15, 5] and got["timeleft"] == 15 * 60
         w.close()
 
     asyncio.run(scenario())
