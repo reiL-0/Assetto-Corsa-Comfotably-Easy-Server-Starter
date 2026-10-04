@@ -168,7 +168,7 @@ JSON files acServer writes under that instance's `results/` dir.
 ### Content integrity (`app/integrity.py`)
 
 What acServer verifies on every driver that joins (it logs the values at start: `CHECKSUM: …`, `ACD CHECKSUM:`): the MD5 of `system/data/surfaces.ini`,
-the track's `data/surfaces.ini`, `models.ini` (`models_<layout>.ini`) and `data/drs_zones.ini`, and each car's `data.acd`; a mismatch kicks the driver.
+the track's `data/surfaces.ini` and `models.ini` (`models_<layout>.ini`), and each car's `data.acd` (the values the manager computes were checked equal to the ones acServer prints); a mismatch kicks the driver.
 It does not check models (kn5), skins, apps, CSP or other plugins, and has no setting to add files, so those cannot be enforced from the server.
 The manager keeps the reference honest: `POST /integrity/seal {server_id | cars, track, config, extras}` (admin) stores the current MD5s as approved
 (`ContentSeal`; extras = any file/folder under the server directory), `GET /integrity/check?server_id=` compares (`ok` / `changed` / `missing` /

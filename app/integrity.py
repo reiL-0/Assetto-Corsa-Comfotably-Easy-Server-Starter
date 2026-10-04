@@ -4,7 +4,7 @@ watch over the checksum failures it reports.
 acServer itself, when a driver joins, asks the client for the MD5 of a few files and compares them with its own copies;
 a mismatch gets the driver kicked (the server log shows «CHECKSUM: …», «Sending N checksum requests», «Car checksum <car> true»):
 - `system/data/surfaces.ini`;
-- the track's `data/surfaces.ini` (of the layout, when there is one), its `models.ini` (`models_<layout>.ini`) and `data/drs_zones.ini`;
+- the track's `data/surfaces.ini` (of the layout, when there is one) and its `models.ini` (`models_<layout>.ini`);
 - each car's `data.acd` (the physics: power, grip, weight…).
 It does NOT check models (kn5), skins, apps, Custom Shaders Patch or any other plugin, and the server has no setting to add files:
 those cannot be enforced from here. So the reference is whatever sits in the server's `content/`: if that copy is altered
@@ -77,10 +77,7 @@ def track_files(track: str, config: str) -> dict[str, str | None]:
     d = root() / "content" / "tracks" / track
     data = d / config / "data" if config else d / "data"
     models = d / f"models_{config}.ini" if config and (d / f"models_{config}.ini").is_file() else d / "models.ini"
-    out = {_rel(data / "surfaces.ini"): _md5(data / "surfaces.ini"), _rel(models): _md5(models)}
-    if (data / "drs_zones.ini").is_file():
-        out[_rel(data / "drs_zones.ini")] = _md5(data / "drs_zones.ini")
-    return out
+    return {_rel(data / "surfaces.ini"): _md5(data / "surfaces.ini"), _rel(models): _md5(models)}   # exactly the track lines acServer logs
 
 
 def system_files() -> dict[str, str | None]:
