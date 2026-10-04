@@ -40,16 +40,16 @@ def test_parse_car_update():
 
 def test_parse_lap_completed_with_leaderboard():
     body = bytes([9]) + struct.pack("<I", 91234) + bytes([1, 2])
-    body += bytes([9]) + struct.pack("<I", 91234)
-    body += bytes([2]) + struct.pack("<I", 95000)
+    body += struct.pack("<BIHB", 9, 91234, 3, 0)
+    body += struct.pack("<BIHB", 2, 95000, 2, 1)
     body += struct.pack("<f", 0.98)
     event = acsp.parse(bytes([acsp.LAP_COMPLETED]) + body)
     assert event["car_id"] == 9
     assert event["laptime_ms"] == 91234
     assert event["cuts"] == 1
     assert event["leaderboard"] == [
-        {"car_id": 9, "laptime_ms": 91234},
-        {"car_id": 2, "laptime_ms": 95000},
+        {"car_id": 9, "laptime_ms": 91234, "laps": 3, "has_completed": False},
+        {"car_id": 2, "laptime_ms": 95000, "laps": 2, "has_completed": True},
     ]
     assert round(event["grip_level"], 2) == 0.98
 
@@ -63,6 +63,23 @@ def test_encode_admin_and_kick_commands():
     assert s == "ballast 3 50"
 
 
+def _s(text: str) -> bytes:
+    # acServer's 1-byte-per-char string (car model/skin, track, ...)
+    return bytes([len(text)]) + text.encode()
+
+
+def test_parse_real_new_session_from_acserver_1_15():
+    # Captured from a live acServer v1.15 (Linux build) over the plugin socket.
+    buf = (
+        b"2\x04\x00\x00\x01\x08O\x00\x00\x00P\x00\x00\x00R\x00\x00\x00 \x00\x00\x00"
+        b"t\x00\x00\x00e\x00\x00\x00s\x00\x00\x00t\x00\x00\x00\x07magione\x00\x08Practice"
+        b"\x01X\x02\x00\x00\x00\x00\x11\x16\x073_clear\x00\x00\x00\x00"
+    )
+    e = acsp.parse(buf)
+    assert (e["server_name"], e["track"], e["name"], e["time_min"]) == ("OPR test", "magione", "Practice", 600)
+    assert (e["ambient_temp"], e["road_temp"], e["weather"]) == (17, 22, "3_clear")
+
+
 def test_client_updates_state_from_datagrams():
     client = acsp.ACSPClient(1)
 
@@ -74,8 +91,7 @@ def test_client_updates_state_from_datagrams():
     conn += acsp._write_string("Driver")
     conn += acsp._write_string("guid-1")
     conn += bytes([4])
-    conn += acsp._write_string("car_model")
-    conn += acsp._write_string("skin")
+    conn += _s("car_model") + _s("skin")
     client.datagram_received(conn, ("127.0.0.1", 0))
     assert 4 in client.cars
     assert client.cars[4]["driver_name"] == "Driver"
@@ -84,8 +100,7 @@ def test_client_updates_state_from_datagrams():
     closed += acsp._write_string("Driver")
     closed += acsp._write_string("guid-1")
     closed += bytes([4])
-    closed += acsp._write_string("car_model")
-    closed += acsp._write_string("skin")
+    closed += _s("car_model") + _s("skin")
     client.datagram_received(closed, ("127.0.0.1", 0))
     assert 4 not in client.cars
 

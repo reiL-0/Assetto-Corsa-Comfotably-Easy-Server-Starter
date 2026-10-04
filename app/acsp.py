@@ -51,6 +51,12 @@ def _read_string(buf: bytes, pos: int) -> tuple[str, int]:
     return bytes(buf[pos : pos + n * 4 : 4]).decode("latin-1"), pos + n * 4
 
 
+def _read_sstring(buf: bytes, pos: int) -> tuple[str, int]:
+    """acServer's 1-byte-per-char strings (track, session name, car model/skin, weather)."""
+    n = buf[pos]
+    return bytes(buf[pos + 1 : pos + 1 + n]).decode("latin-1"), pos + 1 + n
+
+
 def _write_string(s: str) -> bytes:
     data = s.encode("latin-1", errors="replace")
     return bytes([len(data)]) + b"".join(bytes([b, 0, 0, 0]) for b in data)
@@ -62,16 +68,16 @@ def _read_session_info(buf: bytes, pos: int) -> tuple[dict, int]:
     )
     pos += 4
     server_name, pos = _read_string(buf, pos)
-    track, pos = _read_string(buf, pos)
-    track_config, pos = _read_string(buf, pos)
-    name, pos = _read_string(buf, pos)
+    track, pos = _read_sstring(buf, pos)
+    track_config, pos = _read_sstring(buf, pos)
+    name, pos = _read_sstring(buf, pos)
     (session_type,) = struct.unpack_from("<B", buf, pos)
     pos += 1
     time_min, laps, wait_time = struct.unpack_from("<3H", buf, pos)
     pos += 6
-    ambient_temp, road_temp = struct.unpack_from("<2f", buf, pos)
-    pos += 8
-    weather, pos = _read_string(buf, pos)
+    ambient_temp, road_temp = struct.unpack_from("<2B", buf, pos)
+    pos += 2
+    weather, pos = _read_sstring(buf, pos)
     (elapsed_ms,) = struct.unpack_from("<i", buf, pos)
     pos += 4
     return {
@@ -99,8 +105,8 @@ def _read_connection(buf: bytes, pos: int) -> tuple[dict, int]:
     driver_guid, pos = _read_string(buf, pos)
     car_id = buf[pos]
     pos += 1
-    car_model, pos = _read_string(buf, pos)
-    car_skin, pos = _read_string(buf, pos)
+    car_model, pos = _read_sstring(buf, pos)
+    car_skin, pos = _read_sstring(buf, pos)
     return {
         "car_id": car_id,
         "driver_name": driver_name,
@@ -159,11 +165,11 @@ def _read_lap_completed(buf: bytes, pos: int) -> tuple[dict, int]:
     pos += 1
     leaderboard = []
     for _ in range(cars_count):
-        cid = buf[pos]
-        pos += 1
-        (lt,) = struct.unpack_from("<I", buf, pos)
-        pos += 4
-        leaderboard.append({"car_id": cid, "laptime_ms": lt})
+        cid, lt, laps, completed = struct.unpack_from("<BIHB", buf, pos)
+        pos += 8
+        leaderboard.append(
+            {"car_id": cid, "laptime_ms": lt, "laps": laps, "has_completed": bool(completed)}
+        )
     grip_level = None
     if pos + 4 <= len(buf):
         (grip_level,) = struct.unpack_from("<f", buf, pos)
