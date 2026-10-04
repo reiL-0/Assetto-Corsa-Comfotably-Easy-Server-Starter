@@ -58,6 +58,22 @@ class Event(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class Schedule(SQLModel, table=True):
+    """A saved event set to start on a server at a given time, with Discord reminders before it (app.schedule)."""
+
+    __tablename__ = "schedules"
+
+    id: int | None = Field(default=None, primary_key=True)
+    event_id: int
+    server_id: int
+    start_at: float = Field(index=True)  # unix seconds, UTC
+    reminders: list[int] = Field(default_factory=lambda: [60, 10], sa_type=JSON)  # minutes before start_at
+    sent: list[int] = Field(default_factory=list, sa_type=JSON)  # the reminders already posted
+    state: str = "pending"  # pending | done | failed | missed
+    result: str = ""  # why it failed / was missed
+    created_at: datetime = Field(default_factory=_now)
+
+
 class Penalty(SQLModel, table=True):
     """A steward's decision on one driver in one result file. The result file itself is never edited:
     penalties are applied when it is read (app.results.apply_penalties)."""

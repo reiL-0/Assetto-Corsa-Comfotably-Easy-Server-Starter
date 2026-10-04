@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -6,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app import metrics
+from app import metrics, schedule
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import init_db
@@ -27,7 +28,9 @@ async def lifespan(_app: FastAPI):
     metrics.purge()
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
+    ticker = asyncio.create_task(schedule.run_forever())
     yield
+    ticker.cancel()
 
 
 app = FastAPI(

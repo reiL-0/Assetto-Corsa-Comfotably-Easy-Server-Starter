@@ -165,6 +165,14 @@ accept a raw INI body and parse it back into the stored config, and
 `GET /servers/{id}/results[/​{filename}]` lists/downloads session result
 JSON files acServer writes under that instance's `results/` dir.
 
+### Scheduled starts
+
+`app/schedule.py`: `POST /schedules {event_id, server_id, start_at (unix s), reminders: [60, 10]}` (steward reads, admin writes),
+`GET /schedules`, `DELETE /schedules/{id}`. A task started in the app lifespan ticks every 20 s: the nearest due reminder is
+posted to `ACM_DISCORD_WEBHOOK` (older missed ones are marked sent, not posted); at `start_at` the saved event is loaded onto the
+server and it restarts (whoever is connected is dropped). Overdue by more than 10 min (manager was down) → `missed`, not run;
+an apply error → `failed` with the reason, also posted.
+
 ### Results + championship
 
 `results.py` parses one of those result JSON files into a normalized shape:
@@ -318,6 +326,7 @@ UTC and decides where a day ends.
 | (content dir) | | with `ACM_ACSERVER_CMD` set, `content/` **is the acServer's own** (uploads land where the server reads them); otherwise `<data_dir>/content`. Big archives: copy to `<data_dir>/inbox/` and `POST /content/tracks/import {"file": "x.rar"}` (Cloudflare caps uploads at 100 MB). `.rar` needs `bsdtar` (`apt install libarchive-tools`). |
 | `ACM_IDLE_STOP_SECONDS` | `0`                   | stop an instance after N s with no connected cars (0 = never); restart via `POST /servers/{id}/start` |
 | `ACM_DISCORD_STATUS_WEBHOOK` | _(empty)_ | Discord webhook that gets a post when a server starts, stops (manual / idle) or crashes (`app/discord.py`, hooked into `metrics.log`) |
+| `ACM_DISCORD_WEBHOOK` | _(empty)_ | Discord webhook for league announcements: reminders and start/failure notices of scheduled starts (`app/schedule.py`) |
 
 ## Roadmap
 

@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     idle_stop_seconds: int = 0
     # Discord webhook for server started / stopped / crashed posts (empty = none). Env: ACM_DISCORD_STATUS_WEBHOOK
     discord_status_webhook: str = ""
+    # Discord webhook for league announcements (scheduled-start reminders). Env: ACM_DISCORD_WEBHOOK
+    discord_webhook: str = ""
 
     def acserver_dir(self) -> Path | None:
         """Directory of the acServer binary (holds `content/`, `system/`), or None when no binary is configured."""

@@ -1,6 +1,6 @@
 """Server status posts (started / stopped / crashed) to a Discord webhook.
 
-`metrics.log` calls `on_event` for every activity row; only the three server-lifecycle kinds are posted, and only when
+`announce` is the second channel (league announcements). `metrics.log` calls `on_event` for every activity row; only the three server-lifecycle kinds are posted, and only when
 `ACM_DISCORD_STATUS_WEBHOOK` is set. The post runs on a daemon thread so a slow Discord never delays a start or a stop,
 and a failure is logged and dropped.
 """
@@ -37,9 +37,9 @@ def message(name: str, kind: str, reason: str | None, value: float | None) -> st
     return f"💥 **{name}** se cayó (código {int(value) if value is not None else '?'}, {reason or ''})".replace(", )", ")")
 
 
-def _send(text: str) -> None:
+def _send(text: str, url: str | None = None) -> None:
     try:
-        req = urllib.request.Request(settings.discord_status_webhook, data=json.dumps({"content": text[:2000]}).encode(),
+        req = urllib.request.Request(url or settings.discord_status_webhook, data=json.dumps({"content": text[:2000]}).encode(),
                                      headers={"Content-Type": "application/json", "User-Agent": "OPR-AC-Manager"})
         urllib.request.urlopen(req, timeout=8).close()
     except Exception:
@@ -53,3 +53,9 @@ def on_event(server_id: int, kind: str, reason: str | None, value: float | None)
         srv = s.get(Server, server_id)
     text = message(srv.name if srv else f"Servidor #{server_id}", kind, reason, value)
     threading.Thread(target=_send, args=(text,), daemon=True).start()
+
+
+def announce(text: str) -> None:
+    """A league announcement (scheduled-start reminders) to `ACM_DISCORD_WEBHOOK`; nothing if it is not set."""
+    if settings.discord_webhook:
+        threading.Thread(target=_send, args=(text, settings.discord_webhook), daemon=True).start()
