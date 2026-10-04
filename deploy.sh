@@ -30,6 +30,7 @@ rm -rf /tmp/acm-deploy-check
 cmp -s pyproject.toml "$APP/pyproject.toml" || echo "AVISO: pyproject.toml cambió; instala las dependencias nuevas a mano en $APP/.venv"
 
 echo "2/5 copia de lo que corre ahora"
+PREV=$(cat "$APP/DEPLOYED" 2>/dev/null || echo desconocida)
 tar czf "$REL/before-$REV-$(date +%Y%m%d-%H%M%S).tgz" --exclude=__pycache__ --exclude=static -C "$APP" app pyproject.toml
 ls -1t "$REL"/*.tgz | tail -n +6 | xargs -r rm -f
 
@@ -53,6 +54,6 @@ last=$(ls -1t "$REL"/before-*.tgz | head -1)
 rm -rf /tmp/rollback-acm && mkdir /tmp/rollback-acm && tar xzf "$last" -C /tmp/rollback-acm
 rsync -rlc --delete --exclude=static --exclude=__pycache__ /tmp/rollback-acm/app/ "$APP/app/"
 cp /tmp/rollback-acm/pyproject.toml "$APP/pyproject.toml"
-chown -R acm:acm "$APP/app"; systemctl restart acm
+echo "$PREV" > "$APP/DEPLOYED"; chown -R acm:acm "$APP/app" "$APP/DEPLOYED"; systemctl restart acm
 echo "Restaurado desde $last" >&2; exit 1
 REMOTE
