@@ -55,6 +55,28 @@ def on_event(server_id: int, kind: str, reason: str | None, value: float | None)
     threading.Thread(target=_send, args=(text,), daemon=True).start()
 
 
+SESSIONS = {"Race": "Carrera", "Qualify": "Clasificación", "Practice": "Práctica"}
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def effect(kind: str, value: int) -> str:
+    """What a penalty does, in words. `value` as the API hands it out (seconds for `time`)."""
+    return {"time": f"+{value} s", "position": f"pierde {_plural(value, 'posición', 'posiciones')}",
+            "dsq": "descalificado", "grid": f"pierde {_plural(value, 'puesto', 'puestos')} en la parrilla de la próxima carrera",
+            "points": f"-{value} puntos de campeonato"}[kind]
+
+
+def penalty_message(server: str, parsed: dict, driver: str, kind: str, value: int, reason: str | None = None) -> str:
+    """Stewards' decision (with `reason`) or its withdrawal (`reason` None) for the league channel."""
+    where = f"{server} · {SESSIONS.get(parsed.get('type'), parsed.get('type') or 'Sesión')} en {parsed.get('track') or '?'}"
+    if reason is None:
+        return f"↩️ Sanción retirada a **{driver}** ({effect(kind, value)}) · {where}"
+    return f"⚖️ **Sanción** · {where}\n👤 **{driver}**: {effect(kind, value)}\n📝 {reason}"
+
+
 def announce(text: str) -> None:
     """A league announcement (scheduled-start reminders) to `ACM_DISCORD_WEBHOOK`; nothing if it is not set."""
     if settings.discord_webhook:

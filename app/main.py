@@ -6,11 +6,12 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlmodel import Session
 
-from app import metrics, schedule
+from app import metrics, schedule, servers
 from app.api.v1 import api_router
 from app.config import settings
-from app.db import init_db
+from app.db import engine, init_db
 from app.web import mount_spa
 
 ADMIN_SERVERS_HTML = Path(__file__).parent / "admin" / "servers.html"
@@ -26,6 +27,10 @@ log = logging.getLogger("acmanager")
 async def lifespan(_app: FastAPI):
     init_db()
     metrics.purge()
+    with Session(engine) as sess:
+        n = await servers.adopt_running(sess)
+    if n:
+        log.info("re-attached to %d running acServer(s)", n)
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     ticker = asyncio.create_task(schedule.run_forever())

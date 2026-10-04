@@ -165,6 +165,18 @@ accept a raw INI body and parse it back into the stored config, and
 `GET /servers/{id}/results[/​{filename}]` lists/downloads session result
 JSON files acServer writes under that instance's `results/` dir.
 
+### Servers outlive the manager
+
+`app/supervisor.py` starts each acServer in its own session with its output in `data/instances/<id>/server.log` (the previous run is kept as `server.log.1`) and its pid in `server.pid`. A manager restart therefore does not drop anyone: at boot (`servers.adopt_running`) every server whose pid file points at a live acServer in that instance directory is taken back: log followed again, ACSP socket re-bound, and `GET_CAR_INFO` sent for every slot so the people already on it reappear (`car_info` fills the board without counting a join). Uptime is kept; the event logged is `server_adopted`, not a start. A stale pid file (process gone, or pid reused by something else) is deleted. If the process disappears while adopted it counts as a crash (exit code unknown). The systemd unit must have `KillMode=process`, otherwise systemd kills the servers on `restart`/`stop`:
+
+    # /etc/systemd/system/acm.service.d/killmode.conf
+    [Service]
+    KillMode=process
+
+### Penalty announcements
+
+Adding a penalty (`POST .../results/{file}/penalties`) posts the decision to `ACM_DISCORD_WEBHOOK` (server, session and track, driver, effect, the steward's reason; the steward's name is not shown), and removing one posts that it was withdrawn (`app/discord.py` `penalty_message`). A refused request posts nothing.
+
 ### Scheduled starts
 
 `app/schedule.py`: `POST /schedules {event_id, server_id, start_at (unix s), reminders: [60, 10]}` (steward reads, admin writes),

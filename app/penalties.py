@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app import discord
 from app.auth import CurrentUser, require
 from app.db import SessionDep
 from app.models import Penalty
@@ -54,6 +55,10 @@ def _existing_result(sess: SessionDep, server_id: int, filename: str) -> dict:
     return parse_result_file(path)
 
 
+def _driver_name(parsed: dict, guid: str) -> str:
+    return next((x["driver_name"] for x in parsed["classification"] + parsed["laps"] if x["driver_guid"] == guid and x["driver_name"]), guid)
+
+
 @router.get("", response_model=list[PenaltyOut])
 def list_penalties(server_id: int, filename: str, sess: SessionDep) -> list[PenaltyOut]:
     _existing_result(sess, server_id, filename)
@@ -75,7 +80,9 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
     sess.add(p)
     sess.commit()
     sess.refresh(p)
-    return _out(p)
+    out = _out(p)
+    discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value, out.reason))
+    return out
 
 
 @router.delete("/{penalty_id}", status_code=204)
@@ -83,5 +90,7 @@ def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: Session
     p = sess.get(Penalty, penalty_id)
     if not p or (p.server_id, p.filename) != (server_id, filename):
         raise HTTPException(404, "penalty not found")
+    out, parsed = _out(p), _existing_result(sess, server_id, filename)
     sess.delete(p)
     sess.commit()
+    discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))

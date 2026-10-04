@@ -140,3 +140,16 @@ def test_track_import_from_the_inbox():
     assert r.status_code == 201 and r.json() == {"track": "inboxtrack"}
     assert (content._tracks_dir() / "inboxtrack" / "data" / "surfaces.ini").exists()
     assert TestClient(app).post(f"{V}/content/tracks/import", json={"file": "big.zip"}).status_code == 401  # admin only
+
+
+def test_car_info_after_reattaching_fills_the_table_without_counting_a_join(monkeypatch):
+    from app import metrics
+    joins = []
+    monkeypatch.setattr(metrics, "log", lambda *a, **k: joins.append(a[1]))
+    c = acsp.ACSPClient(72)
+    c._apply({"type": "car_info", "car_id": 3, "is_connected": True, "car_model": "bmw", "car_skin": "s", "driver_name": "Ana",
+              "driver_team": "", "driver_guid": "76561198000000001"})
+    c._apply({"type": "car_info", "car_id": 4, "is_connected": False, "car_model": "bmw", "car_skin": "", "driver_name": "",
+              "driver_team": "", "driver_guid": ""})
+    assert [d.name for d in c.board.drivers if d.connected] == ["Ana"] and list(c.cars) == [3] and "join" not in joins
+

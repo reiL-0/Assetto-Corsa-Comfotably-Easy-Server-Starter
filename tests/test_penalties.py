@@ -143,3 +143,20 @@ def test_championship_uses_the_penalised_classification():
     api.post(url, json={"driver_guid": C, "kind": "dsq", "reason": "Pits abiertos"})
     assert pts()[C]["points"] == 0  # disqualified drivers score nothing
     assert pts()[A]["points"] == 18  # A moved up to 2nd
+
+
+def test_penalties_and_their_withdrawal_are_announced(monkeypatch):
+    from app import discord
+    said = []
+    monkeypatch.setattr(discord, "announce", said.append)
+    sid, name = _sid_and_file("announce.json")
+    url = f"{V}/servers/{sid}/results/{name}/penalties"
+    pid = api.post(url, json={"driver_guid": A, "kind": "time", "value": 20, "reason": "Contacto con B"}).json()["id"]
+    assert len(said) == 1 and "**A**: +20 s" in said[0] and "Contacto con B" in said[0] and "Carrera" in said[0], said
+    api.delete(f"{url}/{pid}")
+    assert len(said) == 2 and said[1].startswith("↩️ Sanción retirada a **A** (+20 s)"), said
+    api.post(url, json={"driver_guid": A, "kind": "dsq", "reason": "Pits abiertos"})
+    api.post(url, json={"driver_guid": B, "kind": "position", "value": 1, "reason": "Salida en falso"})
+    assert "descalificado" in said[2] and "pierde 1 posición\n" in said[3] + "\n"
+    assert api.post(url, json={"driver_guid": A, "kind": "time", "value": 0, "reason": "mal"}).status_code == 422 and len(said) == 4  # a refused one says nothing
+

@@ -307,6 +307,7 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
+        self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
         self.events: deque[dict] = deque(maxlen=max_events)
         self.n_events = 0  # total ever appended; the deque forgets old ones, /live needs a cursor
         self.cars: dict[int, dict] = {}
@@ -341,6 +342,11 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.cars[event["car_id"]] = event
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
+        elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
+            # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
+            joined = {**event, "type": "new_connection"}
+            self.board.apply(joined)
+            self.cars[event["car_id"]] = joined
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
 
@@ -391,6 +397,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             await asyncio.sleep(1)
             if self.session:
                 self.send(encode_realtime_pos_interval(POS_INTERVAL_MS))
+                for car_id in range(self.car_slots):  # re-attached to a running server: it will not announce the cars already on it
+                    self.send(encode_get_car_info(car_id))
                 return
 
     def close(self) -> None:
@@ -401,11 +409,13 @@ class ACSPClient(asyncio.DatagramProtocol):
 
 
 async def connect(
-    server_id: int, remote_port: int, local_port: int, host: str = "127.0.0.1"
+    server_id: int, remote_port: int, local_port: int, host: str = "127.0.0.1", car_slots: int = 0
 ) -> ACSPClient:
-    """Bind our side of the plugin socket and target acServer's local port."""
+    """Bind our side of the plugin socket and target acServer's local port. `car_slots` > 0 when the server is already
+    running: its car slots are asked for who sits in them."""
     loop = asyncio.get_running_loop()
     protocol = ACSPClient(server_id)
+    protocol.car_slots = car_slots
     await loop.create_datagram_endpoint(
         lambda: protocol,
         local_addr=(host, local_port),

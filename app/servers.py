@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
-from sqlmodel import select
+from sqlmodel import Session, select
 
 from app import content, supervisor
 from app.auth import require
@@ -438,7 +438,20 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
-    return {"running": inst.running, "pid": inst.proc.pid}
+    return {"running": inst.running, "pid": inst.pid}
+
+
+async def adopt_running(sess: Session) -> int:
+    """At boot: take back every acServer a previous manager process left running (see supervisor.adopt)."""
+    n = 0
+    for s in sess.exec(select(Server)).all():
+        p = _ports(s.base_port)
+        inst = await supervisor.adopt(
+            s.id, Path(settings.data_dir) / "instances" / str(s.id),
+            acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list),
+        )
+        n += inst is not None
+    return n
 
 
 @router.post("/{server_id}/stop")
@@ -454,7 +467,7 @@ def status(server_id: int, sess: SessionDep) -> dict:
     inst = supervisor.get(server_id)
     if not inst:
         return {"running": False, "returncode": None, "uptime": 0.0}
-    return {"running": inst.running, "returncode": inst.proc.returncode, "uptime": inst.uptime}
+    return {"running": inst.running, "returncode": inst.exit_code, "uptime": inst.uptime}
 
 
 @router.get("/{server_id}/logs")
