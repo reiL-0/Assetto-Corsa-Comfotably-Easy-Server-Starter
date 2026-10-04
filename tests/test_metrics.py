@@ -192,3 +192,24 @@ def test_now_endpoint_reports_the_running_servers(tmp_path):
 
     asyncio.run(scenario())
     assert TestClient(app).get(f"{V}/metrics/now").status_code == 401
+
+
+
+def test_lifecycle_events_are_posted_to_discord_and_the_rest_are_not(monkeypatch):
+    from app import discord
+    from app.config import settings
+
+    sent = []
+    monkeypatch.setattr(discord, "_send", sent.append)
+    monkeypatch.setattr(discord.threading, "Thread", lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    metrics.log(5, "server_start")
+    assert sent == [], "no webhook configured -> nothing is posted"
+
+    monkeypatch.setattr(settings, "discord_status_webhook", "https://example.invalid/hook")
+    metrics.log(5, "server_start")
+    metrics.log(5, "server_stop", name="idle", value=3725)
+    metrics.log(5, "server_crash", name="up 90s", value=139)
+    metrics.log(5, "lap", name="x")
+    assert sent == ["🟢 **Servidor #5** iniciado", "🔴 **Servidor #5** detenido por inactividad (sin pilotos) · estuvo 1 h 2 min en marcha",
+                    "💥 **Servidor #5** se cayó (código 139, up 90s)"]
+

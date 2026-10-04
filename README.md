@@ -317,6 +317,7 @@ UTC and decides where a day ends.
 | `ACM_LOG_LINES`    | `500`                      | per-instance stdout ring buffer size |
 | (content dir) | | with `ACM_ACSERVER_CMD` set, `content/` **is the acServer's own** (uploads land where the server reads them); otherwise `<data_dir>/content`. Big archives: copy to `<data_dir>/inbox/` and `POST /content/tracks/import {"file": "x.rar"}` (Cloudflare caps uploads at 100 MB). `.rar` needs `bsdtar` (`apt install libarchive-tools`). |
 | `ACM_IDLE_STOP_SECONDS` | `0`                   | stop an instance after N s with no connected cars (0 = never); restart via `POST /servers/{id}/start` |
+| `ACM_DISCORD_STATUS_WEBHOOK` | _(empty)_ | Discord webhook that gets a post when a server starts, stops (manual / idle) or crashes (`app/discord.py`, hooked into `metrics.log`) |
 
 ## Roadmap
 

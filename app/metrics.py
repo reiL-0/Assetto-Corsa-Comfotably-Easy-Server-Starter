@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
+from app import discord
 from app.auth import require
 from app.db import SessionDep, engine
 from app.models import Activity
@@ -29,6 +30,10 @@ def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None
             s.commit()
     except Exception:
         log_.exception("could not record %s", kind)
+    try:
+        discord.on_event(server_id, kind, name, value)
+    except Exception:
+        log_.exception("discord hook failed for %s", kind)
 
 
 def purge(now: float | None = None) -> int:

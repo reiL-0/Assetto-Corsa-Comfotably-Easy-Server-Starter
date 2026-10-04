@@ -74,10 +74,10 @@ class _Inst:
         self.acsp = client
 
 
-def test_leaderboard_route_is_public_and_503_when_stopped():
+def test_leaderboard_route_is_public_and_409_when_stopped():
     api = TestClient(app)  # no token on purpose: the site's proxy and the telemetry backend send none
     url = f"{V}/servers/71/acsm/api/live-timings/leaderboard.json"
-    assert api.get(url).status_code == 503
+    assert api.get(url).status_code == 409
     c = acsp.ACSPClient(71)
     c.board = _board()
     supervisor._instances[71] = _Inst(c)

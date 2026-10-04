@@ -24,7 +24,7 @@ _NAME = re.compile(r"^[\w.\-]+$")  # one path segment: no separators, no "..": t
 def leaderboard(server_id: int) -> dict:
     inst = supervisor.get(server_id)
     if not inst or not inst.running or not inst.acsp:
-        raise HTTPException(503, "server not running")  # sites treat a failed fetch as "offline"
+        raise HTTPException(409, "server not running")  # 4xx, not 5xx: a stopped server is normal and must not count as a manager error; sites treat a failed fetch as "offline"
     return inst.acsp.board.leaderboard()
 
 

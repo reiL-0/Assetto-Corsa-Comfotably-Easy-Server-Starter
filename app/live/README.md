@@ -33,7 +33,7 @@ no stracker. Everything here belongs to one running acServer instance.
   `Ping`, `IsInPits`, `BestLapSplits`, `Split`, `TeamName`, `DriverInitials`.
 
 ### `acsm.py` — public read routes (`router`, prefix `/servers/{id}/acsm`)
-- `GET /api/live-timings/leaderboard.json` → `LiveBoard.leaderboard()`; 503 when the server is not running.
+- `GET /api/live-timings/leaderboard.json` → `LiveBoard.leaderboard()`; 409 when the server is not running.
 - `GET /content/tracks/{track}[/{config}]/map.png` and `.../data/map.ini` → files from the acServer's own
   `content/tracks` (via `app.content._tracks_dir`). Names must match `[\w.-]+`, so nothing outside that folder is reachable.
 - Public on purpose: the manager listens on localhost and the site's proxy sends no token.
