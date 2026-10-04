@@ -189,6 +189,8 @@ posted to `ACM_DISCORD_WEBHOOK` (older missed ones are marked sent, not posted);
 server and it restarts (whoever is connected is dropped) unless it is already on it (`loaded`, see below). Overdue by more than 10 min
 (manager was down) -> `missed`, not run; an apply error -> `failed` with the reason, also posted.
 
+`info` (free text, ≤ 600 chars) is appended to its Discord messages; `silent_past` marks the reminders already due at creation as sent (the caller, the site's calendar, announced the event itself). A schedule that overlaps another pending/running one on the same server is refused with 409; events queued back to back are fine.
+
 With `duration_min` the schedule is `running` until `start_at + duration`: 5 min before the end the in-game chat says so; at the end
 the server is stopped (`server_stop` with reason `event_end`, Discord notice) and the schedule is `done`. Without it the schedule is
 `done` once started and only the idle stop (`ACM_IDLE_STOP_SECONDS`) ends the session.

@@ -146,3 +146,27 @@ def test_wake_loads_the_event_once_then_just_starts_the_server(monkeypatch):
     monkeypatch.setattr(schedule.supervisor, "get", lambda _id: _FakeInstance())
     assert asyncio.run(schedule.wake(sid, t0 + 10)) is False                                # already running
 
+
+def test_overlapping_events_on_one_server_are_refused_but_a_queue_is_fine():
+    sid, first = _setup(7200, reminders=(), duration=60)
+    eid = first["event_id"]
+    t0 = first["start_at"]
+
+    def post(start, duration=60, **extra):
+        return client.post("/api/v1/schedules", json={"event_id": eid, "server_id": sid, "start_at": start, "duration_min": duration, "reminders": [], **extra})
+    assert post(t0 + 1800).status_code == 409                      # starts while the first one is running
+    assert post(t0 - 1800).status_code == 409                      # ends while the first one is running
+    assert post(t0 + 3600).status_code == 201                      # right after it: queued
+    assert post(t0 - 3600).status_code == 201                      # right before it
+
+
+def test_silent_past_marks_the_reminders_already_due_as_sent_and_info_travels_with_the_messages(monkeypatch):
+    sid, sc = _setup(20 * 3600, reminders=(), duration=None)
+    eid = sc["event_id"]
+    r = client.post("/api/v1/schedules", json={"event_id": eid, "server_id": 0 or sid, "start_at": time.time() + 7200 * 5 + 1,   # 10 h from now
+                                               "reminders": [1440, 60, 10], "silent_past": True, "info": "📍 1.2.3.4:9600", "duration_min": 5})
+    assert r.status_code == 201, r.text
+    assert r.json()["sent"] == [1440] and r.json()["info"] == "📍 1.2.3.4:9600"      # the day-before notice is covered; 1 h and 10 min are still to come
+    said = [m for m in _tick(r.json()["start_at"] - 3000, monkeypatch, []) if "📍" in m]   # (other tests' schedules share the database)
+    assert len(said) == 1 and said[0].endswith("\n📍 1.2.3.4:9600") and _row(r.json()["id"]).sent == [1440, 60]
+
