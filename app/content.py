@@ -5,18 +5,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
+from app import download
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -82,6 +86,7 @@ def list_cars() -> list[dict]:
         cars.append(
             {
                 "car": d.name,
+                "usable": (d / "data.acd").is_file(),  # what acServer loads; folders without it are leftovers
                 "name": ui.get("name"),
                 "brand": ui.get("brand"),
                 "class": ui.get("class"),
@@ -107,7 +112,14 @@ def list_tracks() -> list[dict]:
                 layout_json = sub / "ui_track.json"
                 if sub.is_dir() and layout_json.exists():
                     configs.append({"config": sub.name, **_read_json(layout_json)})
-        tracks.append({"track": d.name, "configs": configs})
+        # Server packs have no ui/: a layout is a folder with its own data/surfaces.ini (map-only folders are not).
+        known = {c["config"] for c in configs}
+        for sub in sorted(d.iterdir()):
+            if sub.is_dir() and sub.name not in known and (sub / "data" / "surfaces.ini").is_file():
+                configs.append({"config": sub.name})
+        layouts = [c for c in configs if c["config"] and (d / c["config"] / "data" / "surfaces.ini").is_file()]
+        base = (d / "data" / "surfaces.ini").is_file()  # the track itself (no layout) can be raced
+        tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts)})
     return tracks
 
 
@@ -253,6 +265,117 @@ def get_track_checksum(track: str, config: str | None = None) -> dict:
 @router.get("/tracks/{track}.zip")
 def download_track(track: str) -> FileResponse:
     return _zip_response(_tracks_dir() / _safe(track), f"{track}.zip")
+
+
+# --- chunked uploads (the browser sends parts under Cloudflare's 100 MB request cap) ------------------------
+# ponytail: registry in memory, single process (like the supervisor); a restart forgets unfinished uploads.
+MAX_UPLOAD = 6 * 1024**3
+_uploads: dict[str, dict] = {}
+
+
+class UploadIn(BaseModel):
+    kind: Literal["track", "car"]
+
+
+def _upload(uid: str) -> dict:
+    u = _uploads.get(uid)
+    if not u:
+        raise HTTPException(404, "unknown upload")
+    return u
+
+
+@router.post("/uploads", status_code=201)
+def upload_start(body: UploadIn) -> dict:
+    uid = secrets.token_hex(8)
+    path = _scratch() / f"upload-{uid}"
+    path.write_bytes(b"")
+    _uploads[uid] = {"path": path, "kind": body.kind, "size": 0, "state": "uploading", "result": None, "error": None}
+    return {"id": uid}
+
+
+@router.put("/uploads/{uid}")
+async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
+    """Append the next part. `offset` must equal what the server already has (409 tells the client where to resume)."""
+    u = _upload(uid)
+    if u["state"] != "uploading":
+        raise HTTPException(409, "upload is no longer accepting data")
+    if offset != u["size"]:
+        raise HTTPException(409, f"expected offset {u['size']}")
+    data = await request.body()
+    if u["size"] + len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "archive too large")
+    with u["path"].open("ab") as fh:
+        fh.write(data)
+    u["size"] += len(data)
+    return {"size": u["size"]}
+
+
+def _finish(uid: str) -> None:
+    """Runs in its own thread: it must outlive the request that started it."""
+    u = _uploads[uid]
+    dest = _tracks_dir() if u["kind"] == "track" else _cars_dir()
+    try:
+        u["result"] = _extract(u["path"], dest)
+        u["state"] = "done"
+    except HTTPException as e:
+        u["state"], u["error"] = "error", str(e.detail)
+    except Exception as e:  # noqa: BLE001 - a bad archive must end as an error state, not a lost thread
+        u["state"], u["error"] = "error", f"{type(e).__name__}: {e}"
+    finally:
+        u["path"].unlink(missing_ok=True)
+
+
+@router.post("/uploads/{uid}/complete", status_code=202)
+def upload_complete(uid: str) -> dict:
+    """Unpack in the background (hundreds of MB take longer than a proxy waits); poll GET /uploads/{id}."""
+    u = _upload(uid)
+    if u["state"] != "uploading" or not u["size"]:
+        raise HTTPException(409, "nothing to unpack")
+    u["state"] = "extracting"
+    threading.Thread(target=_finish, args=(uid,), daemon=True).start()
+    return {"state": "extracting"}
+
+
+class LinkIn(BaseModel):
+    kind: Literal["track", "car"]
+    url: str = Field(min_length=8, max_length=2000)
+
+
+def _fetch_then_finish(uid: str, url: str) -> None:
+    u = _uploads[uid]
+
+    def progress(done: int, total: int | None) -> None:
+        u["size"], u["total"] = done, total
+
+    try:
+        download.fetch(download.resolve(url, download.opener()), u["path"], MAX_UPLOAD, progress)
+    except Exception as e:  # noqa: BLE001 - whatever went wrong must reach the panel as text
+        u["state"], u["error"] = "error", f"download failed: {e}"
+        u["path"].unlink(missing_ok=True)
+        return
+    u["state"] = "extracting"
+    _finish(uid)
+
+
+@router.post("/uploads/from-link", status_code=202)
+def upload_from_link(body: LinkIn) -> dict:
+    """The server downloads a MediaFire / Google Drive / Dropbox link itself, then unpacks it (poll GET /uploads/{id})."""
+    try:
+        download.check_url(body.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    uid = secrets.token_hex(8)
+    path = _scratch() / f"upload-{uid}"
+    path.write_bytes(b"")
+    _uploads[uid] = {"path": path, "kind": body.kind, "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
+    return {"id": uid}
+
+
+@router.get("/uploads/{uid}")
+def upload_status(uid: str) -> dict:
+    u = _upload(uid)
+    return {k: u.get(k) for k in ("kind", "size", "total", "state", "result", "error")}
 
 
 class InboxIn(BaseModel):

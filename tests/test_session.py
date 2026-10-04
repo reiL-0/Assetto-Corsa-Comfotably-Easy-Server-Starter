@@ -1,0 +1,167 @@
+import io
+import time
+import zipfile
+
+from conftest import ADMIN
+from fastapi.testclient import TestClient
+
+from app import content, supervisor
+from app.config import settings
+from app.main import app
+
+V = "/api/v1"
+api = TestClient(app, headers=ADMIN)
+
+
+def _touch(path, text="x"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _install():
+    """spa (plain), nords (two layouts), mapsonly (only map files), and two cars."""
+    t = content._tracks_dir()
+    _touch(t / "spa" / "data" / "surfaces.ini")
+    for lay in ("gp", "sprint"):
+        _touch(t / "nords" / lay / "data" / "surfaces.ini")
+    _touch(t / "mapsonly" / "data" / "map.ini")
+    _touch(t / "mapsonly" / "map.png")
+    c = content._cars_dir()
+    _touch(c / "bmw" / "data.acd")
+    _touch(c / "bmw" / "skins" / "red" / "livery.png")
+    _touch(c / "audi" / "data.acd")
+    _touch(c / "leftover" / "readme.txt")  # a folder without data.acd is not a loadable car
+
+
+def _server():
+    return api.post(f"{V}/servers", json={"name": "t"}).json()["id"]
+
+
+FORM = {"name": "Liga", "password": "pw", "admin_password": "boss", "track": "spa", "cars": ["bmw", "audi"],
+        "max_clients": 5, "practice_min": 10, "qualify_min": 5, "race_laps": 3, "restart": False}
+
+
+def test_listings_mark_what_acserver_can_load():
+    _install()
+    tracks = {t["track"]: t for t in api.get(f"{V}/content/tracks").json()}
+    assert tracks["spa"]["usable"] and tracks["spa"]["base"] and tracks["nords"]["usable"] and not tracks["nords"]["base"]
+    assert not tracks["mapsonly"]["usable"]  # map placeholders must not be offered as tracks
+    assert [c["config"] for c in tracks["nords"]["configs"]] == ["gp", "sprint"]
+    cars = {c["car"]: c for c in api.get(f"{V}/content/cars").json()}
+    assert cars["bmw"]["usable"] and not cars["leftover"]["usable"] and cars["bmw"]["skins"] == ["red"]
+
+
+def test_apply_builds_config_and_entry_list():
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json=FORM)
+    assert r.status_code == 200 and r.json()["restarted"] is False
+    srv = r.json()["config"]["SERVER"]
+    assert (srv["NAME"], srv["PASSWORD"], srv["ADMIN_PASSWORD"], srv["TRACK"], srv["CARS"], srv["MAX_CLIENTS"]) == (
+        "Liga", "pw", "boss", "spa", "bmw;audi", 5)
+    assert srv["SLEEP_TIME"] == 1 and "WEATHER_0" in r.json()["config"]
+    assert r.json()["config"]["RACE"]["LAPS"] == 3 and r.json()["config"]["PRACTICE"]["TIME"] == 10
+    entries = r.json()["entry_list"]
+    assert [e["MODEL"] for e in entries] == ["bmw", "audi", "bmw", "audi", "bmw"]
+    assert entries[0]["SKIN"] == "red" and entries[1]["SKIN"] == ""
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    assert "CARS=bmw;audi" in ini and "[RACE]" in ini and "[QUALIFY]" in ini
+
+
+def test_apply_keeps_admin_password_and_drops_disabled_sessions():
+    _install()
+    sid = _server()
+    api.post(f"{V}/servers/{sid}/apply", json=FORM)
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "admin_password": None, "qualify_min": 0, "race_laps": None})
+    cfg = r.json()["config"]
+    assert cfg["SERVER"]["ADMIN_PASSWORD"] == "boss" and "QUALIFY" not in cfg and "RACE" not in cfg and "PRACTICE" in cfg
+
+
+def test_apply_rejects_what_the_server_could_not_run():
+    _install()
+    sid = _server()
+    bad = [
+        {"track": "nope"}, {"track": "mapsonly"}, {"track": "spa", "track_config": "gp"},
+        {"track": "nords"},  # has layouts but none chosen
+        {"track": "nords", "track_config": "oval"}, {"cars": ["ghost"]}, {"cars": ["leftover"]},
+        {"practice_min": 0, "qualify_min": 0, "race_laps": 0},  # no session at all
+        {"max_clients": 0}, {"name": ""},
+    ]
+    for patch in bad:
+        assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, **patch}).status_code in (400, 422), patch
+    assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, "track": "nords", "track_config": "gp"}).status_code == 200
+    assert TestClient(app).post(f"{V}/servers/{sid}/apply", json=FORM).status_code == 401
+
+
+def _chunks(data: bytes, n: int):
+    size = -(-len(data) // n)
+    return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+def _zip(entries):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for k, v in entries.items():
+            zf.writestr(k, v)
+    return buf.getvalue()
+
+
+def _wait(uid):
+    for _ in range(100):
+        st = api.get(f"{V}/content/uploads/{uid}").json()
+        if st["state"] in ("done", "error"):
+            return st
+        time.sleep(0.05)
+    raise AssertionError("upload never finished")
+
+
+def test_chunked_upload_resumes_unpacks_and_reports_errors():
+    data = _zip({"bigtrack/data/surfaces.ini": b"x" * 5000, "bigtrack/map.png": b"png"})
+    uid = api.post(f"{V}/content/uploads", json={"kind": "track"}).json()["id"]
+    parts = _chunks(data, 3)
+    off = 0
+    for i, part in enumerate(parts):
+        if i == 1:  # a client that lost track of its position is told where to resume
+            r = api.put(f"{V}/content/uploads/{uid}", params={"offset": off + 7}, content=part)
+            assert r.status_code == 409 and str(off) in r.json()["detail"]
+        r = api.put(f"{V}/content/uploads/{uid}", params={"offset": off}, content=part)
+        assert r.status_code == 200
+        off = r.json()["size"]
+    assert api.post(f"{V}/content/uploads/{uid}/complete").status_code == 202
+    st = _wait(uid)
+    assert st["state"] == "done" and st["result"] == "bigtrack"
+    assert (content._tracks_dir() / "bigtrack" / "data" / "surfaces.ini").is_file()
+    assert not any(content._scratch().glob("upload-*"))  # the assembled file is cleaned up
+
+    bad = api.post(f"{V}/content/uploads", json={"kind": "car"}).json()["id"]
+    api.put(f"{V}/content/uploads/{bad}", params={"offset": 0}, content=b"this is not an archive")
+    api.post(f"{V}/content/uploads/{bad}/complete")
+    st = _wait(bad)
+    assert st["state"] == "error" and "not a zip or rar" in st["error"]
+
+
+def test_upload_endpoints_are_admin_only_and_validated():
+    anon = TestClient(app)
+    assert anon.post(f"{V}/content/uploads", json={"kind": "track"}).status_code == 401
+    assert api.post(f"{V}/content/uploads", json={"kind": "skin"}).status_code == 422
+    assert api.get(f"{V}/content/uploads/deadbeef").status_code == 404
+    uid = api.post(f"{V}/content/uploads", json={"kind": "track"}).json()["id"]
+    assert api.post(f"{V}/content/uploads/{uid}/complete").status_code == 409  # nothing uploaded yet
+
+
+def test_apply_can_restart_the_server(tmp_path, monkeypatch):
+    fake = tmp_path / "acServer"  # the binary's folder is where content/ lives
+    fake.write_text("#!/bin/sh\nexec sleep 60\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(settings, "acserver_cmd", str(fake))
+    _install()  # content now lives next to the fake binary, not in the shared test dir
+    with TestClient(app, headers=ADMIN) as one_loop:  # the server process belongs to one event loop for the whole test
+        sid = one_loop.post(f"{V}/servers", json={"name": "t"}).json()["id"]
+        try:
+            first = one_loop.post(f"{V}/servers/{sid}/apply", json={**FORM, "restart": True}).json()
+            assert first["restarted"] is True and supervisor.get(sid).running
+            pid = supervisor.get(sid).proc.pid
+            again = one_loop.post(f"{V}/servers/{sid}/apply", json={**FORM, "restart": True}).json()
+            assert again["restarted"] and supervisor.get(sid).proc.pid != pid  # old process replaced
+        finally:
+            one_loop.post(f"{V}/servers/{sid}/stop")

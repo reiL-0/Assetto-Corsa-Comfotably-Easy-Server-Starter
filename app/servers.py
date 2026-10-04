@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
-from app import supervisor
+from app import content, supervisor
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
@@ -216,6 +216,92 @@ async def upload_entry_list_ini(server_id: int, request: Request, sess: SessionD
     sess.commit()
     sess.refresh(s)
     return _out(s)
+
+
+DEFAULT_WEATHER = {"GRAPHICS": "3_clear", "BASE_TEMPERATURE_AMBIENT": 18, "BASE_TEMPERATURE_ROAD": 24,
+                   "VARIATION_AMBIENT": 1, "VARIATION_ROAD": 1}
+
+
+class SessionIn(BaseModel):
+    """What the admin panel's "new session" form sends."""
+
+    name: str = Field(min_length=1, max_length=80)
+    password: str = ""  # join password; "" = open
+    admin_password: str | None = None  # None = keep the current one
+    track: str
+    track_config: str = ""
+    cars: list[str] = Field(min_length=1)
+    max_clients: int = Field(ge=1, le=50)
+    practice_min: int | None = Field(default=None, ge=0, le=720)
+    qualify_min: int | None = Field(default=None, ge=0, le=720)
+    race_laps: int | None = Field(default=None, ge=0, le=999)
+    race_wait_s: int = Field(default=60, ge=0, le=600)
+    restart: bool = True
+
+
+class AppliedOut(ServerOut):
+    restarted: bool
+
+
+def _check_content(body: SessionIn) -> dict[str, list[str]]:
+    """Track, layout and cars must be installed and loadable by acServer. Returns each car's skins."""
+    tracks = {t["track"]: t for t in content.list_tracks()}
+    t = tracks.get(body.track)
+    if not t or not t["usable"]:
+        raise HTTPException(400, f"track {body.track!r} is not installed")
+    layouts = [c["config"] for c in t["configs"] if c["config"]]
+    if body.track_config and body.track_config not in layouts:
+        raise HTTPException(400, f"layout {body.track_config!r} is not installed for {body.track}")
+    if layouts and not body.track_config and not (content._tracks_dir() / body.track / "data" / "surfaces.ini").is_file():
+        raise HTTPException(400, f"{body.track} needs a layout: {', '.join(layouts)}")
+    cars = {c["car"]: c for c in content.list_cars() if c["usable"]}
+    missing = [c for c in body.cars if c not in cars]
+    if missing:
+        raise HTTPException(400, f"cars not installed: {', '.join(missing)}")
+    return {c: cars[c]["skins"] for c in body.cars}
+
+
+@router.post("/{server_id}/apply", response_model=AppliedOut)
+async def apply_session(server_id: int, body: SessionIn, sess: SessionDep) -> AppliedOut:
+    """Build server_cfg + entry list from the form, save them, and (optionally) restart the server with them."""
+    s = _get(sess, server_id)
+    if not (body.practice_min or body.qualify_min or body.race_laps):
+        raise HTTPException(400, "enable at least one session (practice, qualify or race)")
+    skins = _check_content(body)
+    cfg = {name: dict(kv) for name, kv in s.config.items()}
+    srv = cfg.setdefault("SERVER", {})
+    srv.update(NAME=body.name, PASSWORD=body.password, TRACK=body.track, CONFIG_TRACK=body.track_config,
+               CARS=";".join(body.cars), MAX_CLIENTS=body.max_clients)
+    if body.admin_password is not None:
+        srv["ADMIN_PASSWORD"] = body.admin_password
+    for key, value in (("SLEEP_TIME", 1), ("PICKUP_MODE_ENABLED", 1), ("LOOP_MODE", 1), ("REGISTER_TO_LOBBY", 0)):
+        srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics
+    for sec in ("PRACTICE", "QUALIFY", "RACE"):
+        cfg.pop(sec, None)
+    if body.practice_min:
+        cfg["PRACTICE"] = {"NAME": "Practice", "TIME": body.practice_min, "IS_OPEN": 1}
+    if body.qualify_min:
+        cfg["QUALIFY"] = {"NAME": "Qualify", "TIME": body.qualify_min, "IS_OPEN": 1}
+    if body.race_laps:
+        cfg["RACE"] = {"NAME": "Race", "LAPS": body.race_laps, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
+    if not any(k.startswith("WEATHER_") for k in cfg):
+        cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
+    s.config = cfg
+    # one slot per client, cars taken in turns; the skin is the pack's first one (clients pick their own in pickup mode)
+    s.entry_list = [
+        {"MODEL": car, "SKIN": (skins[car] or [""])[0]}
+        for car in (body.cars[i % len(body.cars)] for i in range(body.max_clients))
+    ]
+    s.updated_at = datetime.now(UTC)
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    restarted = False
+    if body.restart:
+        await supervisor.stop(server_id)
+        await start_server(server_id, sess)
+        restarted = True
+    return AppliedOut(**_out(s).model_dump(), restarted=restarted)
 
 
 @router.post("/{server_id}/start")
