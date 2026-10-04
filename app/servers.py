@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
-from app import content, supervisor
+from app import content, integrity, supervisor
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
@@ -44,6 +44,8 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    integrity: str = "warn"
+    integrity_extras: bool = False
 
 
 def _ports(base: int) -> dict[str, int]:
@@ -61,6 +63,8 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        integrity=s.integrity,
+        integrity_extras=s.integrity_extras,
     )
 
 
@@ -436,6 +440,7 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
     s = _get(sess, server_id)
     if not settings.acserver_cmd:
         raise HTTPException(400, "ACM_ACSERVER_CMD is not configured")
+    integrity.gate(sess, s)   # 409 in «require» mode when the content differs from its seal
     p = _ports(s.base_port)
     try:
         inst = await supervisor.start(

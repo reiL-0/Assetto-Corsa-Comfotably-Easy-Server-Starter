@@ -81,3 +81,9 @@ def announce(text: str) -> None:
     """A league announcement (scheduled-start reminders) to `ACM_DISCORD_WEBHOOK`; nothing if it is not set."""
     if settings.discord_webhook:
         threading.Thread(target=_send, args=(text, settings.discord_webhook), daemon=True).start()
+
+
+def alert(text: str) -> None:
+    """A warning for the stewards on the server-status channel; nothing if it is not set."""
+    if settings.discord_status_webhook:
+        threading.Thread(target=_send, args=(text,), daemon=True).start()

@@ -165,6 +165,18 @@ accept a raw INI body and parse it back into the stored config, and
 `GET /servers/{id}/results[/​{filename}]` lists/downloads session result
 JSON files acServer writes under that instance's `results/` dir.
 
+### Content integrity (`app/integrity.py`)
+
+What acServer verifies on every driver that joins (it logs the values at start: `CHECKSUM: …`, `ACD CHECKSUM:`): the MD5 of `system/data/surfaces.ini`,
+the track's `data/surfaces.ini`, `models.ini` (`models_<layout>.ini`) and `data/drs_zones.ini`, and each car's `data.acd`; a mismatch kicks the driver.
+It does not check models (kn5), skins, apps, CSP or other plugins, and has no setting to add files, so those cannot be enforced from the server.
+The manager keeps the reference honest: `POST /integrity/seal {server_id | cars, track, config, extras}` (admin) stores the current MD5s as approved
+(`ContentSeal`; extras = any file/folder under the server directory), `GET /integrity/check?server_id=` compares (`ok` / `changed` / `missing` /
+`unsealed`), `DELETE /integrity/seal/{key}`, `GET /integrity/seals`, `GET /integrity/failures`. Per server (`Server.integrity`, `PUT /integrity/servers/{id}
+{mode, extras}`, not part of any session): `off`; `warn` (default; a changed or missing file is reported on the status channel and the server starts);
+`require` (it does not start unless everything is sealed and unchanged: 409). The gate runs in `start_server`, so the panel, schedules and wake all go
+through it. Every server log line goes through `integrity.on_log_line`: a checksum failure reported by acServer is recorded (`checksum_fail`) and announced.
+
 ### Deploying
 
 `./deploy.sh` deploys the committed `app/` to the VPS (refuses with uncommitted changes): runs the test suite locally, imports the staged package with the production venv, saves what runs to `/opt/acm/releases` (newest 5), `rsync`s it over `/opt/acm/app/app` (keeping `static/`), restarts `acm` and waits for `/healthz`; if it does not answer within 20 s the saved copy is put back. `/opt/acm/app/DEPLOYED` holds the revision running. A restart is safe for running games (see below). If `pyproject.toml` changed, new dependencies have to be installed in the server venv by hand (the script warns).

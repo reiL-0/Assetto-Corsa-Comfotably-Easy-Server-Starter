@@ -20,7 +20,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-from app import metrics
+from app import integrity, metrics
 from app.config import settings
 from app.live import acsp
 
@@ -109,6 +109,7 @@ class Instance:
         self._log_pos += end
         for line in data[:end].decode(errors="replace").splitlines():
             self.log.append(line)
+            integrity.on_log_line(self.server_id, line)
 
     async def _watch(self) -> None:
         """Follow the log, and notice when the process ends on its own (not through `stop`)."""

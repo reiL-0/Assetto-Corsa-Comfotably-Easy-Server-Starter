@@ -41,6 +41,8 @@ class Server(SQLModel, table=True):
     # server_cfg.ini as {SECTION: {KEY: value}}; entry_list.ini as [{CAR_0 fields}, ...]
     config: dict = Field(default_factory=dict, sa_type=JSON)
     entry_list: list = Field(default_factory=list, sa_type=JSON)
+    integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
+    integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -57,6 +59,17 @@ class Event(SQLModel, table=True):
     data: dict = Field(default_factory=dict, sa_type=JSON)  # a servers.SessionIn, as JSON
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+class ContentSeal(SQLModel, table=True):
+    """The approved MD5s of what acServer verifies for a car / track / the system, or of an extra file or folder (app/integrity.py)."""
+
+    __tablename__ = "content_seals"
+
+    key: str = Field(primary_key=True)  # system | track:<track>:<layout> | car:<car> | extra:<path>
+    files: dict = Field(default_factory=dict, sa_type=JSON)  # relative path -> md5
+    sealed_at: datetime = Field(default_factory=_now)
+    sealed_by: str = ""
 
 
 class Schedule(SQLModel, table=True):
