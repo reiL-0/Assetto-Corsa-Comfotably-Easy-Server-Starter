@@ -37,7 +37,7 @@ def init_db() -> None:
 def _add_missing_columns() -> None:
     """Forward-only migration: ALTER TABLE ... ADD COLUMN for model columns an existing table lacks (create_all only creates
     whole tables). A NOT NULL column needs a constant default: 0 / '' / '[]' by type."""
-    from sqlalchemy import inspect
+    from sqlalchemy import JSON, Boolean, Float, Integer, Numeric, inspect
 
     insp = inspect(engine)
     with engine.begin() as conn:
@@ -50,8 +50,8 @@ def _add_missing_columns() -> None:
                     continue
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
                 if not col.nullable:
-                    kind = col.type.python_type
-                    ddl += " NOT NULL DEFAULT " + {int: "0", bool: "0", float: "0", str: "''", list: "'[]'", dict: "'{}'"}.get(kind, "''")
+                    numeric = isinstance(col.type, (Integer, Boolean, Float, Numeric))   # (python_type is not implemented for every type)
+                    ddl += " NOT NULL DEFAULT " + ("0" if numeric else "'null'" if isinstance(col.type, JSON) else "''")
                 conn.exec_driver_sql(ddl)
 
 
