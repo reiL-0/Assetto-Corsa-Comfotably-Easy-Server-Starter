@@ -45,6 +45,19 @@ class Server(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class Event(SQLModel, table=True):
+    """A saved session ("preset"): the new-session form's contents under a title, ready to run on any server."""
+
+    __tablename__ = "events"
+
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    notes: str = ""
+    data: dict = Field(default_factory=dict, sa_type=JSON)  # a servers.SessionIn, as JSON
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 DEFAULT_POINTS_SYSTEM = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 
 

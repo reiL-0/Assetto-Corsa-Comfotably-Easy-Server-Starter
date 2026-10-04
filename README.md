@@ -254,6 +254,24 @@ make test        # pytest
 make lint        # ruff
 ```
 
+## Sessions, saved events and content
+
+All under `/api/v1` (steward reads, admin writes; events carry passwords).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /servers/{id}/apply` | Build `server_cfg.ini` + entry list from a form (`SessionIn`: name, passwords, track + layout, cars, slots, practice/qualify/race, `reversed_grid`, `loop`), check the content is installed and loadable, optionally restart |
+| `GET/POST /events`, `GET/PUT/DELETE /events/{id}` | Saved events (presets): a `SessionIn` under a title and notes |
+| `POST /events/{id}/duplicate` | Copy |
+| `POST /events/{id}/run {server_id, restart}` | Apply the event to a server, re-checking the content installed *now* |
+| `GET /content/tracks`, `GET /content/cars` | Installed content, with `usable` (acServer can load it) and, for tracks, `base` + layouts |
+| `POST /content/uploads {kind}` → `PUT /content/uploads/{id}?offset=N` (parts) → `POST .../complete` | Archive in parts under the proxy's request cap, resumable by offset |
+| `POST /content/uploads/from-link {kind, url}` | The server downloads a MediaFire / Google Drive / Dropbox link (known hosts only) |
+| `GET /content/uploads/{id}` | Progress: `downloading` / `uploading` / `extracting` / `done` / `error` |
+
+A weekend (practice → qualify → race, looping) already runs natively in one acServer session list; `reversed_grid`
+maps to `REVERSED_GRID_RACE_POSITIONS`. Grid carry-over between *separate* runs needs GUID-locked entries (not built yet).
+
 ## Config (env vars)
 
 | Var                | Default                    | Meaning |

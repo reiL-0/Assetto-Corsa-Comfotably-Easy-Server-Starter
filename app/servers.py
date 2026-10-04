@@ -236,6 +236,8 @@ class SessionIn(BaseModel):
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
     race_wait_s: int = Field(default=60, ge=0, le=600)
+    reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
+    loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
 
 
@@ -264,7 +266,11 @@ def _check_content(body: SessionIn) -> dict[str, list[str]]:
 @router.post("/{server_id}/apply", response_model=AppliedOut)
 async def apply_session(server_id: int, body: SessionIn, sess: SessionDep) -> AppliedOut:
     """Build server_cfg + entry list from the form, save them, and (optionally) restart the server with them."""
-    s = _get(sess, server_id)
+    return await apply_to_server(sess, _get(sess, server_id), body)
+
+
+async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> AppliedOut:
+    server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps):
         raise HTTPException(400, "enable at least one session (practice, qualify or race)")
     skins = _check_content(body)
@@ -274,7 +280,8 @@ async def apply_session(server_id: int, body: SessionIn, sess: SessionDep) -> Ap
                CARS=";".join(body.cars), MAX_CLIENTS=body.max_clients)
     if body.admin_password is not None:
         srv["ADMIN_PASSWORD"] = body.admin_password
-    for key, value in (("SLEEP_TIME", 1), ("PICKUP_MODE_ENABLED", 1), ("LOOP_MODE", 1), ("REGISTER_TO_LOBBY", 0)):
+    srv.update(LOOP_MODE=int(body.loop), REVERSED_GRID_RACE_POSITIONS=body.reversed_grid)
+    for key, value in (("SLEEP_TIME", 1), ("PICKUP_MODE_ENABLED", 1), ("REGISTER_TO_LOBBY", 0)):
         srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics
     for sec in ("PRACTICE", "QUALIFY", "RACE"):
         cfg.pop(sec, None)
