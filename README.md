@@ -183,11 +183,26 @@ Adding a penalty (`POST .../results/{file}/penalties`) posts the decision to `AC
 
 ### Scheduled starts
 
-`app/schedule.py`: `POST /schedules {event_id, server_id, start_at (unix s), reminders: [60, 10]}` (steward reads, admin writes),
+`app/schedule.py`: `POST /schedules {event_id, server_id, start_at (unix s), reminders: [60, 10], duration_min?}` (steward reads, admin writes),
 `GET /schedules`, `DELETE /schedules/{id}`. A task started in the app lifespan ticks every 20 s: the nearest due reminder is
 posted to `ACM_DISCORD_WEBHOOK` (older missed ones are marked sent, not posted); at `start_at` the saved event is loaded onto the
-server and it restarts (whoever is connected is dropped). Overdue by more than 10 min (manager was down) → `missed`, not run;
-an apply error → `failed` with the reason, also posted.
+server and it restarts (whoever is connected is dropped) unless it is already on it (`loaded`, see below). Overdue by more than 10 min
+(manager was down) -> `missed`, not run; an apply error -> `failed` with the reason, also posted.
+
+With `duration_min` the schedule is `running` until `start_at + duration`: 5 min before the end the in-game chat says so; at the end
+the server is stopped (`server_stop` with reason `event_end`, Discord notice) and the schedule is `done`. Without it the schedule is
+`done` once started and only the idle stop (`ACM_IDLE_STOP_SECONDS`) ends the session.
+
+### Wake on connect (`app/wake.py`)
+
+A stopped server costs nothing (an empty running acServer is ~5 MB and ~0 % CPU, but the point is not to leave them on). Inside an
+event's **window** (from 1 h before `start_at` until its end, or 3 h after the start when there is no duration) a stopped server is
+woken by a player trying to join. While the window is open and the server is stopped, the manager listens on the server's game port
+(UDP and TCP, same number); the first datagram or connection closes the listeners, calls `schedule.wake` and leaves the port to
+acServer. If the event is not on the server yet it is loaded as a start would (`loaded = true`, so the real start time does not restart
+it and kick the early arrivals); if it is (a server stopped by idle or a crash mid-event) it is simply started. The first attempt gets
+no answer; the player retries a few seconds later. Outside a window nothing listens, so a port scan cannot start anything; inside one:
+at most 3 wakes an hour and 30 s between two. Each wake logs a `wake` activity row.
 
 ### Results + championship
 
