@@ -153,3 +153,45 @@ def test_car_info_after_reattaching_fills_the_table_without_counting_a_join(monk
               "driver_team": "", "driver_guid": ""})
     assert [d.name for d in c.board.drivers if d.connected] == ["Ana"] and list(c.cars) == [3] and "join" not in joins
 
+
+
+def test_ban_and_kick_by_steam_id(monkeypatch):
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app import bans, supervisor
+    from app.live import acsp as acsp_mod
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sent = []
+
+    class FakeAcsp:
+        cars = {3: {"driver_guid": "76561198000000009"}, 4: {"driver_guid": "76561198000000010"}}
+        send = staticmethod(sent.append)
+
+    class FakeInst:
+        acsp = FakeAcsp()
+    monkeypatch.setattr(supervisor, "live", lambda: [FakeInst()])
+    assert api.post("/api/v1/players/76561198000000009/kick").json() == {"kicked": 1} and sent == [acsp_mod.encode_kick_user(3)]
+    assert api.post("/api/v1/players/abc/kick").status_code == 422
+    assert not bans.is_banned("76561198000000010")
+    r = api.post("/api/v1/bans", json={"guid": "76561198000000010", "name": "Troll", "reason": "Choca a propósito"})
+    assert r.status_code == 201 and r.json() == {"banned": True, "kicked": 1} and bans.is_banned("76561198000000010")
+    assert [b["guid"] for b in api.get("/api/v1/bans").json()] == ["76561198000000010"]
+    assert api.post("/api/v1/bans", json={"guid": "1", "reason": "x"}).status_code == 422
+    assert api.delete("/api/v1/bans/76561198000000010").status_code == 204 and not bans.is_banned("76561198000000010")
+    assert api.delete("/api/v1/bans/76561198000000010").status_code == 404
+
+
+def test_a_banned_player_is_kicked_when_connecting():
+    from sqlmodel import Session
+    from app.db import engine
+    from app.live import acsp as acsp_mod
+    from app.models import Ban
+    with Session(engine) as s:
+        s.merge(Ban(guid="76561198000000077", reason="test"))
+        s.commit()
+    c, sent = acsp_mod.ACSPClient(907), []
+    c.send = sent.append
+    c._apply({"type": "new_connection", "car_id": 5, "driver_name": "Troll", "driver_guid": "76561198000000077", "car_model": "bmw", "car_skin": "red"})
+    c._apply({"type": "new_connection", "car_id": 6, "driver_name": "Ana", "driver_guid": "76561198000000078", "car_model": "bmw", "car_skin": "red"})
+    assert sent == [acsp_mod.encode_kick_user(5)]

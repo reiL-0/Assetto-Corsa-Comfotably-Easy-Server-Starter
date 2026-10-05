@@ -353,6 +353,10 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self.restore_when_session_changes = None
         elif t == "new_connection":
             self.cars[event["car_id"]] = event
+            from app import bans   # (late, like timeline above)
+            if bans.is_banned(event["driver_guid"]):
+                self.send(encode_kick_user(event["car_id"]))
+                metrics.log(self.server_id, "ban_kick", guid=event["driver_guid"], name=event["driver_name"])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:

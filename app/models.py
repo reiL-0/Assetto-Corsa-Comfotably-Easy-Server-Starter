@@ -113,6 +113,18 @@ class Setting(SQLModel, table=True):
     value: dict = Field(default_factory=dict, sa_type=JSON)
 
 
+class Ban(SQLModel, table=True):
+    """A Steam ID that may not stay on any server: kicked the moment it connects (app/bans.py)."""
+
+    __tablename__ = "bans"
+
+    guid: str = Field(primary_key=True)  # SteamID64
+    name: str = ""  # who it was when banned
+    reason: str = ""
+    created_by: str = ""
+    created_at: datetime = Field(default_factory=_now)
+
+
 class Rsvp(SQLModel, table=True):
     """One Discord user's answer to a schedule's announcement, read from their reactions (schedule._rsvp)."""
 

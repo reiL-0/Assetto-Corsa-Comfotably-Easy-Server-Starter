@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.announcement import router as announcement_router
 from app.auth import guard
+from app.bans import router as bans_router
 from app.auth import router as auth_router
 from app.championship import router as championship_router
 from app.content import router as content_router
@@ -36,6 +37,7 @@ api_router.include_router(discord_router)  # link/unlink the caller's own Discor
 api_router.include_router(servers_router, dependencies=[Depends(guard("steward"))])
 api_router.include_router(steward_router)
 api_router.include_router(metrics_router)  # steward reads
+api_router.include_router(bans_router)  # stewards kick and ban by Steam ID (its own steward guard)
 api_router.include_router(penalties_router)  # stewards write penalties (its own steward guard)
 api_router.include_router(events_router, dependencies=[Depends(guard("steward"))])  # carries passwords: steward reads, admin writes
 api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin writes
