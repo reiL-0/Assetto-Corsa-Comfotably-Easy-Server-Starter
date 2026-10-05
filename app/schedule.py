@@ -18,6 +18,7 @@ duration is set). Inside it a stopped server is woken by `wake` when a player tr
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import urllib.error
@@ -26,7 +27,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app import discord, metrics, supervisor
+from app import announcement, discord, metrics, supervisor
 from app.config import settings
 from app.db import SessionDep, engine
 from app.models import Event, Rsvp, Schedule, Server, User
@@ -204,8 +205,9 @@ async def tick(now: float | None = None) -> None:
             sess.commit()
 
 
-def _rsvp_text(sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> str:
-    return discord.announcement(ev.title, srv.name, ev.data, sc.start_at, counts, "\n".join(x for x in (sc.notes, sc.info) if x))
+def _rsvp_payload(sess: Session, sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> dict:
+    v = announcement.variables(ev.title, srv.name, ev.data, sc.start_at, counts, sc.notes, sc.info)
+    return announcement.render(announcement.current(sess), v)
 
 
 async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
@@ -215,8 +217,9 @@ async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
         return
     try:
         if not sc.rsvp_message:
-            sc.rsvp_text = _rsvp_text(sc, ev, srv, dict.fromkeys(discord.RSVP.values(), 0))
-            sc.rsvp_message = await asyncio.to_thread(discord.rsvp_post, sc.rsvp_text)
+            payload = _rsvp_payload(sess, sc, ev, srv, dict.fromkeys(discord.RSVP.values(), 0))
+            sc.rsvp_text = json.dumps(payload, sort_keys=True)
+            sc.rsvp_message = await asyncio.to_thread(discord.rsvp_post, payload)
             return
         found = await asyncio.to_thread(discord.rsvp_read, sc.rsvp_message)
     except urllib.error.HTTPError as e:
@@ -239,10 +242,11 @@ async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
         if i not in mine:   # took every reaction back
             sess.delete(r)
     sess.commit()
-    text = _rsvp_text(sc, ev, srv, _counts(sess, sc.id))
+    payload = _rsvp_payload(sess, sc, ev, srv, _counts(sess, sc.id))
+    text = json.dumps(payload, sort_keys=True)
     if text != sc.rsvp_text:
         try:
-            await asyncio.to_thread(discord.rsvp_edit, sc.rsvp_message, text)
+            await asyncio.to_thread(discord.rsvp_edit, sc.rsvp_message, payload)
             sc.rsvp_text = text
         except Exception:
             log.exception("rsvp edit of schedule %s failed", sc.id)

@@ -4,6 +4,7 @@ this router. Nothing the UI can do is missing here.
 
 from fastapi import APIRouter, Depends
 
+from app.announcement import router as announcement_router
 from app.auth import guard
 from app.auth import router as auth_router
 from app.championship import router as championship_router
@@ -37,6 +38,7 @@ api_router.include_router(metrics_router)  # steward reads
 api_router.include_router(penalties_router)  # stewards write penalties (its own steward guard)
 api_router.include_router(events_router, dependencies=[Depends(guard("steward"))])  # carries passwords: steward reads, admin writes
 api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin writes
+api_router.include_router(announcement_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits the message
 api_router.include_router(integrity_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin seals
 api_router.include_router(telemetry_router)  # public: the in-game app has no login, it sends its SteamID64
 api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only

@@ -19,7 +19,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlmodel import Session, select
 
-from app import content
 from app.auth import CurrentUser
 from app.config import settings
 from app.db import SessionDep, engine
@@ -113,50 +112,10 @@ def _api(method: str, path: str, body: dict | None = None, *, bearer: str | None
     return json.loads(raw) if raw else None
 
 
-def _track_name(track: str, config: str) -> str:
-    ui = content._tracks_dir() / track / "ui"
-    d = content._read_json((ui / config if config else ui) / "ui_track.json")
-    return d.get("name") or (f"{track} ({config})" if config else track)
-
-
-def _car_names(session: dict) -> str:
-    cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
-    return ", ".join(content._read_json(content._cars_dir() / c / "ui" / "ui_car.json").get("name") or c for c in cars)
-
-
-def announcement(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "") -> str:
-    """The league's sign-up announcement for a scheduled event, built from the saved session (`Event.data`) and the schedule.
-    Layout: header, car and track, the start (Discord's own timestamp), the session format, the reaction line with the counts, then
-    the free notes last (Discord cuts at 2000 characters, so the notes are what gets cut)."""
-    fmt = []   # each session with its start (`start_at` is when the practice opens; qualifying and race follow one after the other)
-    at = int(start_at)
-    if session.get("practice_min"):
-        fmt.append(f"🟢 Práctica: {session['practice_min']} min · <t:{at}:t>")
-        at += session["practice_min"] * 60
-    if session.get("qualify_min"):
-        fmt.append(f"⏱️ Clasificación: {session['qualify_min']} min · <t:{at}:t>")
-        at += session["qualify_min"] * 60
-    if session.get("race_laps") or session.get("race_min"):
-        fmt.append("🏁 Carrera: " + (_plural(session["race_laps"], "vuelta", "vueltas") if session.get("race_laps") else f"{session['race_min']} min") + f" · <t:{at}:t>")
-    if rg := session.get("reversed_grid"):
-        fmt.append("🔄 Parrilla invertida" + (" (toda)" if rg == -1 else f" (los primeros {rg})"))
-    role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
-    line = "━━━━━━━━━━━━━━━━━━"
-    parts = [f"🏁 **{title}** | {server}" + (f"\n🚨 ATENCIÓN {role} 🚨" if role else ""), line,
-             f"📍 Circuito: {_track_name(session.get('track', '?'), session.get('track_config', ''))}\n🏎️ Auto: {_car_names(session)}",
-             f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)"]   # Discord shows it in each reader's own time zone
-    if fmt:
-        parts.append("🏁 **FORMATO**\n" + "\n".join(fmt))
-    parts += [line, "Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n" + " · ".join(f"{e} {counts[st]}" for e, st in RSVP.items())]
-    if notes.strip():
-        parts += [line, f"📋 **NOTAS**\n{notes.strip()}"]
-    return "\n\n".join(parts)
-
-
-def rsvp_post(text: str) -> str:
-    """Post the announcement and put the three reactions on it so people only have to click. Returns the message id (blocking: run in a thread)."""
+def rsvp_post(payload: dict) -> str:
+    """Post the announcement (a Discord message payload, see app/announcement.py) and put the three reactions on it so people only have to click. Returns the message id (blocking: run in a thread)."""
     path = f"/channels/{settings.discord_channel}/messages"
-    mid = _api("POST", path, {"content": text[:2000]})["id"]
+    mid = _api("POST", path, payload)["id"]
     try:
         for emoji in RSVP:
             _api("PUT", f"{path}/{mid}/reactions/{urllib.parse.quote(emoji)}/@me")
@@ -166,8 +125,8 @@ def rsvp_post(text: str) -> str:
     return mid
 
 
-def rsvp_edit(mid: str, text: str) -> None:
-    _api("PATCH", f"/channels/{settings.discord_channel}/messages/{mid}", {"content": text[:2000]})
+def rsvp_edit(mid: str, payload: dict) -> None:
+    _api("PATCH", f"/channels/{settings.discord_channel}/messages/{mid}", payload)
 
 
 def rsvp_read(mid: str) -> dict[str, list[str]]:

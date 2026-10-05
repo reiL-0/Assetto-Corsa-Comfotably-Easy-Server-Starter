@@ -103,6 +103,15 @@ class Schedule(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class Setting(SQLModel, table=True):
+    """Small admin-edited settings kept in the database (one row per key). Keys: `announcement` (app/announcement.py)."""
+
+    __tablename__ = "settings"
+
+    key: str = Field(primary_key=True)
+    value: dict = Field(default_factory=dict, sa_type=JSON)
+
+
 class Rsvp(SQLModel, table=True):
     """One Discord user's answer to a schedule's announcement, read from their reactions (schedule._rsvp)."""
 

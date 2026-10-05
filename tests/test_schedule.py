@@ -215,7 +215,7 @@ def test_rsvp_reactions_become_rows_linked_to_users(monkeypatch):
     got = {r["discord_id"]: r for r in client.get(f"/api/v1/schedules/{sc['id']}/rsvps").json()}
     assert got["111"]["username"] == "piloto" and got["111"]["status"] == "yes"
     assert got["222"]["username"] is None
-    assert "✅ 2" in edited[-1]
+    assert "✅ 2" in edited[-1]["content"]
     reactions["yes"], reactions["maybe"] = ["111"], ["222"]   # 222 moves from yes to maybe
     _tick(time.time(), monkeypatch)
     assert client.get("/api/v1/schedules").json()[0]["rsvp"] == {"yes": 1, "maybe": 1, "no": 0}
@@ -240,13 +240,27 @@ def test_rsvp_read_asks_only_for_emojis_somebody_used(monkeypatch):
 
 def test_announcement_layout(monkeypatch):
     from datetime import UTC, datetime
+    from app import announcement
     from app.config import settings
     monkeypatch.setattr(settings, "discord_role", "42")
     start = datetime(2026, 10, 6, 3, 0, tzinfo=UTC).timestamp()
-    text = discord.announcement("Fun Race", "Servidor 1", {"track": "spa", "cars": ["clio"], "practice_min": 15, "qualify_min": 15,
-                                                          "race_laps": 15, "reversed_grid": -1}, start, {"yes": 3, "maybe": 1, "no": 0},
-                                "Descarga: https://x.test")
-    assert f"<t:{int(start)}:F>" in text
+    v = announcement.variables("Fun Race", "Servidor 1", {"track": "spa", "cars": ["clio"], "practice_min": 15, "qualify_min": 15,
+                                                         "race_laps": 15, "reversed_grid": -1}, start, {"yes": 3, "maybe": 1, "no": 0}, "Descarga: https://x.test")
+    out = announcement.render(announcement.DEFAULT, v)
+    text = out["content"]
+    assert f"<t:{int(start)}:F>" in text and "<@&42>" in text and "Parrilla invertida (toda)" in text and "15 vueltas" in text
     assert f"Práctica: 15 min · <t:{int(start)}:t>" in text and f"Clasificación: 15 min · <t:{int(start) + 900}:t>" in text and f"15 vueltas · <t:{int(start) + 1800}:t>" in text
-    assert "<@&42>" in text and "Práctica: 15 min" in text and "15 vueltas" in text and "Parrilla invertida (toda)" in text
-    assert "✅ 3 · ❔ 1 · ❌ 0" in text and text.rstrip().endswith("Descarga: https://x.test")
+    assert "✅ 3 · ❔ 1 · ❌ 0" in text and text.endswith("Descarga: https://x.test")
+    assert out["allowed_mentions"] == {"parse": ["roles"]}
+
+
+def test_announcement_template_is_editable_and_validated():
+    url = "/api/v1/announcement"
+    assert client.put(url, json={"template": {"content": "x", "components": []}}).status_code == 422
+    assert client.put(url, json={"template": {"content": "  "}}).status_code == 422
+    r = client.post(url + "/preview", json={"template": {"content": "{title} va {yes}\n\n\n\n{formato}{nope}", "embeds": [{"title": "{server}"}]}}).json()
+    assert r["content"].startswith("Fun Race | Spa PetitChamps va 3") and "{nope}" in r["content"] and r["embeds"][0]["title"] == "Servidor 1"
+    assert client.put(url, json={"template": {"content": "hola {title}"}}).status_code == 200
+    assert client.get(url).json()["template"] == {"content": "hola {title}"}
+    assert client.delete(url).status_code == 204
+    assert client.get(url).json()["template"]["content"].startswith("🏁")
