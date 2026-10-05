@@ -247,5 +247,6 @@ def test_announcement_layout(monkeypatch):
                                                           "race_laps": 15, "reversed_grid": -1}, start, {"yes": 3, "maybe": 1, "no": 0},
                                 "Descarga: https://x.test")
     assert f"<t:{int(start)}:F>" in text
+    assert f"Práctica: 15 min · <t:{int(start)}:t>" in text and f"Clasificación: 15 min · <t:{int(start) + 900}:t>" in text and f"15 vueltas · <t:{int(start) + 1800}:t>" in text
     assert "<@&42>" in text and "Práctica: 15 min" in text and "15 vueltas" in text and "Parrilla invertida (toda)" in text
     assert "✅ 3 · ❔ 1 · ❌ 0" in text and text.rstrip().endswith("Descarga: https://x.test")

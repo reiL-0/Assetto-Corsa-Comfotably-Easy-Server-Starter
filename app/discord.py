@@ -128,13 +128,16 @@ def announcement(title: str, server: str, session: dict, start_at: float, counts
     """The league's sign-up announcement for a scheduled event, built from the saved session (`Event.data`) and the schedule.
     Layout: header, car and track, the start (Discord's own timestamp), the session format, the reaction line with the counts, then
     the free notes last (Discord cuts at 2000 characters, so the notes are what gets cut)."""
-    fmt = []
+    fmt = []   # each session with its start (`start_at` is when the practice opens; qualifying and race follow one after the other)
+    at = int(start_at)
     if session.get("practice_min"):
-        fmt.append(f"🟢 Práctica: {session['practice_min']} min")
+        fmt.append(f"🟢 Práctica: {session['practice_min']} min · <t:{at}:t>")
+        at += session["practice_min"] * 60
     if session.get("qualify_min"):
-        fmt.append(f"⏱️ Clasificación: {session['qualify_min']} min")
+        fmt.append(f"⏱️ Clasificación: {session['qualify_min']} min · <t:{at}:t>")
+        at += session["qualify_min"] * 60
     if session.get("race_laps") or session.get("race_min"):
-        fmt.append("🏁 Carrera: " + (_plural(session["race_laps"], "vuelta", "vueltas") if session.get("race_laps") else f"{session['race_min']} min"))
+        fmt.append("🏁 Carrera: " + (_plural(session["race_laps"], "vuelta", "vueltas") if session.get("race_laps") else f"{session['race_min']} min") + f" · <t:{at}:t>")
     if rg := session.get("reversed_grid"):
         fmt.append("🔄 Parrilla invertida" + (" (toda)" if rg == -1 else f" (los primeros {rg})"))
     role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
