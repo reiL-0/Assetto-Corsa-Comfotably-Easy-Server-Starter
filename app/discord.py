@@ -19,9 +19,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlmodel import Session, select
 
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
-
 from app import content
 from app.auth import CurrentUser
 from app.config import settings
@@ -116,17 +113,6 @@ def _api(method: str, path: str, body: dict | None = None, *, bearer: str | None
     return json.loads(raw) if raw else None
 
 
-ZONES = [("🇲🇽🇨🇷🇬🇹", "America/Mexico_City", "México • Costa Rica • Guatemala"),
-         ("🇨🇴🇵🇪🇪🇨🇵🇦", "America/Bogota", "Colombia • Perú • Ecuador • Panamá"),
-         ("🇻🇪🇧🇴", "America/Caracas", "Venezuela • Bolivia"),
-         ("🇦🇷🇺🇾🇧🇷", "America/Argentina/Buenos_Aires", "Argentina • Uruguay • Brasil")]
-US_ZONES = [("ET", "America/New_York"), ("CT", "America/Chicago"), ("MT", "America/Denver"), ("PT", "America/Los_Angeles")]
-
-
-def _clock(t: datetime, minutes: bool = True) -> str:
-    return t.strftime("%I:%M %p" if minutes or t.minute else "%I %p").lstrip("0")
-
-
 def _track_name(track: str, config: str) -> str:
     ui = content._tracks_dir() / track / "ui"
     d = content._read_json((ui / config if config else ui) / "ui_track.json")
@@ -140,15 +126,8 @@ def _car_names(session: dict) -> str:
 
 def announcement(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "") -> str:
     """The league's sign-up announcement for a scheduled event, built from the saved session (`Event.data`) and the schedule.
-    Layout: header, car and track, the start in each region's clock, the session format, the reaction line with the counts, then
+    Layout: header, car and track, the start (Discord's own timestamp), the session format, the reaction line with the counts, then
     the free notes last (Discord cuts at 2000 characters, so the notes are what gets cut)."""
-    start = datetime.fromtimestamp(start_at, UTC)
-    first = start.astimezone(ZoneInfo(ZONES[0][1])).date()
-    hours = []
-    for flags, tz, names in ZONES:
-        t = start.astimezone(ZoneInfo(tz))
-        hours.append(f"{flags} {_clock(t)}{' (+1 día)' if t.date() > first else ' (-1 día)' if t.date() < first else ''} | {names}")
-    hours.append("🇺🇸 Norteamérica: " + " • ".join(f"{k} {_clock(start.astimezone(ZoneInfo(z)), False)}" for k, z in US_ZONES))
     fmt = []
     if session.get("practice_min"):
         fmt.append(f"🟢 Práctica: {session['practice_min']} min")
@@ -162,7 +141,7 @@ def announcement(title: str, server: str, session: dict, start_at: float, counts
     line = "━━━━━━━━━━━━━━━━━━"
     parts = [f"🏁 **{title}** | {server}" + (f"\n🚨 ATENCIÓN {role} 🚨" if role else ""), line,
              f"📍 Circuito: {_track_name(session.get('track', '?'), session.get('track_config', ''))}\n🏎️ Auto: {_car_names(session)}",
-             f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)\n" + "\n".join(hours)]
+             f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)"]   # Discord shows it in each reader's own time zone
     if fmt:
         parts.append("🏁 **FORMATO**\n" + "\n".join(fmt))
     parts += [line, "Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n" + " · ".join(f"{e} {counts[st]}" for e, st in RSVP.items())]
