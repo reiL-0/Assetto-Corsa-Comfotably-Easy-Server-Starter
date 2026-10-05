@@ -19,6 +19,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlmodel import Session, select
 
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+from app import content
 from app.auth import CurrentUser
 from app.config import settings
 from app.db import SessionDep, engine
@@ -110,6 +114,61 @@ def _api(method: str, path: str, body: dict | None = None, *, bearer: str | None
     with urllib.request.urlopen(req, timeout=8) as r:
         raw = r.read()
     return json.loads(raw) if raw else None
+
+
+ZONES = [("🇲🇽🇨🇷🇬🇹", "America/Mexico_City", "México • Costa Rica • Guatemala"),
+         ("🇨🇴🇵🇪🇪🇨🇵🇦", "America/Bogota", "Colombia • Perú • Ecuador • Panamá"),
+         ("🇻🇪🇧🇴", "America/Caracas", "Venezuela • Bolivia"),
+         ("🇦🇷🇺🇾🇧🇷", "America/Argentina/Buenos_Aires", "Argentina • Uruguay • Brasil")]
+US_ZONES = [("ET", "America/New_York"), ("CT", "America/Chicago"), ("MT", "America/Denver"), ("PT", "America/Los_Angeles")]
+
+
+def _clock(t: datetime, minutes: bool = True) -> str:
+    return t.strftime("%I:%M %p" if minutes or t.minute else "%I %p").lstrip("0")
+
+
+def _track_name(track: str, config: str) -> str:
+    ui = content._tracks_dir() / track / "ui"
+    d = content._read_json((ui / config if config else ui) / "ui_track.json")
+    return d.get("name") or (f"{track} ({config})" if config else track)
+
+
+def _car_names(session: dict) -> str:
+    cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
+    return ", ".join(content._read_json(content._cars_dir() / c / "ui" / "ui_car.json").get("name") or c for c in cars)
+
+
+def announcement(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "") -> str:
+    """The league's sign-up announcement for a scheduled event, built from the saved session (`Event.data`) and the schedule.
+    Layout: header, car and track, the start in each region's clock, the session format, the reaction line with the counts, then
+    the free notes last (Discord cuts at 2000 characters, so the notes are what gets cut)."""
+    start = datetime.fromtimestamp(start_at, UTC)
+    first = start.astimezone(ZoneInfo(ZONES[0][1])).date()
+    hours = []
+    for flags, tz, names in ZONES:
+        t = start.astimezone(ZoneInfo(tz))
+        hours.append(f"{flags} {_clock(t)}{' (+1 día)' if t.date() > first else ' (-1 día)' if t.date() < first else ''} | {names}")
+    hours.append("🇺🇸 Norteamérica: " + " • ".join(f"{k} {_clock(start.astimezone(ZoneInfo(z)), False)}" for k, z in US_ZONES))
+    fmt = []
+    if session.get("practice_min"):
+        fmt.append(f"🟢 Práctica: {session['practice_min']} min")
+    if session.get("qualify_min"):
+        fmt.append(f"⏱️ Clasificación: {session['qualify_min']} min")
+    if session.get("race_laps") or session.get("race_min"):
+        fmt.append("🏁 Carrera: " + (_plural(session["race_laps"], "vuelta", "vueltas") if session.get("race_laps") else f"{session['race_min']} min"))
+    if rg := session.get("reversed_grid"):
+        fmt.append("🔄 Parrilla invertida" + (" (toda)" if rg == -1 else f" (los primeros {rg})"))
+    role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
+    line = "━━━━━━━━━━━━━━━━━━"
+    parts = [f"🏁 **{title}** | {server}" + (f"\n🚨 ATENCIÓN {role} 🚨" if role else ""), line,
+             f"📍 Circuito: {_track_name(session.get('track', '?'), session.get('track_config', ''))}\n🏎️ Auto: {_car_names(session)}",
+             f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)\n" + "\n".join(hours)]
+    if fmt:
+        parts.append("🏁 **FORMATO**\n" + "\n".join(fmt))
+    parts += [line, "Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n" + " · ".join(f"{e} {counts[st]}" for e, st in RSVP.items())]
+    if notes.strip():
+        parts += [line, f"📋 **NOTAS**\n{notes.strip()}"]
+    return "\n\n".join(parts)
 
 
 def rsvp_post(text: str) -> str:

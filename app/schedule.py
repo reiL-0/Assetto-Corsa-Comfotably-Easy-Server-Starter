@@ -50,6 +50,7 @@ class ScheduleIn(BaseModel):
     reminders: list[int] = Field(default=[60, 10], max_length=5)  # minutes before; 1..1440
     duration_min: int | None = Field(default=None, ge=1, le=1440)  # minutes the event lasts; the server is stopped at the end
     info: str = Field(default="", max_length=600)  # appended to the Discord messages of this schedule
+    notes: str = Field(default="", max_length=1000)  # the "Notas" section of the sign-up announcement
     silent_past: bool = False  # reminders whose time has already passed are marked sent (the caller announced the event itself)
 
 
@@ -64,6 +65,7 @@ class ScheduleOut(BaseModel):
     sent: list[int]
     duration_min: int | None
     info: str
+    notes: str
     state: str
     result: str
     rsvp: dict[str, int]  # yes | maybe | no -> how many reacted that way
@@ -78,7 +80,7 @@ def _out(sess: Session, sc: Schedule) -> ScheduleOut:
     ev, srv = sess.get(Event, sc.event_id), sess.get(Server, sc.server_id)
     return ScheduleOut(id=sc.id, event_id=sc.event_id, event_title=ev.title if ev else "(borrado)", server_id=sc.server_id,
                        server_name=srv.name if srv else "(borrado)", start_at=sc.start_at, reminders=sc.reminders, sent=sc.sent,
-                       duration_min=sc.duration_min, info=sc.info, state=sc.state, result=sc.result,
+                       duration_min=sc.duration_min, info=sc.info, notes=sc.notes, state=sc.state, result=sc.result,
                        rsvp=_counts(sess, sc.id))
 
 
@@ -106,7 +108,7 @@ def create(body: ScheduleIn, sess: SessionDep) -> ScheduleOut:
             raise HTTPException(409, f"overlaps with «{ev.title if ev else other.event_id}» (schedule {other.id}) on that server")
     reminders = sorted(set(body.reminders), reverse=True)
     sc = Schedule(event_id=body.event_id, server_id=body.server_id, start_at=body.start_at, duration_min=body.duration_min,
-                  info=body.info, reminders=reminders,
+                  info=body.info, notes=body.notes, reminders=reminders,
                   sent=[m for m in reminders if body.silent_past and body.start_at - m * 60 <= time.time()])
     sess.add(sc)
     sess.commit()
@@ -203,9 +205,7 @@ async def tick(now: float | None = None) -> None:
 
 
 def _rsvp_text(sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> str:
-    return (f"📣 **{ev.title}** en {srv.name}: {_when(sc)}{_extra(sc)}\n"
-            f"Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n"
-            + " · ".join(f"{e} {counts[st]}" for e, st in discord.RSVP.items()))
+    return discord.announcement(ev.title, srv.name, ev.data, sc.start_at, counts, "\n".join(x for x in (sc.notes, sc.info) if x))
 
 
 async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:

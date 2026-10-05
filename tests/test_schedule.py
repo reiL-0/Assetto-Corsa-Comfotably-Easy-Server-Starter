@@ -236,3 +236,17 @@ def test_rsvp_read_asks_only_for_emojis_somebody_used(monkeypatch):
     monkeypatch.setattr(discord, "_api", fake)
     assert discord.rsvp_read("m") == {"yes": ["5"], "maybe": [], "no": []}
     assert len(calls) == 2   # the message + ✅ only; ❌ is just the bot
+
+
+def test_announcement_layout(monkeypatch):
+    from datetime import UTC, datetime
+    from app.config import settings
+    monkeypatch.setattr(settings, "discord_role", "42")
+    start = datetime(2026, 10, 6, 3, 0, tzinfo=UTC).timestamp()   # 9:00 PM in Mexico City (UTC-6)
+    text = discord.announcement("Fun Race", "Servidor 1", {"track": "spa", "cars": ["clio"], "practice_min": 15, "qualify_min": 15,
+                                                          "race_laps": 15, "reversed_grid": -1}, start, {"yes": 3, "maybe": 1, "no": 0},
+                                "Descarga: https://x.test")
+    assert "🇲🇽🇨🇷🇬🇹 9:00 PM | México" in text and "🇦🇷🇺🇾🇧🇷 12:00 AM (+1 día)" in text
+    assert "ET 11 PM • CT 10 PM • MT 9 PM • PT 8 PM" in text
+    assert "<@&42>" in text and "Práctica: 15 min" in text and "15 vueltas" in text and "Parrilla invertida (toda)" in text
+    assert "✅ 3 · ❔ 1 · ❌ 0" in text and text.rstrip().endswith("Descarga: https://x.test")

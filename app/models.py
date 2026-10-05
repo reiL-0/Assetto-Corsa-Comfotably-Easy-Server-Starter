@@ -92,6 +92,7 @@ class Schedule(SQLModel, table=True):
     reminders: list[int] = Field(default_factory=lambda: [60, 10], sa_type=JSON)  # minutes before start_at
     sent: list[int] = Field(default_factory=list, sa_type=JSON)  # the reminders already posted
     info: str = ""  # free text added to this schedule's Discord messages (server address, session times...)
+    notes: str = ""  # the "Notas" section of the sign-up announcement only (download links, who it is for, rules)
     duration_min: int | None = None  # how long the event lasts; the server is stopped when it is over (None = idle stop only)
     loaded: bool = False  # the event's session is already on the server (a player woke it early, or it started)
     end_warned: bool = False  # the "ends in 5 minutes" chat message went out
