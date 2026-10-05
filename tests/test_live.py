@@ -190,7 +190,7 @@ def test_a_banned_player_is_kicked_when_connecting():
     with Session(engine) as s:
         s.merge(Ban(guid="76561198000000077", reason="test"))
         s.commit()
-    c, sent = acsp_mod.ACSPClient(907), []
+    c, sent = acsp_mod.ACSPClient(88907), []
     c.send = sent.append
     c._apply({"type": "new_connection", "car_id": 5, "driver_name": "Troll", "driver_guid": "76561198000000077", "car_model": "bmw", "car_skin": "red"})
     c._apply({"type": "new_connection", "car_id": 6, "driver_name": "Ana", "driver_guid": "76561198000000078", "car_model": "bmw", "car_skin": "red"})
