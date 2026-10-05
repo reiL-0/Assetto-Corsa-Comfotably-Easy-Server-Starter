@@ -13,7 +13,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from app.models import Penalty
+from app.models import ChampionshipEvent, LeagueMember, Penalty
 
 
 def parse_result_file(path: Path) -> dict:
@@ -68,6 +68,14 @@ def penalties_for(sess: Session, server_id: int, filename: str) -> list[Penalty]
     return list(sess.exec(select(Penalty).where(Penalty.server_id == server_id, Penalty.filename == filename).order_by(Penalty.id)))
 
 
+def non_racing_for(sess: Session, server_id: int, filename: str) -> frozenset[str]:
+    """Steam IDs of the cars that do not race (safety car, race director, caster) in the league this result belongs to."""
+    row = sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.server_id == server_id, ChampionshipEvent.filename == filename)).first()
+    if not row:
+        return frozenset()
+    return frozenset(sess.exec(select(LeagueMember.guid).where(LeagueMember.championship_id == row.championship_id, LeagueMember.non_racing)).all())
+
+
 def _gaps(cls: list[dict], race: bool) -> None:
     lead = next((e for e in cls if e["position"] == 1), None)
     for e in cls:
@@ -79,7 +87,7 @@ def _gaps(cls: list[dict], race: bool) -> None:
             e["gap_ms"] = e["best_lap_ms"] - lead["best_lap_ms"] if e["best_lap_ms"] and lead["best_lap_ms"] else None
 
 
-def apply_penalties(parsed: dict, penalties: list[Penalty]) -> dict:
+def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozenset[str] = frozenset()) -> dict:
     """The classification with the stewards' decisions applied; the original stays visible (`original_position`).
 
     time -> added to the race time and the order is recomputed (laps, then time); position -> the driver drops N
@@ -122,9 +130,9 @@ def apply_penalties(parsed: dict, penalties: list[Penalty]) -> dict:
     final = ok + out
     _gaps(final, race)
 
-    grid = list(ok)
-    for e in sorted((e for e in ok if e["grid_penalty"]), key=lambda e: e["position"]):
+    grid = [e for e in ok if e["driver_guid"] not in non_racing]   # cars that do not race take no place on the grid, so they do not count for the places lost
+    for e in sorted((e for e in grid if e["grid_penalty"]), key=lambda e: e["position"]):
         i = grid.index(e)
         grid.remove(e)
         grid.insert(min(i + e["grid_penalty"], len(grid)), e)
-    return {**parsed, "classification": final, "grid": [e["driver_guid"] for e in grid + out if e["driver_guid"]]}
+    return {**parsed, "classification": final, "grid": [e["driver_guid"] for e in grid + [x for x in out if x["driver_guid"] not in non_racing] if e["driver_guid"]]}

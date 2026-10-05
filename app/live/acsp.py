@@ -346,6 +346,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self._record(event)
         if t in ("new_session", "session_info"):
             self.session = event  # drivers stay connected across sessions; keep their guid/name
+            if event.get("session_type") == 2:
+                self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
             timeline.on_session_event(self.server_id, event)
             if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
@@ -357,6 +359,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             if bans.is_banned(event["driver_guid"]):
                 self.send(encode_kick_user(event["car_id"]))
                 metrics.log(self.server_id, "ban_kick", guid=event["driver_guid"], name=event["driver_name"])
+            elif (self.session or {}).get("session_type") == 2:
+                self._kick_qualy_banned([event])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
@@ -366,6 +370,15 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.cars[event["car_id"]] = joined
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
+
+    def _kick_qualy_banned(self, cars: list[dict]) -> None:
+        """The league keeps some drivers from qualifying (app/league.py): they are kicked while the server is in qualifying and can come
+        back for the race, without a qualifying time (so they start last)."""
+        from app import league   # (late: league imports servers, which imports this module)
+        for car in cars:
+            if car.get("driver_guid") and league.qualy_banned(self.server_id, car["driver_guid"]):
+                self.send(encode_kick_user(car["car_id"]))
+                metrics.log(self.server_id, "qualy_ban_kick", guid=car["driver_guid"], name=car.get("driver_name"))
 
     def _record(self, e: dict) -> None:
         """Feed the metrics log with the events worth counting."""

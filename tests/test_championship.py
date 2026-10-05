@@ -145,5 +145,78 @@ def test_a_league_events_race_result_is_counted_by_its_schedule(monkeypatch):
         s.add(sc)
         s.commit()
         assert league.count_results(s, sc, ev, now + 60) == 1 and league.count_results(s, sc, ev, now + 60) == 0   # only the race inside the window, once
-        row = s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg["id"])).one()
-        assert (row.filename, row.event_id) == ("race.json", ev.id)
+        rows = {r.filename: r for r in s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg["id"])).all()}
+        assert set(rows) == {"race.json", "quali.json"} and rows["race.json"].event_id == ev.id   # the old race is outside the window
+        assert (rows["race.json"].session_type, rows["quali.json"].session_type) == ("Race", "Qualify")
+
+
+def _qualy_result(sid, name, order):
+    """A qualifying result with `order` (Steam IDs, best first); written now."""
+    import json
+    from pathlib import Path
+    from app.config import settings
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps({"Type": "Qualify", "TrackName": "spa", "Result": [
+        {"DriverName": g[-2:], "DriverGuid": g, "CarModel": "bmw", "BestLap": 90000 + i, "TotalTime": 0} for i, g in enumerate(order)], "Laps": []}))
+
+
+def test_league_suspensions_kinds_grid_places_and_non_racing_cars(monkeypatch):
+    import time
+    from sqlmodel import Session, select
+    from app import discord, league
+    from app.db import engine
+    from app.models import Event, LeagueSuspension, Penalty, Schedule
+    from app.results import apply_penalties, parse_result_file
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setattr(discord, "announce", lambda t: None)
+    monkeypatch.setattr(discord, "alert", lambda t: None)
+    api = TestClient(app, headers=ADMIN)
+    G = [f"7656119800000010{i}" for i in range(6)]   # 0 = safety car, 1..5 drivers
+    lg = api.post("/api/v1/championships", json={"name": "Liga susp"}).json()
+    base = f"/api/v1/championships/{lg['id']}"
+    for i, g in enumerate(G):
+        assert api.post(base + "/members", json={"guid": g, "name": f"P{i}", "non_racing": i == 0}).status_code == 200
+    sus = base + "/suspensions"
+    assert api.post(sus, json={"guid": G[0], "kind": "ban", "reason": "no corre"}).status_code == 422          # a non-racing car is never suspended
+    assert api.post(sus, json={"guid": G[1], "kind": "time", "reason": "falta días"}).status_code == 422      # needs its amount
+    assert api.post(sus, json={"guid": G[1], "kind": "time", "days": 2, "reason": "Choque grave"}).status_code == 201
+    assert api.post(sus, json={"guid": G[2], "kind": "races", "races": 2, "reason": "Reincidente"}).status_code == 201
+    assert api.post(sus, json={"guid": G[3], "kind": "ban", "reason": "Conducta"}).status_code == 201
+    assert api.post(sus, json={"guid": G[4], "kind": "grid", "places": 20, "reason": "Frenó en pista"}).status_code == 201
+    # entry list: the three suspended out, the safety car (non racing) and the one with only a grid penalty in
+    ev_row = Event(title="R1", data={"name": "r", "track": "spa", "cars": ["bmw"]}, league_id=lg["id"])
+    sid = api.post("/api/v1/servers", json={"name": "Susp"}).json()["id"]
+    with Session(engine) as s:
+        s.add(ev_row)
+        s.commit()
+        assert sorted(e.guid for e in league.session_for(s, ev_row, time.time()).entries) == sorted([G[0], G[4], G[5]])
+        # qualifying: safety car P1, then G[1], G[4] (20 places to lose), G[5] last of the racers
+        _qualy_result(sid, "q1.json", [G[0], G[1], G[4], G[5]])
+        sc = Schedule(event_id=ev_row.id, server_id=sid, start_at=time.time() - 600, state="running")
+        s.add(sc)
+        s.commit()
+        league.count_results(s, sc, ev_row, time.time() + 60)
+        pen = s.exec(select(Penalty).where(Penalty.filename == "q1.json")).all()
+        assert [(p.driver_guid, p.kind, p.value) for p in pen] == [(G[4], "grid", 1)]   # 3 racers: only 1 place behind him; the safety car does not count
+        x = s.exec(select(LeagueSuspension).where(LeagueSuspension.guid == G[4])).one()
+        assert x.places_left == 19 and x.active                                          # the other 19 wait for the next qualifying
+        parsed = apply_penalties(parse_result_file(__import__("app.servers", fromlist=["result_path"]).result_path(sid, "q1.json")), pen, frozenset([G[0]]))
+        assert parsed["grid"] == [G[1], G[5], G[4]]                                      # without the safety car, G[4] last
+        # a counted race uses up the suspensions in races: 2 -> 1
+        import json, os
+        from pathlib import Path
+        from app.config import settings
+        rf = Path(settings.data_dir) / "instances" / str(sid) / "results" / "r1.json"
+        rf.write_text(json.dumps({"Type": "Race", "TrackName": "spa", "Result": [], "Laps": []}))
+        league.count_results(s, sc, ev_row, time.time() + 60)
+        assert s.exec(select(LeagueSuspension).where(LeagueSuspension.guid == G[2])).one().races_left == 1
+    # qualifying ban: only while the league event is running and the driver has an active qualy suspension
+    assert not league.qualy_banned(sid, G[5])
+    assert api.post(sus, json={"guid": G[5], "kind": "qualy", "races": 1, "reason": "Antideportivo"}).status_code == 201
+    assert league.qualy_banned(sid, G[5]) and not league.qualy_banned(sid, G[1])
+    listed = api.get(sus).json()
+    assert all(r["active"] for r in listed[:5]) and api.delete(f"{sus}/{listed[0]['id']}").status_code == 204
+    assert not league.qualy_banned(sid, G[5])

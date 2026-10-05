@@ -199,6 +199,29 @@ class LeagueMember(SQLModel, table=True):
     team: str = ""
     car: str = ""  # preferred car model; the event's first car when it is not among the event's cars
     exempt: bool = False  # an admin lets this driver in whatever the practice requirement says
+    non_racing: bool = False  # a car that is on the server but does not race (safety car, race director, caster): ignored by the grid penalty, the practice requirement and the standings
+
+
+class LeagueSuspension(SQLModel, table=True):
+    """A suspension or ban of one driver from a league's races (app/league.py). kinds: ban (until lifted), time (until `until`),
+    races (out of the next `races_left` league races), qualy (no qualifying for `races_left` races: kicked while the server is in
+    qualifying, so they start last), grid (`places_left` places lost on the grid, counted from where they qualified)."""
+
+    __tablename__ = "league_suspensions"
+
+    id: int | None = Field(default=None, primary_key=True)
+    championship_id: int = Field(foreign_key="championships.id", index=True)
+    guid: str = Field(index=True)
+    name: str = ""
+    kind: str
+    until: float | None = None
+    races_left: int = 0
+    places_left: int = 0
+    reason: str = ""
+    created_by: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    active: bool = True  # False once lifted or used up
+    served: list = Field(default_factory=list, sa_type=JSON)  # qualifying result files already turned into a grid penalty
 
 
 class ChampionshipEvent(SQLModel, table=True):
@@ -208,5 +231,6 @@ class ChampionshipEvent(SQLModel, table=True):
     championship_id: int = Field(foreign_key="championships.id", index=True)
     server_id: int
     filename: str  # result JSON under data/instances/<server_id>/results/
+    session_type: str | None = None  # "Race" (scores) or "Qualify" (feeds the grid penalties); None = added by hand, read as it is
     event_id: int | None = None  # the saved event whose run produced it (counted automatically, league.count_results); None = added by hand
     created_at: datetime = Field(default_factory=_now)

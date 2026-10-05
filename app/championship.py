@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from app.db import SessionDep
-from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipEvent, LeagueMember
-from app.results import apply_penalties, parse_result_file, penalties_for
+from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipEvent, LeagueMember, LeagueSuspension
+from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.servers import result_path
 
 router = APIRouter(prefix="/championships", tags=["championships"])
@@ -88,6 +88,8 @@ def delete(championship_id: int, sess: SessionDep) -> None:
         sess.delete(e)
     for m in sess.exec(select(LeagueMember).where(LeagueMember.championship_id == championship_id)):
         sess.delete(m)
+    for x in sess.exec(select(LeagueSuspension).where(LeagueSuspension.championship_id == championship_id)):
+        sess.delete(x)
     sess.flush()  # children out before the FK-checked parent delete
     sess.delete(c)
     sess.commit()
@@ -141,12 +143,13 @@ def standings(championship_id: int, sess: SessionDep) -> list[dict]:
         p = result_path(e.server_id, e.filename)
         if not p.is_file():
             continue
-        parsed = apply_penalties(parse_result_file(p), penalties_for(sess, e.server_id, e.filename))
+        nonrun = non_racing_for(sess, e.server_id, e.filename)
+        parsed = apply_penalties(parse_result_file(p), penalties_for(sess, e.server_id, e.filename), nonrun)
         if parsed["type"] != "Race":
             continue  # ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
         for entry in parsed["classification"]:
             guid = entry["driver_guid"]
-            if not guid:
+            if not guid or guid in nonrun:   # the safety car, the race director and the caster do not score
                 continue
             pos = entry["position"]  # after penalties; None = disqualified, scores nothing
             points = c.points_system[pos - 1] if pos and pos <= len(c.points_system) else 0
