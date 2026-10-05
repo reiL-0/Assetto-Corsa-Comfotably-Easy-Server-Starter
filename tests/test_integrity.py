@@ -137,3 +137,32 @@ def test_only_admins_seal_and_stewards_read():
     assert steward.post(f"{V}/integrity/seal", json={"server_id": sid}).status_code == 403
     assert driver.get(f"{V}/integrity/check", params={"server_id": sid}).status_code == 403
     assert TestClient(app).get(f"{V}/integrity/seals").status_code == 401
+
+
+def test_installed_content_is_sealed_without_asking(tmp_path):
+    import zipfile
+
+    from app import content, integrity
+    from app.db import engine
+    from sqlmodel import Session
+
+    def pack(name, files):
+        z = tmp_path / f"{name}.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            for f, text in files.items():
+                zf.writestr(f"{name}/{f}", text)
+        return z
+    content._extract(pack("autocar", {"data.acd": "v1"}), content._cars_dir())
+    content._extract(pack("autotrack", {"data/surfaces.ini": "s", "models.ini": "m"}), content._tracks_dir())
+    with Session(engine) as sess:
+        seals = integrity._seals(sess)
+    assert "car:autocar" in seals and "track:autotrack:" in seals
+    first = seals["car:autocar"].files
+    content._extract(pack("autocar", {"data.acd": "v2"}), content._cars_dir())      # a reinstall is the new reference
+    with Session(engine) as sess:
+        assert integrity._seals(sess)["car:autocar"].files != first
+    (content._cars_dir() / "handmade").mkdir()
+    (content._cars_dir() / "handmade" / "data.acd").write_text("h")
+    assert integrity.seal_new() >= 1                                                 # boot picks up what arrived by hand
+    with Session(engine) as sess:
+        assert "car:handmade" in integrity._seals(sess)

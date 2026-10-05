@@ -9,14 +9,17 @@
 set -euo pipefail
 HOST=${DEPLOY_HOST:-root@157.173.196.89}
 cd "$(dirname "$0")"
+TREE=HEAD; REV=$(git rev-parse --short HEAD)
 if ! git diff --quiet HEAD || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-  echo "Hay cambios sin commit: haz commit primero (se despliega lo commiteado)." >&2; exit 1
+  if [ "${DEPLOY_DIRTY:-}" != 1 ]; then
+    echo "Hay cambios sin commit: haz commit primero (o DEPLOY_DIRTY=1 para probar el árbol de trabajo sin commit)." >&2; exit 1
+  fi
+  IDX=$(mktemp -u); GIT_INDEX_FILE=$IDX git add -A; TREE=$(GIT_INDEX_FILE=$IDX git write-tree); rm -f "$IDX"; REV="$REV-dirty"
 fi
-REV=$(git rev-parse --short HEAD)
 echo "0/5 tests locales"
 .venv/bin/python -m pytest -q -p no:warnings
 echo "Desplegando $REV a $HOST"
-git archive HEAD app pyproject.toml | ssh "$HOST" 'rm -rf /tmp/stage-acm && mkdir /tmp/stage-acm && tar -x -C /tmp/stage-acm'
+git archive $TREE app pyproject.toml | ssh "$HOST" 'rm -rf /tmp/stage-acm && mkdir /tmp/stage-acm && tar -x -C /tmp/stage-acm'
 ssh "$HOST" REV="$REV" bash -s <<'REMOTE'
 set -euo pipefail
 APP=/opt/acm/app; REL=/opt/acm/releases; PY=$APP/.venv/bin/python

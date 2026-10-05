@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
-from app import metrics, schedule, servers, wake
+from app import integrity, metrics, schedule, servers, wake
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
@@ -27,6 +27,8 @@ log = logging.getLogger("acmanager")
 async def lifespan(_app: FastAPI):
     init_db()
     metrics.purge()
+    if n_sealed := integrity.seal_new():
+        log.info("sealed %d installed item(s) that had no seal", n_sealed)
     with Session(engine) as sess:
         n = await servers.adopt_running(sess)
     if n:

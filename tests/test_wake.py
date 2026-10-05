@@ -134,6 +134,11 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
     woken = _setup(monkeypatch)
     sid, port = _plain_server("always", SERVER={"NAME": "Prácticas", "TRACK": "monza", "CONFIG_TRACK": "", "CARS": "bmw_m3", "MAX_CLIENTS": 2,
                                                 "PASSWORD": "x"}, PRACTICE={"TIME": 15}, RACE={"LAPS": 5})
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.welcome = "Bienvenidos, sin contacto"
+        db.add(srv)
+        db.commit()
 
     async def scenario():
         w = wake.Waker()
@@ -147,7 +152,9 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
         cars = json.loads((await _http_get(port + 1, "/JSON|76561190000000001"))[1])["Cars"]
         assert [(c["Model"], c["Skin"], c["DriverName"], c["IsConnected"], c["IsEntryList"]) for c in cars] == [
             ("bmw_m3", "red", "reiL", False, True), ("bmw_m3", "", "", False, True)]   # as acServer: every slot is «entry list»
-        assert (await _http_get(port + 1, "/api/details")) == (200, "")
+        code, body = await _http_get(port + 1, "/api/details")      # the Content Manager wrapper's page: the lobby info + the description
+        det = json.loads(body)
+        assert code == 200 and det["name"] == "Prácticas" and det["cport"] == port + 1 and det["description"] == "Bienvenidos, sin contacto"
         # the same shape as acServer's own answer: compact JSON in UTF-8, Date, keep-alive, many requests on one connection
         r, wr = await asyncio.open_connection("127.0.0.1", port + 1)
         for _ in range(2):
@@ -212,7 +219,8 @@ def test_cooldown_and_limits_and_wake_modes(monkeypatch):
 
 
 def test_starting_a_server_by_hand_frees_the_ports_first(monkeypatch):
-    """Pressing «Iniciar» while the manager holds the ports must not leave acServer without its HTTP / game ports."""
+    """Pressing «Iniciar» while the manager holds the ports must not leave acServer without its game port (the HTTP port stays ours:
+    acServer's own is the internal one)."""
     _setup(monkeypatch)
     sid, port = _plain_server("always")
 
@@ -225,7 +233,7 @@ def test_starting_a_server_by_hand_frees_the_ports_first(monkeypatch):
             hook(sid)
         await asyncio.sleep(0.1)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u, socket.socket() as t1, socket.socket() as t2:
-            u.bind(("127.0.0.1", port)), t1.bind(("127.0.0.1", port)), t2.bind(("127.0.0.1", port + 1))   # all three are free now
+            u.bind(("127.0.0.1", port)), t1.bind(("127.0.0.1", port)), t2.bind(("127.0.0.1", wake._ports(port)["http_internal"]))   # free now
         await w.sync()
         assert sid not in w.listening, "and they are not taken back while it starts"
         w.holdoff[sid] = 0
@@ -233,3 +241,48 @@ def test_starting_a_server_by_hand_frees_the_ports_first(monkeypatch):
 
     asyncio.run(scenario())
 
+
+
+def test_a_running_server_is_relayed_and_still_gets_its_description(monkeypatch):
+    """While acServer runs, the public HTTP port is the manager's: /INFO and /JSON come from acServer (its own port number swapped
+    for ours), /api/details adds the description."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+    _setup(monkeypatch)
+    sid, port = _plain_server("off", SERVER={"NAME": "Real", "TRACK": "monza"})
+    internal = wake._ports(port)["http_internal"]
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.welcome = "Reglas: sin contacto"
+        db.add(srv)
+        db.commit()
+
+    class Fake(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = {"/INFO": json.dumps({"name": "Real", "clients": 3, "cport": internal}), "/JSON|1": json.dumps({"Cars": ["real"]})}.get(self.path, "")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *a):
+            pass
+    up = HTTPServer(("127.0.0.1", internal), Fake)
+    Thread(target=up.serve_forever, daemon=True).start()
+    monkeypatch.setattr(wake.supervisor, "get", lambda i: type("I", (), {"running": True})())
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()                                        # running: the HTTP port is answered although waking is off
+        assert sid in w.http and sid not in w.listening
+        info = json.loads((await _http_get(port + 1, "/INFO"))[1])
+        assert info["clients"] == 3 and info["cport"] == port + 1          # acServer's answer, with the public port
+        assert json.loads((await _http_get(port + 1, "/JSON|1"))[1]) == {"Cars": ["real"]}
+        det = json.loads((await _http_get(port + 1, "/api/details"))[1])
+        assert det["clients"] == 3 and det["description"] == "Reglas: sin contacto" and det["cport"] == port + 1
+        w.close()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        up.shutdown()

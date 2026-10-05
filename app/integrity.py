@@ -11,6 +11,8 @@ those cannot be enforced from here. So the reference is whatever sits in the ser
 (a wrong upload, a tampered file) every honest driver would be kicked and a cheat that matches the altered copy would pass.
 
 This module keeps the reference honest:
+- **Auto-seal** (`seal_installed`, `seal_new`): every car and track installed through the manager is sealed at install time (a reinstall
+  re-seals it), and whatever is installed but unsealed is sealed when the manager boots: nobody has to seal by hand.
 - **Seal** (`ContentSeal`): an admin approves the current files (MD5, the same ones acServer logs). `check` compares the files on disk
   with the seal: `ok`, `changed`, `missing` or `unsealed`. Optional **extras** (any file or folder under the server directory, e.g.
   a server-side plugin) can be sealed too and are included when the server's `integrity_extras` is on.
@@ -109,6 +111,63 @@ def server_items(s: Server, sess: Session, with_extras: bool) -> dict[str, dict]
     cars = [c for c in str(srv.get("CARS", "")).split(";") if c]
     extras = [k.split(":", 1)[1] for k in _seals(sess) if k.startswith("extra:")] if with_extras else []
     return items_for(cars, srv.get("TRACK", ""), srv.get("CONFIG_TRACK") or "", extras)
+
+
+def _put_seals(sess: Session, items: dict[str, dict], who: str, overwrite: bool) -> list[str]:
+    """Seal the items whose files are all present (and, unless `overwrite`, that have no seal yet). Returns the keys sealed."""
+    seals, done = _seals(sess), []
+    for key, it in items.items():
+        if any(h is None for h in it["files"].values()) or (key in seals and not overwrite):
+            continue
+        row = seals.get(key) or ContentSeal(key=key, files={}, sealed_at=datetime.now(UTC), sealed_by="")
+        row.files, row.sealed_at, row.sealed_by = it["files"], datetime.now(UTC), who
+        sess.add(row)
+        done.append(key)
+    sess.commit()
+    return done
+
+
+def _layouts(t: dict) -> list[str]:
+    """The layouts of a listed track that acServer can load: "" for the base track plus each named layout."""
+    return ([""] if t["base"] else []) + [c["config"] for c in t["configs"] if c["config"]]
+
+
+def seal_installed(kind: str, name: str) -> None:
+    """A car or track was just installed (or reinstalled): its files become the reference. Never raises: an install must not fail on this."""
+    from app import content   # lazy: content imports this module's neighbours
+    try:
+        if kind == "car":
+            items = items_for([name], "", "")
+            items.pop("system")
+        else:
+            t = next((t for t in content.list_tracks() if t["track"] == name), None)
+            items = {}
+            for cfg in (_layouts(t) if t else []):
+                items.update(items_for([], name, cfg))
+            items.pop("system", None)
+        with Session(engine) as sess:
+            _put_seals(sess, items, "instalación", overwrite=True)
+    except Exception:  # noqa: BLE001
+        log.exception("could not seal %s %s", kind, name)
+
+
+def seal_new() -> int:
+    """At boot: seal whatever is installed and usable but has no seal yet (content that arrived by hand, or before auto-seal)."""
+    from app import content
+    try:
+        items = {"system": {"label": "Sistema (surfaces.ini)", "files": system_files()}}
+        for c in content.list_cars():
+            if c["usable"]:
+                items.update({k: v for k, v in items_for([c["car"]], "", "").items() if k != "system"})
+        for t in content.list_tracks():
+            if t["usable"]:
+                for cfg in _layouts(t):
+                    items.update({k: v for k, v in items_for([], t["track"], cfg).items() if k != "system"})
+        with Session(engine) as sess:
+            return len(_put_seals(sess, items, "arranque", overwrite=False))
+    except Exception:  # noqa: BLE001
+        log.exception("could not seal the installed content")
+        return 0
 
 
 def _seals(sess: Session) -> dict[str, ContentSeal]:

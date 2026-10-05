@@ -42,6 +42,7 @@ class Server(SQLModel, table=True):
     config: dict = Field(default_factory=dict, sa_type=JSON)
     entry_list: list = Field(default_factory=list, sa_type=JSON)
     welcome: str = ""  # text shown to a driver on joining (WELCOME_MESSAGE file); changes with each session
+    session: dict | None = Field(default=None, sa_type=JSON)  # the last servers.SessionIn applied (no admin password): what the panel edits and the calendar starts from
     integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...
@@ -60,6 +61,8 @@ class Event(SQLModel, table=True):
     title: str
     notes: str = ""
     data: dict = Field(default_factory=dict, sa_type=JSON)  # a servers.SessionIn, as JSON
+    is_default: bool = False  # the preset a new calendar event starts from; at most one (events.set_default)
+    derived: bool = False  # made by the website's calendar sync for one calendar event, not a preset an admin edits
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

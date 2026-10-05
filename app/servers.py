@@ -48,12 +48,16 @@ class ServerOut(BaseModel):
     integrity: str = "warn"
     integrity_extras: bool = False
     welcome: str = ""
+    session: dict | None = None  # the last SessionIn applied through /apply (None for a server never set up from the panel)
 
 
 def _ports(base: int) -> dict[str, int]:
     # plugin: acServer's own UDP_PLUGIN_LOCAL_PORT. plugin_local: our side of
     # the ACSP socket (UDP_PLUGIN_ADDRESS), one pair per 4-port block.
-    return {"tcp": base, "udp": base, "http": base + 1, "plugin": base + 2, "plugin_local": base + 3}
+    # http: the port players and Content Manager use (the manager answers there, app/wake.py); http_internal: where acServer's own
+    # HTTP listens (outside the blocks, one per block, still open to the world: the game's UDP ping names it)
+    internal = settings.port_range_end + (base - settings.port_range_start) // 4
+    return {"tcp": base, "udp": base, "http": base + 1, "plugin": base + 2, "plugin_local": base + 3, "http_internal": internal}
 
 
 def _out(s: Server) -> ServerOut:
@@ -66,6 +70,7 @@ def _out(s: Server) -> ServerOut:
         entry_list=s.entry_list,
         wake=s.wake,
         welcome=s.welcome,
+        session=s.session,
         integrity=s.integrity,
         integrity_extras=s.integrity_extras,
     )
@@ -96,7 +101,7 @@ def render_server_cfg(s: Server) -> str:
     p = _ports(s.base_port)
     server.setdefault("TCP_PORT", p["tcp"])
     server.setdefault("UDP_PORT", p["udp"])
-    server.setdefault("HTTP_PORT", p["http"])
+    server["HTTP_PORT"] = p["http_internal"]   # the manager owns the public HTTP port
     server.setdefault("UDP_PLUGIN_LOCAL_PORT", p["plugin"])
     if s.welcome:
         server["WELCOME_MESSAGE"] = "cfg/welcome.txt"   # relative to the instance directory, acServer's working directory
@@ -389,6 +394,13 @@ def _apply_options(cfg: dict, srv: dict, o: OptionsIn) -> None:
         cfg["DYNAMIC_TRACK"] = {k.upper(): v for k, v in o.dynamic_track.model_dump().items()}
 
 
+def _clock_key(cfg: dict) -> tuple:
+    """What defines the session clock (app/timeline.py): changing any of it restarts the clock; a typo fix in the name does not."""
+    g = lambda sec, k: (cfg.get(sec) or {}).get(k)  # noqa: E731
+    return (g("PRACTICE", "TIME"), g("QUALIFY", "TIME"), g("RACE", "LAPS"), g("RACE", "TIME"), g("SERVER", "TRACK"),
+            g("SERVER", "CONFIG_TRACK"), g("SERVER", "LOOP_MODE"))
+
+
 async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> AppliedOut:
     server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
@@ -424,9 +436,11 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
+    if body.restart or _clock_key(cfg) != _clock_key(s.config):
+        s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart): the clock starts over with the next start
     s.config = cfg
     s.welcome = body.welcome.strip()
-    s.anchor_index = s.anchor_at = None   # a new session set-up: the clock starts over with the next start
+    s.session = body.model_dump(exclude={"admin_password", "restart"})
     if body.entries:
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
@@ -464,7 +478,7 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
             _write_instance(s),
             acsp_remote_port=p["plugin"],
             acsp_local_port=p["plugin_local"],
-            http_port=p["http"],
+            http_port=p["http_internal"],
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -494,7 +508,7 @@ async def adopt_running(sess: Session) -> int:
         p = _ports(s.base_port)
         inst = await supervisor.adopt(
             s.id, Path(settings.data_dir) / "instances" / str(s.id),
-            acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http"],
+            acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http_internal"],
         )
         n += inst is not None
     return n

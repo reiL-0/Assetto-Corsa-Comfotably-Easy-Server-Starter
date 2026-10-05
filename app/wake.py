@@ -1,7 +1,10 @@
 """A stopped server that still looks open: players see it in the lobby, and trying to join starts it.
 
 Per server (`Server.wake`): `off` = never; `window` = only inside an event window (see schedule.open_window); `always`.
-While a server is stopped and its wake mode allows it, the manager itself holds the server's ports instead of acServer:
+The HTTP port (game port + 1) is always the manager's, never acServer's (that one listens on `http_internal`, see
+`servers._ports`): while the server runs the manager relays `/INFO` and `/JSON|…` to acServer (swapping its own port number for the
+public one) and answers `/api/details`, the Content Manager wrapper's page whose `description` is the server's welcome text; it keeps
+answering through a start. While a server is stopped and its wake mode allows it, the manager also holds the game port instead of acServer:
 - the HTTP port (game port + 1) answers like acServer would with nobody on it: `/INFO` (name, track, cars, slots,
   sessions; `clients` 0) from the copy of the real answer kept in `info.json` (`supervisor`), and `/JSON|...` with the
   entry list's cars and skins, so Content Manager shows the server open and empty. Browsing the lobby wakes nothing;
@@ -24,6 +27,7 @@ import logging
 import socket
 import struct
 import time
+import urllib.request
 from email.utils import formatdate
 from pathlib import Path
 
@@ -68,6 +72,8 @@ def facade_info(s: Server) -> dict:
                 "country": ["na", "na"], "pass": bool(srv.get("PASSWORD")), "timestamp": 0, "json": None, "l": False,
                 "pickup": bool(int(srv.get("PICKUP_MODE_ENABLED", 1))), "tport": ports["udp"], "timed": False, "extra": False,
                 "pit": False, "inverted": 0}
+    info["cport"] = _ports(s.base_port)["http"]   # the snapshot came from acServer's own HTTP port: players are told ours
+    info["extra"] = True   # «this server has more to say»: Content Manager then asks /api/details (description...)
     info.update(clients=0, session=0)
     if timeline.config_durations(s.config):   # the snapshot may have been taken while a session was shortened to catch up with the clock
         info["durations"] = timeline.config_durations(s.config)
@@ -92,6 +98,27 @@ def _abort(writer: asyncio.StreamWriter) -> None:
     if sock is not None:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     writer.close()
+
+
+def _upstream(port: int, path: str) -> bytes:
+    """acServer's own answer (its internal HTTP port); empty when it does not answer."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+            return r.read()
+    except (OSError, ValueError):
+        return b""
+
+
+def details(s: Server, live: bytes | None) -> dict:
+    """Body of /api/details, what the Content Manager wrapper serves and Content Manager shows on the server's page: the lobby
+    info (acServer's own /INFO when running, the facade's when stopped) plus the description (the welcome text)."""
+    try:
+        info = json.loads(live) if live else facade_info(s)
+    except ValueError:
+        info = facade_info(s)
+    info["cport"], info["extra"] = _ports(s.base_port)["http"], True
+    info["description"] = s.welcome
+    return info
 
 
 def _http_handler(server_id: int, ac_seen):
@@ -121,10 +148,28 @@ def _http_handler(server_id: int, ac_seen):
                     ac_seen(peer)
                 with Session(engine) as sess:
                     s = sess.get(Server, server_id)
+                inst = supervisor.get(server_id)
+                internal = _ports(s.base_port)["http_internal"]
+                running = bool(inst and inst.running)
+                ctype = "text/plain; charset=utf-8"
+                if path.startswith("/api/details"):
+                    ctype = "application/json; charset=utf-8"
+                    live = await asyncio.to_thread(_upstream, internal, "/INFO") if running else None
+                    data = _dump(details(s, live)).encode()
+                elif running:   # the real acServer answers; only its own HTTP port number is swapped for ours in /INFO
+                    data = await asyncio.to_thread(_upstream, internal, path)
+                    if path.startswith("/INFO") and data:
+                        try:
+                            info = json.loads(data)
+                            info["cport"], info["extra"] = _ports(s.base_port)["http"], True
+                            data = _dump(info).encode()
+                        except ValueError:
+                            pass
+                else:
                     body = _dump(facade_info(s)) if path.startswith("/INFO") else _dump(facade_cars(s)) if path.startswith("/JSON") else ""
-                data = body.encode()
+                    data = body.encode()
                 date = formatdate(usegmt=True)
-                writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: text/plain; charset=utf-8\r\n".encode()
+                writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: {ctype}\r\n".encode()
                              + (b"Connection: close\r\n" if close else b"") + b"\r\n" + data)
                 await writer.drain()
                 if close:
@@ -156,7 +201,8 @@ class _Udp(asyncio.DatagramProtocol):
 
 class Waker:
     def __init__(self) -> None:
-        self.listening: dict[int, tuple[asyncio.DatagramTransport, asyncio.AbstractServer, asyncio.AbstractServer | None]] = {}
+        self.listening: dict[int, tuple[asyncio.DatagramTransport, asyncio.AbstractServer]] = {}   # the game port, while stopped and waking is allowed
+        self.http: dict[int, asyncio.AbstractServer] = {}   # the public HTTP port: the lobby look while stopped, a relay to acServer while running
         self.woken: dict[int, list[float]] = {}
         self.holdoff: dict[int, float] = {}   # server id -> do not hold its ports before this time (it is starting)
         self.ac_seen: dict[str, float] = {}   # address -> when it last asked the lobby as the game does
@@ -178,6 +224,12 @@ class Waker:
         self.woken[server_id] = recent
         return len(recent) < MAX_PER_HOUR and (not recent or now - recent[-1] >= COOLDOWN)
 
+    async def _bind_http(self, server_id: int, http_port: int) -> None:
+        try:
+            self.http[server_id] = await asyncio.start_server(_http_handler(server_id, self._note_ac), HOST, http_port)
+        except OSError as e:   # still held (acServer of an older start, or something else): next round
+            log.info("cannot answer on the HTTP port %s for server %s yet: %s", http_port, server_id, e)
+
     async def _bind(self, server_id: int, port: int, http_port: int | None = None) -> None:
         loop = asyncio.get_running_loop()
         hit = lambda: loop.create_task(self.trigger(server_id))  # noqa: E731
@@ -197,13 +249,7 @@ class Waker:
         except OSError:
             udp.close()
             raise
-        http = None
-        if http_port:
-            try:
-                http = await asyncio.start_server(_http_handler(server_id, self._note_ac), HOST, http_port)
-            except OSError as e:   # waking matters more than the lobby look: go on without it
-                log.info("cannot answer the lobby on %s for server %s: %s", http_port, server_id, e)
-        self.listening[server_id] = (udp, tcp, http)
+        self.listening[server_id] = (udp, tcp)
 
     def _unbind(self, server_id: int) -> None:
         for part in self.listening.pop(server_id, ()):
@@ -226,14 +272,22 @@ class Waker:
         """Hold the ports of exactly the servers that are stopped, whose wake mode allows it now, and still allowed a wake."""
         now = now if now is not None else time.time()
         with Session(engine) as sess:
-            want = {}
+            want, want_http = {}, {}
             for s in sess.exec(select(Server)).all():
                 inst = supervisor.get(s.id)
+                running = bool(inst and inst.running)
                 allowed = s.wake == "always" or (s.wake == "window" and schedule.open_window(sess, s.id, now))
-                if allowed and not (inst and inst.running) and self._allowed(s.id, now) and now >= self.holdoff.get(s.id, 0):
+                if allowed and not running and self._allowed(s.id, now) and now >= self.holdoff.get(s.id, 0):
                     want[s.id] = (_ports(s.base_port)["udp"], _ports(s.base_port)["http"])
+                if running or allowed or now < self.holdoff.get(s.id, 0):   # the HTTP port keeps answering through a start
+                    want_http[s.id] = _ports(s.base_port)["http"]
         for sid in set(self.listening) - set(want):
             self._unbind(sid)
+        for sid in set(self.http) - set(want_http):
+            self.http.pop(sid).close()
+        for sid, http_port in want_http.items():
+            if sid not in self.http and sid not in self._busy:
+                await self._bind_http(sid, http_port)
         for sid, (port, http_port) in want.items():
             if sid not in self.listening and sid not in self._busy:
                 try:
@@ -244,6 +298,8 @@ class Waker:
     def close(self) -> None:
         for sid in list(self.listening):
             self._unbind(sid)
+        for sid in list(self.http):
+            self.http.pop(sid).close()
 
 
 waker = Waker()

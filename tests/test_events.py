@@ -96,3 +96,26 @@ def test_run_rechecks_the_content_that_is_installed_now():
     r = api.post(f"{V}/events/{eid}/run", json={"server_id": sid, "restart": False})
     assert r.status_code == 400 and "not installed" in r.json()["detail"]
     _install()
+
+
+def test_default_preset_is_unique_and_entries_are_validated():
+    a = api.post(f"{V}/events", json={"title": "A", "session": SESSION}).json()
+    b = api.post(f"{V}/events", json={"title": "B", "session": SESSION}).json()
+    assert not a["is_default"] and not a["derived"]
+    assert api.post(f"{V}/events/{a['id']}/default").json()["is_default"]
+    assert api.post(f"{V}/events/{b['id']}/default").json()["is_default"]
+    flags = {e["id"]: e["is_default"] for e in api.get(f"{V}/events").json()}
+    assert flags[b["id"]] and not flags[a["id"]]
+    d = api.post(f"{V}/events", json={"title": "copy", "session": SESSION, "derived": True}).json()
+    assert d["derived"] and api.post(f"{V}/events/{d['id']}/default").status_code == 400
+
+    def entry(model, guid):
+        return {"model": model, "guid": guid}
+    ok = {**SESSION, "entries": [entry("evbmw", "76561190000000001"), entry("evaudi", "76561190000000002")]}
+    assert api.post(f"{V}/events", json={"title": "ok", "session": ok}).status_code == 201
+    other_car = {**SESSION, "entries": [entry("evferrari", "76561190000000001")]}
+    assert api.post(f"{V}/events", json={"title": "x", "session": other_car}).status_code == 422
+    twice = {**SESSION, "entries": [entry("evbmw", "76561190000000001"), entry("evaudi", "76561190000000001")]}
+    assert api.post(f"{V}/events", json={"title": "x", "session": twice}).status_code == 422
+    locked_empty = {**SESSION, "locked": True, "entries": [entry("evbmw", "")]}
+    assert api.post(f"{V}/events", json={"title": "x", "session": locked_empty}).status_code == 422

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import download, metrics
+from app import download, integrity, metrics
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -204,6 +204,8 @@ def _extract(archive: Path, dest_parent: Path) -> str:
         root = _safe(tops[0].name)
         dest_parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+        if dest_parent in (_cars_dir(), _tracks_dir()):   # not skins: the checksums cover only physics and track files
+            integrity.seal_installed("car" if dest_parent == _cars_dir() else "track", root)
         return root
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

@@ -258,3 +258,26 @@ def test_welcome_message_is_written_next_to_the_config_and_removed_when_empty():
         d = srvmod._write_instance(s.get(Server, sid))
     assert not (d / "cfg" / "welcome.txt").exists()
 
+
+
+def test_apply_stores_the_session_and_only_a_session_change_resets_the_clock():
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.models import Server
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "restart": False}).json()
+    assert r["session"]["track"] == "spa" and r["session"]["cars"] == ["bmw", "audi"] and "admin_password" not in r["session"]
+    assert api.get(f"{V}/servers/{sid}").json()["session"]["name"] == "Liga"
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.anchor_index, srv.anchor_at = 1, 1000.0
+        db.add(srv)
+        db.commit()
+    api.post(f"{V}/servers/{sid}/apply", json={**FORM, "name": "Liga 2", "restart": False})   # a rename (autosave): the clock stays
+    with Session(engine) as db:
+        assert db.get(Server, sid).anchor_index == 1
+    api.post(f"{V}/servers/{sid}/apply", json={**FORM, "practice_min": 20, "restart": False})  # a different set-up: the clock starts over
+    with Session(engine) as db:
+        assert db.get(Server, sid).anchor_index is None
