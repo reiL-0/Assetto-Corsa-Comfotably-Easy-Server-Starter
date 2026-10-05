@@ -47,6 +47,7 @@ class ServerOut(BaseModel):
     wake: str = "window"
     integrity: str = "warn"
     integrity_extras: bool = False
+    welcome: str = ""
 
 
 def _ports(base: int) -> dict[str, int]:
@@ -64,6 +65,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        welcome=s.welcome,
         integrity=s.integrity,
         integrity_extras=s.integrity_extras,
     )
@@ -96,6 +98,10 @@ def render_server_cfg(s: Server) -> str:
     server.setdefault("UDP_PORT", p["udp"])
     server.setdefault("HTTP_PORT", p["http"])
     server.setdefault("UDP_PLUGIN_LOCAL_PORT", p["plugin"])
+    if s.welcome:
+        server["WELCOME_MESSAGE"] = "cfg/welcome.txt"   # relative to the instance directory, acServer's working directory
+    else:
+        server.pop("WELCOME_MESSAGE", None)
     server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
     return _render_ini(sections)
 
@@ -129,10 +135,15 @@ def _write_instance(s: Server) -> Path:
     bin_dir = settings.acserver_dir()
     for name in ("content", "system"):
         link = d / name
-        if not link.exists() and (bin_dir / name).is_dir():
+        if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
     (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s))
     (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s))
+    welcome = d / "cfg" / "welcome.txt"
+    if s.welcome:
+        welcome.write_text(s.welcome)
+    else:
+        welcome.unlink(missing_ok=True)
     return d
 
 
@@ -313,6 +324,7 @@ class SessionIn(BaseModel):
     options: OptionsIn = Field(default_factory=OptionsIn)
     locked: bool = False  # only the Steam IDs in `entries` may join (LOCKED_ENTRY_LIST)
     pickup: bool = True  # drivers without a reserved slot pick a free one on joining
+    welcome: str = Field(default="", max_length=2000)  # shown to a driver when joining (the session's rules, the league's link...)
     practice_min: int | None = Field(default=None, ge=0, le=720)
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
@@ -413,6 +425,7 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
     s.config = cfg
+    s.welcome = body.welcome.strip()
     s.anchor_index = s.anchor_at = None   # a new session set-up: the clock starts over with the next start
     if body.entries:
         s.entry_list = [

@@ -236,3 +236,25 @@ def test_a_timed_race_is_written_as_time_not_laps_and_both_are_refused():
     laps = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_laps": 5, "race_min": 0, "restart": False}).json()
     assert laps["config"]["RACE"]["LAPS"] == 5 and "TIME" not in laps["config"]["RACE"]
 
+
+def test_welcome_message_is_written_next_to_the_config_and_removed_when_empty():
+    from sqlmodel import Session
+
+    from app import servers as srvmod
+    from app.db import engine
+    from app.models import Server
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "welcome": "Práctica libre.\nSin contacto.", "restart": False})
+    assert r.status_code == 200 and r.json()["welcome"] == "Práctica libre.\nSin contacto."
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    assert "WELCOME_MESSAGE=cfg/welcome.txt" in ini
+    with Session(engine) as s:
+        d = srvmod._write_instance(s.get(Server, sid))
+    assert (d / "cfg" / "welcome.txt").read_text() == "Práctica libre.\nSin contacto."
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "welcome": "", "restart": False})
+    assert "WELCOME_MESSAGE" not in api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    with Session(engine) as s:
+        d = srvmod._write_instance(s.get(Server, sid))
+    assert not (d / "cfg" / "welcome.txt").exists()
+

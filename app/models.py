@@ -41,6 +41,7 @@ class Server(SQLModel, table=True):
     # server_cfg.ini as {SECTION: {KEY: value}}; entry_list.ini as [{CAR_0 fields}, ...]
     config: dict = Field(default_factory=dict, sa_type=JSON)
     entry_list: list = Field(default_factory=list, sa_type=JSON)
+    welcome: str = ""  # text shown to a driver on joining (WELCOME_MESSAGE file); changes with each session
     integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...
