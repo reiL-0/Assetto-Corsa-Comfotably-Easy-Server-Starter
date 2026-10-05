@@ -10,6 +10,7 @@ server and track. Laps logged before `cuts` was recorded have none and do not co
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -17,7 +18,9 @@ from sqlmodel import Session, func, select
 
 from app import discord
 from app.db import SessionDep
-from app.models import Activity, Championship, Event, LeagueMember
+from app.config import settings
+from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, Schedule
+from app.results import parse_result_file
 from app.servers import EntryIn, SessionIn
 
 router = APIRouter(prefix="/championships/{championship_id}/members", tags=["leagues"])
@@ -106,3 +109,23 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
                       + ", ".join(f"{m.name or m.guid} ({m.laps}/{c.practice_laps})" for m in out))
     entries = [EntryIn(model=m.car if m.car in cars else cars[0], driver_name=m.name, team=m.team, guid=m.guid) for m in ok]
     return s.model_copy(update={"entries": entries, "locked": True, "pickup": False, "cars": cars})
+
+
+def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
+    """Count, for the league of `ev`, the Race results its schedule produced: files in the server's results folder written between the
+    schedule's start and `until`. Idempotent; returns how many were added. A calendar event is thus a counted race of its league
+    (draft or published) without anyone picking files; results that are not a Race (practice, qualifying) are skipped."""
+    if not ev.league_id or not sess.get(Championship, ev.league_id):
+        return 0
+    d, added = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        if not sc.start_at <= f.stat().st_mtime <= until:
+            continue
+        if sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == ev.league_id, ChampionshipEvent.server_id == sc.server_id,
+                                                      ChampionshipEvent.filename == f.name)).first():
+            continue
+        if parse_result_file(f)["type"] == "Race":
+            sess.add(ChampionshipEvent(championship_id=ev.league_id, server_id=sc.server_id, filename=f.name, event_id=ev.id))
+            added += 1
+    sess.commit()
+    return added

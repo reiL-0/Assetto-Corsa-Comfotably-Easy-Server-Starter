@@ -28,6 +28,8 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app import announcement, discord, metrics, supervisor
+from app import league
+from app import league
 from app.league import session_for
 from app.config import settings
 from app.db import SessionDep, engine
@@ -204,6 +206,10 @@ async def tick(now: float | None = None) -> None:
                 await _tick_running(sc, ev, srv, now)
             sess.add(sc)
             sess.commit()
+        for sc in sess.exec(select(Schedule).where(Schedule.state.in_(("running", "done")), Schedule.start_at > now - 2 * 86400)).all():
+            ev = sess.get(Event, sc.event_id)   # a league event's Race result counts for its league, whatever the event's calendar status
+            if ev and ev.league_id:
+                league.count_results(sess, sc, ev, end_at(sc) + END_GRACE)
 
 
 def _rsvp_payload(sess: Session, sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> dict:

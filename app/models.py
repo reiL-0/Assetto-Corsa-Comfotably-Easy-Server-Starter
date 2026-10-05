@@ -196,4 +196,5 @@ class ChampionshipEvent(SQLModel, table=True):
     championship_id: int = Field(foreign_key="championships.id", index=True)
     server_id: int
     filename: str  # result JSON under data/instances/<server_id>/results/
+    event_id: int | None = None  # the saved event whose run produced it (counted automatically, league.count_results); None = added by hand
     created_at: datetime = Field(default_factory=_now)

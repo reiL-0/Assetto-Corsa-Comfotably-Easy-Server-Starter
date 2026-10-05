@@ -115,3 +115,35 @@ def test_league_roster_practice_requirement_and_locked_entry_list(monkeypatch):
         api.patch(f"/api/v1/championships/{lg['id']}", json={"name": "Liga GT", "practice_required": False})
         api.post(f"/api/v1/championships/{lg['id']}/members", json={"guid": B, "name": "Beto"})
         assert len(session_for(s, ev, now).entries) == 2                           # the checkbox off: everybody
+
+
+def test_a_league_events_race_result_is_counted_by_its_schedule(monkeypatch):
+    import json, os, time
+    from pathlib import Path
+    from sqlmodel import Session, select
+    from app import league
+    from app.config import settings
+    from app.db import engine
+    from app.models import ChampionshipEvent, Event, Schedule
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "Cuenta"}).json()["id"]
+    lg = api.post("/api/v1/championships", json={"name": "Liga cuenta"}).json()
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for name, kind, age in (("race.json", "Race", 60), ("quali.json", "Qualify", 60), ("old.json", "Race", 7200)):
+        (d / name).write_text(json.dumps({"Type": kind, "TrackName": "spa", "Result": [], "Laps": []}))
+        os.utime(d / name, (now - age, now - age))
+    with Session(engine) as s:
+        ev = Event(title="R1", data={"name": "r", "track": "spa", "cars": ["a"]}, league_id=lg["id"])
+        s.add(ev)
+        s.commit()
+        sc = Schedule(event_id=ev.id, server_id=sid, start_at=now - 1800, state="running")
+        s.add(sc)
+        s.commit()
+        assert league.count_results(s, sc, ev, now + 60) == 1 and league.count_results(s, sc, ev, now + 60) == 0   # only the race inside the window, once
+        row = s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg["id"])).one()
+        assert (row.filename, row.event_id) == ("race.json", ev.id)
