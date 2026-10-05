@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import secrets
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, get_args
 
@@ -104,6 +105,7 @@ class UserOut(BaseModel):
     username: str
     role: Role
     discord_id: str | None = None
+    timezone: str
 
 
 class UserIn(BaseModel):
@@ -180,6 +182,22 @@ def me(user: CurrentUser) -> User:
     return user
 
 
+class TimezoneIn(BaseModel):
+    timezone: str  # IANA name, e.g. what the browser reports with Intl.DateTimeFormat().resolvedOptions().timeZone
+
+
+@router.patch("/auth/me", response_model=UserOut)
+def set_timezone(body: TimezoneIn, user: CurrentUser, sess: SessionDep) -> User:
+    try:
+        ZoneInfo(body.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, "unknown time zone")
+    user.timezone = body.timezone
+    sess.add(user)
+    sess.commit()
+    return user
+
+
 class TokenIn(BaseModel):
     name: str = Field(min_length=1)
 
@@ -194,7 +212,7 @@ def create_token(body: TokenIn, user: CurrentUser, sess: SessionDep) -> dict:
 @router.get("/auth/tokens")
 def list_tokens(user: CurrentUser, sess: SessionDep) -> list[dict]:
     rows = sess.exec(select(Token).where(Token.user_id == user.id))
-    return [{"id": t.id, "name": t.name, "expires_at": t.expires_at} for t in rows]
+    return [{"id": t.id, "name": t.name, "expires_at": t.expires_at and t.expires_at.replace(tzinfo=UTC)} for t in rows]   # SQLite hands expires_at back naive: say it is UTC
 
 
 @router.delete("/auth/tokens/{token_id}", status_code=204)

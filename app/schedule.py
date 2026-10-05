@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import urllib.error
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -218,6 +219,9 @@ async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
             sc.rsvp_message = await asyncio.to_thread(discord.rsvp_post, sc.rsvp_text)
             return
         found = await asyncio.to_thread(discord.rsvp_read, sc.rsvp_message)
+    except urllib.error.HTTPError as e:
+        log.warning("rsvp of schedule %s: discord answered %s (tried again next tick)", sc.id, e.code)   # 429 is expected now and then
+        return
     except Exception:
         log.exception("rsvp of schedule %s failed", sc.id)
         return

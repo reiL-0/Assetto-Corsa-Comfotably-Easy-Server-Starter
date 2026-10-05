@@ -61,3 +61,13 @@ def test_websocket_requires_auth():
 
     with pytest.raises(WebSocketDisconnect), TestClient(app).websocket_connect(f"{V}/servers/1/live"):
         pass
+
+
+def test_timezone_defaults_to_cdmx_and_is_validated():
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app, headers=ADMIN)
+    assert c.get("/api/v1/auth/me").json()["timezone"] == "America/Mexico_City"
+    assert c.patch("/api/v1/auth/me", json={"timezone": "Nope/Nowhere"}).status_code == 422
+    assert c.patch("/api/v1/auth/me", json={"timezone": "Europe/Madrid"}).json()["timezone"] == "Europe/Madrid"

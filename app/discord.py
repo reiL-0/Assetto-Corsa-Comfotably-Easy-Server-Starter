@@ -130,9 +130,18 @@ def rsvp_edit(mid: str, text: str) -> None:
 
 
 def rsvp_read(mid: str) -> dict[str, list[str]]:
-    """status -> Discord ids that reacted with its emoji (the bot excluded). ponytail: first 100 per emoji, paginate with `after` if a league outgrows that."""
-    path = f"/channels/{settings.discord_channel}/messages/{mid}/reactions/"
-    return {st: [u["id"] for u in _api("GET", f"{path}{urllib.parse.quote(e)}?limit=100") if not u.get("bot")] for e, st in RSVP.items()}
+    """status -> Discord ids that reacted with its emoji (the bot excluded). One call for the message (it carries the counts) and one per
+    emoji somebody besides the bot used: the reaction-list route is rate-limited hard (429), so an idle announcement costs a single call.
+    ponytail: first 100 per emoji, paginate with `after` if a league outgrows that."""
+    path = f"/channels/{settings.discord_channel}/messages/{mid}"
+    used = {r["emoji"]["name"] for r in _api("GET", path).get("reactions", []) if r["count"] - r["me"] > 0}   # `me`: the bot's own reaction
+    out = {}
+    for e, st in RSVP.items():
+        out[st] = []
+        if e in used:
+            out[st] = [u["id"] for u in _api("GET", f"{path}/reactions/{urllib.parse.quote(e)}?limit=100") if not u.get("bot")]
+            time.sleep(0.5)
+    return out
 
 
 # --- Linking a Discord account to the logged-in user (OAuth2, scope identify) ---

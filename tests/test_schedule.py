@@ -220,3 +220,19 @@ def test_rsvp_reactions_become_rows_linked_to_users(monkeypatch):
     _tick(time.time(), monkeypatch)
     assert client.get("/api/v1/schedules").json()[0]["rsvp"] == {"yes": 1, "maybe": 1, "no": 0}
     assert {r["discord_id"]: r["status"] for r in client.get(f"/api/v1/schedules/{sc['id']}/rsvps").json()}["222"] == "maybe"
+
+
+def test_rsvp_read_asks_only_for_emojis_somebody_used(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "discord_channel", "1")
+    monkeypatch.setattr(discord.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake(method, path, *a, **k):
+        calls.append(path)
+        if "/reactions/" in path:
+            return [{"id": "5"}, {"id": "9", "bot": True}]
+        return {"reactions": [{"emoji": {"name": "✅"}, "count": 2, "me": True}, {"emoji": {"name": "❌"}, "count": 1, "me": True}]}
+    monkeypatch.setattr(discord, "_api", fake)
+    assert discord.rsvp_read("m") == {"yes": ["5"], "maybe": [], "no": []}
+    assert len(calls) == 2   # the message + ✅ only; ❌ is just the bot

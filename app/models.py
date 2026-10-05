@@ -14,6 +14,7 @@ class User(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     steam_id: str | None = Field(default=None, unique=True, index=True)
     discord_id: str | None = Field(default=None, unique=True, index=True)  # linked through app/discord.py (OAuth2)
+    timezone: str = "America/Mexico_City"  # IANA name; where a time has to be shown as local (everything stored is UTC), the browser sends its own via PATCH /auth/me
     username: str
     password_hash: str | None = None
     role: str = "driver"
