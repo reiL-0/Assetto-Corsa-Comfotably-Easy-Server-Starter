@@ -13,6 +13,7 @@ from app.discord import router as discord_router
 from app.events import router as events_router
 from app.integrity import router as integrity_router
 from app.schedule import router as schedule_router
+from app.league import router as league_router
 from app.live.acsm import router as acsm_router
 from app.metrics import router as metrics_router
 from app.penalties import router as penalties_router
@@ -44,3 +45,4 @@ api_router.include_router(telemetry_router)  # public: the in-game app has no lo
 api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only
 api_router.include_router(content_router, dependencies=[Depends(guard())])
 api_router.include_router(championship_router, dependencies=[Depends(guard())])
+api_router.include_router(league_router, dependencies=[Depends(guard())])  # roster: any logged-in user reads, admin edits

@@ -374,7 +374,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         elif t == "lap_completed":
             d = self.board._by_car(e["car_id"])
             metrics.log(sid, "lap", guid=d.guid if d else None, name=d.name if d else None, car=d.model if d else None,
-                        track=track, value=e["laptime_ms"])
+                        track=track, value=e["laptime_ms"], cuts=e["cuts"])
         elif t == "new_session":
             metrics.log(sid, "session", name=e["name"], track=track, value=e["session_type"])
 

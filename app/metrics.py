@@ -21,12 +21,12 @@ KEEP_DAYS = 120
 INCIDENTS = ("server_start", "server_stop", "server_crash", "import_ok", "import_error", "http_5xx")
 
 
-def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None, value=None, ts: float | None = None) -> None:
+def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None, value=None, cuts: int | None = None, ts: float | None = None) -> None:
     """Record one event. Never raises: metrics must not be able to break a lap, a start or a request."""
     try:
         with Session(engine) as s:
             s.add(Activity(ts=ts if ts is not None else time.time(), server_id=server_id, kind=kind, guid=guid, name=name,
-                           car=car, track=track, value=value))
+                           car=car, track=track, value=value, cuts=cuts))
             s.commit()
     except Exception:
         log_.exception("could not record %s", kind)

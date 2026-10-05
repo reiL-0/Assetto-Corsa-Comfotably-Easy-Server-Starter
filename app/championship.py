@@ -7,20 +7,38 @@ A championship just points at a set of already-written result files
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from app.db import SessionDep
-from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipEvent
+from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipEvent, LeagueMember
 from app.results import apply_penalties, parse_result_file, penalties_for
 from app.servers import result_path
 
 router = APIRouter(prefix="/championships", tags=["championships"])
 
 
+class PenaltyItem(BaseModel):
+    """One entry of a league's penalty catalogue: what a steward can pick. Time is added to the race time; `dsq` disqualifies."""
+
+    name: str = Field(min_length=1, max_length=40)
+    seconds: int = Field(default=0, ge=0, le=3600)
+    dsq: bool = False
+
+    @model_validator(mode="after")
+    def _does_something(self) -> PenaltyItem:
+        if not self.dsq and not self.seconds:
+            raise ValueError("a penalty needs seconds or dsq")
+        return self
+
+
 class ChampionshipIn(BaseModel):
     name: str
     points_system: list[int] = list(DEFAULT_POINTS_SYSTEM)
+    practice_required: bool = False  # roster drivers need valid practice laps to be on the entry list (app/league.py)
+    practice_laps: int = Field(default=5, ge=1, le=999)
+    practice_days: int = Field(default=7, ge=1, le=60)
+    penalties: list[PenaltyItem] = []
 
 
 def _get(sess: SessionDep, championship_id: int) -> Championship:
@@ -32,7 +50,7 @@ def _get(sess: SessionDep, championship_id: int) -> Championship:
 
 @router.post("", response_model=Championship, status_code=201)
 def create(body: ChampionshipIn, sess: SessionDep) -> Championship:
-    c = Championship(name=body.name, points_system=body.points_system)
+    c = Championship(**{**body.model_dump(), "penalties": [p.model_dump() for p in body.penalties]})
     sess.add(c)
     sess.commit()
     sess.refresh(c)
@@ -52,7 +70,8 @@ def get(championship_id: int, sess: SessionDep) -> Championship:
 @router.patch("/{championship_id}", response_model=Championship)
 def update(championship_id: int, body: ChampionshipIn, sess: SessionDep) -> Championship:
     c = _get(sess, championship_id)
-    c.name, c.points_system = body.name, body.points_system
+    for k, v in body.model_dump(exclude_unset=True).items():   # only what was sent: an older client that sends name + points leaves the league rules alone
+        setattr(c, k, [p.model_dump() for p in body.penalties] if k == "penalties" else v)
     sess.add(c)
     sess.commit()
     sess.refresh(c)
@@ -67,6 +86,8 @@ def delete(championship_id: int, sess: SessionDep) -> None:
     )
     for e in events:
         sess.delete(e)
+    for m in sess.exec(select(LeagueMember).where(LeagueMember.championship_id == championship_id)):
+        sess.delete(m)
     sess.flush()  # children out before the FK-checked parent delete
     sess.delete(c)
     sess.commit()

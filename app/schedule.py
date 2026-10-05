@@ -28,11 +28,12 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app import announcement, discord, metrics, supervisor
+from app.league import session_for
 from app.config import settings
 from app.db import SessionDep, engine
 from app.models import Event, Rsvp, Schedule, Server, User
 from app.live import acsp
-from app.servers import SessionIn, apply_to_server, start_server
+from app.servers import apply_to_server, start_server
 
 log = logging.getLogger("acmanager.schedule")
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -179,7 +180,7 @@ async def wake(server_id: int, now: float | None = None) -> bool:
             if sc.loaded:
                 await start_server(server_id, sess)
             else:
-                await apply_to_server(sess, srv, SessionIn(**ev.data).model_copy(update={"restart": True}))
+                await apply_to_server(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}))
                 sc.loaded = True
         except HTTPException as e:
             log.warning("wake of server %s failed: %s", server_id, e.detail)
@@ -265,7 +266,7 @@ async def _tick_pending(sess: Session, sc: Schedule, ev: Event, srv: Server, now
         return
     try:
         if not sc.loaded:   # a player may have woken the server early with the event already on it
-            await apply_to_server(sess, srv, SessionIn(**ev.data).model_copy(update={"restart": True}))
+            await apply_to_server(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}))
             sc.loaded = True
         sc.state = "running" if sc.duration_min else "done"
         discord.announce(f"🏁 **{ev.title}** ya está en marcha en {srv.name}" + _extra(sc))

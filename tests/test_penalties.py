@@ -160,3 +160,18 @@ def test_penalties_and_their_withdrawal_are_announced(monkeypatch):
     assert "descalificado" in said[2] and "pierde 1 posición\n" in said[3] + "\n"
     assert api.post(url, json={"driver_guid": A, "kind": "time", "value": 0, "reason": "mal"}).status_code == 422 and len(said) == 4  # a refused one says nothing
 
+
+
+def test_league_catalogue_penalties_are_race_time():
+    sid, name = _sid_and_file("liga.json")
+    url = f"{V}/servers/{sid}/results/{name}/penalties"
+    assert api.get(url + "/catalogue").json() == []   # not a league's result
+    cid = api.post(f"{V}/championships", json={"name": "Con catálogo", "penalties": [{"name": "Contacto", "seconds": 5}, {"name": "Grave", "dsq": True}]}).json()["id"]
+    api.post(f"{V}/championships/{cid}/events", json={"server_id": sid, "filename": name})
+    assert [i["name"] for i in api.get(url + "/catalogue").json()] == ["Contacto", "Grave"]
+    r = api.post(url, json={"driver_guid": A, "item": "Contacto", "reason": "con B en la curva 3"}).json()
+    assert (r["kind"], r["value"], r["reason"]) == ("time", 5, "Contacto: con B en la curva 3")
+    assert api.post(url, json={"driver_guid": B, "item": "Grave"}).json()["kind"] == "dsq"
+    assert api.post(url, json={"driver_guid": C, "item": "Inventada"}).status_code == 422
+    assert api.post(url, json={"driver_guid": C, "kind": "points", "value": 3, "reason": "Conducta"}).status_code == 422   # no points in a league with a catalogue
+    assert api.post(url, json={"driver_guid": C, "kind": "time", "value": 3, "reason": "Atajo"}).status_code == 201

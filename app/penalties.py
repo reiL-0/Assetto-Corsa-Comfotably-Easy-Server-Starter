@@ -6,11 +6,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 from app import discord
 from app.auth import CurrentUser, require
 from app.db import SessionDep
-from app.models import Penalty
+from app.models import Championship, ChampionshipEvent, Penalty
 from app.results import parse_result_file, penalties_for
 from app.servers import _get, result_path
 
@@ -27,9 +28,10 @@ LIMITS = {"time": ("seconds added to the race time", 1, 3600), "position": ("pla
 
 class PenaltyIn(BaseModel):
     driver_guid: str = Field(pattern=r"^\d{17}$")
-    kind: Literal["time", "position", "dsq", "grid", "points"]
+    kind: Literal["time", "position", "dsq", "grid", "points"] | None = None  # not needed with `item`
     value: int = 0  # meaning depends on `kind`, see LIMITS
-    reason: str = Field(min_length=3, max_length=300)  # a steward always says why
+    item: str | None = None  # a name from the result's league catalogue (Championship.penalties): sets kind and value
+    reason: str = Field(default="", max_length=300)  # a steward always says why (with `item`, the item's name is enough)
 
 
 class PenaltyOut(BaseModel):
@@ -59,6 +61,20 @@ def _driver_name(parsed: dict, guid: str) -> str:
     return next((x["driver_name"] for x in parsed["classification"] + parsed["laps"] if x["driver_guid"] == guid and x["driver_name"]), guid)
 
 
+def _league_of(sess: SessionDep, server_id: int, filename: str) -> Championship | None:
+    """The league this result counts for, if any."""
+    row = sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.server_id == server_id, ChampionshipEvent.filename == filename)).first()
+    return sess.get(Championship, row.championship_id) if row else None
+
+
+@router.get("/catalogue")
+def catalogue(server_id: int, filename: str, sess: SessionDep) -> list[dict]:
+    """The penalties the steward can pick for this result: its league's catalogue (empty when it is not a league's)."""
+    _existing_result(sess, server_id, filename)
+    league = _league_of(sess, server_id, filename)
+    return list(league.penalties or []) if league else []
+
+
 @router.get("", response_model=list[PenaltyOut])
 def list_penalties(server_id: int, filename: str, sess: SessionDep) -> list[PenaltyOut]:
     _existing_result(sess, server_id, filename)
@@ -68,6 +84,19 @@ def list_penalties(server_id: int, filename: str, sess: SessionDep) -> list[Pena
 @router.post("", response_model=PenaltyOut, status_code=201)
 def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep, user: CurrentUser) -> PenaltyOut:
     parsed = _existing_result(sess, server_id, filename)
+    league = _league_of(sess, server_id, filename)
+    if body.item:
+        found = next((i for i in (league.penalties or []) if i["name"] == body.item), None) if league else None
+        if not found:
+            raise HTTPException(422, f"{body.item!r} is not in the penalty catalogue of this result's league")
+        body.kind, body.value = ("dsq", 0) if found["dsq"] else ("time", found["seconds"])
+        body.reason = f"{found['name']}: {body.reason.strip()}" if body.reason.strip() else found["name"]
+    if body.kind is None:
+        raise HTTPException(422, "kind or item is required")
+    if len(body.reason.strip()) < 3:
+        raise HTTPException(422, "a steward always says why (reason, at least 3 characters)")
+    if league and league.penalties and body.kind == "points":   # a league with a catalogue penalises with race time
+        raise HTTPException(422, "leagues penalise with race time, not championship points")
     what, lo, hi = LIMITS[body.kind]
     if not lo <= body.value <= hi:
         raise HTTPException(422, f"{body.kind}: value is {what}, between {lo} and {hi}" if hi else f"{body.kind} takes no value")

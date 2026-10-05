@@ -63,6 +63,7 @@ class Event(SQLModel, table=True):
     title: str
     notes: str = ""
     data: dict = Field(default_factory=dict, sa_type=JSON)  # a servers.SessionIn, as JSON
+    league_id: int | None = None  # the league whose roster is this event's closed entry list when it runs (app/league.py); None = the entries saved in `data`
     is_default: bool = False  # the preset a new calendar event starts from; at most one (events.set_default)
     derived: bool = False  # made by the website's calendar sync for one calendar event, not a preset an admin edits
     created_at: datetime = Field(default_factory=_now)
@@ -156,6 +157,7 @@ class Activity(SQLModel, table=True):
     car: str | None = None
     track: str | None = None
     value: float | None = None  # lap ms, players online, exit code, http status...
+    cuts: int | None = None  # lap rows: track cuts in that lap (0 = valid); None for laps logged before this existed
 
 
 DEFAULT_POINTS_SYSTEM = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
@@ -167,7 +169,24 @@ class Championship(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     points_system: list[int] = Field(default_factory=lambda: list(DEFAULT_POINTS_SYSTEM), sa_type=JSON)
+    practice_required: bool = False  # a roster driver needs `practice_laps` valid laps in the last `practice_days` days to be on the entry list (app/league.py)
+    practice_laps: int = 5
+    practice_days: int = 7
+    penalties: list | None = Field(default=None, sa_type=JSON)  # the league's catalogue: [{name, seconds, dsq}]; the steward picks from it (app/penalties.py)
     created_at: datetime = Field(default_factory=_now)
+
+
+class LeagueMember(SQLModel, table=True):
+    """A driver on a league's roster, identified by Steam ID. The roster is the closed entry list of the league's races."""
+
+    __tablename__ = "league_members"
+
+    championship_id: int = Field(primary_key=True, foreign_key="championships.id")
+    guid: str = Field(primary_key=True)  # SteamID64
+    name: str = ""  # shown on the entry list
+    team: str = ""
+    car: str = ""  # preferred car model; the event's first car when it is not among the event's cars
+    exempt: bool = False  # an admin lets this driver in whatever the practice requirement says
 
 
 class ChampionshipEvent(SQLModel, table=True):
