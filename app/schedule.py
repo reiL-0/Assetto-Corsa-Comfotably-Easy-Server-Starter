@@ -26,8 +26,9 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app import discord, metrics, supervisor
+from app.config import settings
 from app.db import SessionDep, engine
-from app.models import Event, Schedule, Server
+from app.models import Event, Rsvp, Schedule, Server, User
 from app.live import acsp
 from app.servers import SessionIn, apply_to_server, start_server
 
@@ -64,13 +65,20 @@ class ScheduleOut(BaseModel):
     info: str
     state: str
     result: str
+    rsvp: dict[str, int]  # yes | maybe | no -> how many reacted that way
+
+
+def _counts(sess: Session, schedule_id: int) -> dict[str, int]:
+    rows = sess.exec(select(Rsvp.status).where(Rsvp.schedule_id == schedule_id)).all()
+    return {st: rows.count(st) for st in discord.RSVP.values()}
 
 
 def _out(sess: Session, sc: Schedule) -> ScheduleOut:
     ev, srv = sess.get(Event, sc.event_id), sess.get(Server, sc.server_id)
     return ScheduleOut(id=sc.id, event_id=sc.event_id, event_title=ev.title if ev else "(borrado)", server_id=sc.server_id,
                        server_name=srv.name if srv else "(borrado)", start_at=sc.start_at, reminders=sc.reminders, sent=sc.sent,
-                       duration_min=sc.duration_min, info=sc.info, state=sc.state, result=sc.result)
+                       duration_min=sc.duration_min, info=sc.info, state=sc.state, result=sc.result,
+                       rsvp=_counts(sess, sc.id))
 
 
 @router.get("", response_model=list[ScheduleOut])
@@ -110,8 +118,17 @@ def delete(schedule_id: int, sess: SessionDep) -> None:
     sc = sess.get(Schedule, schedule_id)
     if not sc:
         raise HTTPException(404, "schedule not found")
+    for r in sess.exec(select(Rsvp).where(Rsvp.schedule_id == schedule_id)):
+        sess.delete(r)
     sess.delete(sc)
     sess.commit()
+
+
+@router.get("/{schedule_id}/rsvps")
+def rsvps(schedule_id: int, sess: SessionDep) -> list[dict]:
+    """Who answered the announcement: Discord id, the linked username (None until they link their account) and the status."""
+    rows = sess.exec(select(Rsvp, User.username).join(User, User.id == Rsvp.user_id, isouter=True).where(Rsvp.schedule_id == schedule_id)).all()
+    return [{"discord_id": r.discord_id, "username": name, "status": r.status} for r, name in rows]
 
 
 def _extra(sc: Schedule) -> str:
@@ -184,7 +201,51 @@ async def tick(now: float | None = None) -> None:
             sess.commit()
 
 
+def _rsvp_text(sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> str:
+    return (f"📣 **{ev.title}** en {srv.name}: {_when(sc)}{_extra(sc)}\n"
+            f"Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n"
+            + " · ".join(f"{e} {counts[st]}" for e, st in discord.RSVP.items()))
+
+
+async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
+    """Post the sign-up announcement once, then each tick turn its reactions into `Rsvp` rows (linked to the user whose
+    Discord account matches) and keep the counts on the message current. Needs ACM_DISCORD_BOT_TOKEN + ACM_DISCORD_CHANNEL."""
+    if not (settings.discord_bot_token and settings.discord_channel):
+        return
+    try:
+        if not sc.rsvp_message:
+            sc.rsvp_text = _rsvp_text(sc, ev, srv, dict.fromkeys(discord.RSVP.values(), 0))
+            sc.rsvp_message = await asyncio.to_thread(discord.rsvp_post, sc.rsvp_text)
+            return
+        found = await asyncio.to_thread(discord.rsvp_read, sc.rsvp_message)
+    except Exception:
+        log.exception("rsvp of schedule %s failed", sc.id)
+        return
+    mine: dict[str, set[str]] = {}
+    for st, ids in found.items():
+        for i in ids:
+            mine.setdefault(i, set()).add(st)
+    old = {r.discord_id: r for r in sess.exec(select(Rsvp).where(Rsvp.schedule_id == sc.id))}
+    linked = {u.discord_id: u.id for u in sess.exec(select(User).where(User.discord_id.in_(list(mine))))}
+    for i, sts in mine.items():
+        prev = old.get(i)
+        new = [s for s in sorted(sts, key=list(discord.RSVP.values()).index) if not prev or s != prev.status]   # several reactions: the newest one wins
+        sess.merge(Rsvp(schedule_id=sc.id, discord_id=i, user_id=linked.get(i), status=new[0] if new else prev.status))
+    for i, r in old.items():
+        if i not in mine:   # took every reaction back
+            sess.delete(r)
+    sess.commit()
+    text = _rsvp_text(sc, ev, srv, _counts(sess, sc.id))
+    if text != sc.rsvp_text:
+        try:
+            await asyncio.to_thread(discord.rsvp_edit, sc.rsvp_message, text)
+            sc.rsvp_text = text
+        except Exception:
+            log.exception("rsvp edit of schedule %s failed", sc.id)
+
+
 async def _tick_pending(sess: Session, sc: Schedule, ev: Event, srv: Server, now: float) -> None:
+    await _rsvp(sess, sc, ev, srv)
     due = [m for m in sc.reminders if m not in sc.sent and now >= sc.start_at - m * 60]
     if due and now < sc.start_at:
         discord.announce(f"⏰ **{ev.title}** en {srv.name}: empieza {_when(sc)}" + _extra(sc))

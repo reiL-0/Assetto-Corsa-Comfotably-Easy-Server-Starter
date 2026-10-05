@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
+import time
+import urllib.parse
 import urllib.request
 
-from sqlmodel import Session
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import RedirectResponse
+from sqlmodel import Session, select
 
+from app.auth import CurrentUser
 from app.config import settings
-from app.db import engine
-from app.models import Server
+from app.db import SessionDep, engine
+from app.models import Rsvp, Server, User
 
 log = logging.getLogger("acmanager.discord")
 KINDS = ("server_start", "server_stop", "server_crash")
@@ -87,3 +93,99 @@ def alert(text: str) -> None:
     """A warning for the stewards on the server-status channel; nothing if it is not set."""
     if settings.discord_status_webhook:
         threading.Thread(target=_send, args=(text,), daemon=True).start()
+
+
+# --- RSVP announcements: the bot posts, people react, schedule._rsvp reads the reactions ---
+
+API = "https://discord.com/api/v10"
+UA = "OPR-AC-Manager"
+RSVP = {"✅": "yes", "❔": "maybe", "❌": "no"}  # reaction -> status; this order is the priority when someone has several
+
+
+def _api(method: str, path: str, body: dict | None = None, *, bearer: str | None = None, form: dict | None = None):
+    data = urllib.parse.urlencode(form).encode() if form else json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, method=method, data=data, headers={
+        "Authorization": bearer or f"Bot {settings.discord_bot_token}", "User-Agent": UA,
+        "Content-Type": "application/x-www-form-urlencoded" if form else "application/json"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        raw = r.read()
+    return json.loads(raw) if raw else None
+
+
+def rsvp_post(text: str) -> str:
+    """Post the announcement and put the three reactions on it so people only have to click. Returns the message id (blocking: run in a thread)."""
+    path = f"/channels/{settings.discord_channel}/messages"
+    mid = _api("POST", path, {"content": text[:2000]})["id"]
+    try:
+        for emoji in RSVP:
+            _api("PUT", f"{path}/{mid}/reactions/{urllib.parse.quote(emoji)}/@me")
+            time.sleep(0.3)   # Discord rate-limits adding reactions
+    except Exception:
+        log.exception("discord reactions failed")   # the message exists: do not post it twice
+    return mid
+
+
+def rsvp_edit(mid: str, text: str) -> None:
+    _api("PATCH", f"/channels/{settings.discord_channel}/messages/{mid}", {"content": text[:2000]})
+
+
+def rsvp_read(mid: str) -> dict[str, list[str]]:
+    """status -> Discord ids that reacted with its emoji (the bot excluded). ponytail: first 100 per emoji, paginate with `after` if a league outgrows that."""
+    path = f"/channels/{settings.discord_channel}/messages/{mid}/reactions/"
+    return {st: [u["id"] for u in _api("GET", f"{path}{urllib.parse.quote(e)}?limit=100") if not u.get("bot")] for e, st in RSVP.items()}
+
+
+# --- Linking a Discord account to the logged-in user (OAuth2, scope identify) ---
+
+router = APIRouter(prefix="/auth/discord", tags=["auth"])
+_states: dict[str, tuple[int, float]] = {}  # state -> (user id, expiry); ponytail: in memory, a manager restart mid-link just means trying again
+
+
+def _redirect_uri() -> str:
+    return f"{settings.public_url.rstrip('/')}/api/v1/auth/discord/callback"
+
+
+@router.get("/link", include_in_schema=False)
+def link(user: CurrentUser) -> RedirectResponse:
+    """Open this in the browser while logged in: sends the user to Discord to approve, which returns to /callback."""
+    if not (settings.discord_client_id and settings.discord_client_secret and settings.public_url):
+        raise HTTPException(503, "discord linking is not configured")
+    now = time.time()
+    for k in [k for k, (_, exp) in _states.items() if exp < now]:
+        del _states[k]
+    state = secrets.token_urlsafe(16)
+    _states[state] = (user.id, now + 600)
+    q = urllib.parse.urlencode({"client_id": settings.discord_client_id, "redirect_uri": _redirect_uri(), "response_type": "code",
+                                "scope": "identify", "state": state})
+    return RedirectResponse(f"https://discord.com/oauth2/authorize?{q}")
+
+
+@router.get("/callback", include_in_schema=False)
+def callback(code: str, state: str, sess: SessionDep) -> RedirectResponse:
+    uid, exp = _states.pop(state, (0, 0))
+    if not uid or exp < time.time():
+        raise HTTPException(400, "link expired, start again")
+    try:
+        tok = _api("POST", "/oauth2/token", form={"client_id": settings.discord_client_id, "client_secret": settings.discord_client_secret,
+                                                  "grant_type": "authorization_code", "code": code, "redirect_uri": _redirect_uri()})
+        did = _api("GET", "/users/@me", bearer=f"Bearer {tok['access_token']}")["id"]
+    except Exception:
+        log.exception("discord link failed")
+        raise HTTPException(502, "discord refused the link")
+    if (other := sess.exec(select(User).where(User.discord_id == did)).first()) and other.id != uid:
+        raise HTTPException(409, "that Discord account is already linked to another user")
+    user = sess.get(User, uid)
+    user.discord_id = did
+    sess.add(user)
+    for r in sess.exec(select(Rsvp).where(Rsvp.discord_id == did)):   # what they already answered becomes theirs
+        r.user_id = uid
+        sess.add(r)
+    sess.commit()
+    return RedirectResponse("/")
+
+
+@router.delete("", status_code=204)
+def unlink(user: CurrentUser, sess: SessionDep) -> None:
+    user.discord_id = None
+    sess.add(user)
+    sess.commit()

@@ -4,7 +4,7 @@ import time
 from conftest import ADMIN
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app import discord, schedule
 from app.db import engine
@@ -191,3 +191,32 @@ def test_the_end_of_the_event_waits_for_whoever_is_still_racing(monkeypatch):
     _tick(sc["start_at"] + 1800 + schedule.END_GRACE + 1, monkeypatch, [])
     assert not inst2.running
 
+
+
+def test_rsvp_reactions_become_rows_linked_to_users(monkeypatch):
+    from app.config import settings
+    from app.models import User
+    monkeypatch.setattr(settings, "discord_bot_token", "x")
+    monkeypatch.setattr(settings, "discord_channel", "1")
+    with Session(engine) as s:
+        s.add(User(username="piloto", discord_id="111"))
+        for old in s.exec(select(Schedule)).all():   # other tests' pending schedules would be posted too
+            s.delete(old)
+        s.commit()
+    posted, edited = [], []
+    reactions = {"yes": ["111", "222"], "maybe": ["222"], "no": []}   # 222 reacted twice with no earlier answer: the first by priority
+    monkeypatch.setattr(discord, "rsvp_post", lambda text: posted.append(text) or "m1")
+    monkeypatch.setattr(discord, "rsvp_read", lambda mid: reactions)
+    monkeypatch.setattr(discord, "rsvp_edit", lambda mid, text: edited.append(text))
+    _, sc = _setup(3600)
+    _tick(time.time(), monkeypatch)   # posts the announcement
+    assert len(posted) == 1
+    _tick(time.time(), monkeypatch)   # reads the reactions
+    got = {r["discord_id"]: r for r in client.get(f"/api/v1/schedules/{sc['id']}/rsvps").json()}
+    assert got["111"]["username"] == "piloto" and got["111"]["status"] == "yes"
+    assert got["222"]["username"] is None
+    assert "✅ 2" in edited[-1]
+    reactions["yes"], reactions["maybe"] = ["111"], ["222"]   # 222 moves from yes to maybe
+    _tick(time.time(), monkeypatch)
+    assert client.get("/api/v1/schedules").json()[0]["rsvp"] == {"yes": 1, "maybe": 1, "no": 0}
+    assert {r["discord_id"]: r["status"] for r in client.get(f"/api/v1/schedules/{sc['id']}/rsvps").json()}["222"] == "maybe"

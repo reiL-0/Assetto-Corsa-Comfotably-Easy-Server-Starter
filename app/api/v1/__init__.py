@@ -8,6 +8,7 @@ from app.auth import guard
 from app.auth import router as auth_router
 from app.championship import router as championship_router
 from app.content import router as content_router
+from app.discord import router as discord_router
 from app.events import router as events_router
 from app.integrity import router as integrity_router
 from app.schedule import router as schedule_router
@@ -27,6 +28,7 @@ def version() -> dict[str, str]:
 
 
 api_router.include_router(auth_router)
+api_router.include_router(discord_router)  # link/unlink the caller's own Discord account
 # Reads: any logged-in user, except servers (config carries ADMIN_PASSWORD, plus logs) -> steward.
 # Writes: admin. Steward-only moderation routes live on their own router.
 api_router.include_router(servers_router, dependencies=[Depends(guard("steward"))])

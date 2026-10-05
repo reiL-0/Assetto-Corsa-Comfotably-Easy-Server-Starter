@@ -103,6 +103,7 @@ class UserOut(BaseModel):
     id: int
     username: str
     role: Role
+    discord_id: str | None = None
 
 
 class UserIn(BaseModel):

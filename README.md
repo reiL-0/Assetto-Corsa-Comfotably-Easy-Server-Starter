@@ -378,6 +378,8 @@ UTC and decides where a day ends.
 | (content dir) | | with `ACM_ACSERVER_CMD` set, `content/` **is the acServer's own** (uploads land where the server reads them); otherwise `<data_dir>/content`. Big archives: copy to `<data_dir>/inbox/` and `POST /content/tracks/import {"file": "x.rar"}` (Cloudflare caps uploads at 100 MB). `.rar` needs `bsdtar` (`apt install libarchive-tools`). |
 | `ACM_IDLE_STOP_SECONDS` | `0`                   | stop an instance after N s with no connected cars (0 = never); restart via `POST /servers/{id}/start` |
 | `ACM_DISCORD_STATUS_WEBHOOK` | _(empty)_ | Discord webhook that gets a post when a server starts, stops (manual / idle) or crashes (`app/discord.py`, hooked into `metrics.log`) |
+| `ACM_DISCORD_BOT_TOKEN`, `ACM_DISCORD_CHANNEL` | _(empty)_ | Bot and channel id for the sign-up announcement of each scheduled event: reactions ✅ (going) ❔ (maybe) ❌ (can't) are read every tick into `rsvps`, the message shows the counts. The bot needs View Channel, Send Messages, Add Reactions, Read Message History |
+| `ACM_DISCORD_CLIENT_ID`, `ACM_DISCORD_CLIENT_SECRET`, `ACM_PUBLIC_URL` | _(empty)_ | Discord OAuth2 app for linking accounts: a logged-in user opens `<ACM_PUBLIC_URL>/api/v1/auth/discord/link`; add `<ACM_PUBLIC_URL>/api/v1/auth/discord/callback` as redirect in the Discord developer portal |
 | `ACM_DISCORD_WEBHOOK` | _(empty)_ | Discord webhook for league announcements: reminders and start/failure notices of scheduled starts (`app/schedule.py`) |
 
 ## Roadmap

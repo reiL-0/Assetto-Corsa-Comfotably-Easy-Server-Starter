@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     discord_status_webhook: str = ""
     # Discord webhook for league announcements (scheduled-start reminders). Env: ACM_DISCORD_WEBHOOK
     discord_webhook: str = ""
+    # Discord bot for the RSVP announcements (✅/❔/❌ reactions) and the account link (OAuth2 "identify"). Env: ACM_DISCORD_*
+    discord_bot_token: str = ""
+    discord_channel: str = ""  # channel id where the bot posts the RSVP announcements
+    discord_client_id: str = ""
+    discord_client_secret: str = ""
+    public_url: str = ""  # the manager's public base URL, e.g. https://acm.example.com; the OAuth redirect is <public_url>/api/v1/auth/discord/callback
 
     def acserver_dir(self) -> Path | None:
         """Directory of the acServer binary (holds `content/`, `system/`), or None when no binary is configured."""

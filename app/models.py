@@ -13,6 +13,7 @@ class User(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     steam_id: str | None = Field(default=None, unique=True, index=True)
+    discord_id: str | None = Field(default=None, unique=True, index=True)  # linked through app/discord.py (OAuth2)
     username: str
     password_hash: str | None = None
     role: str = "driver"
@@ -93,9 +94,22 @@ class Schedule(SQLModel, table=True):
     duration_min: int | None = None  # how long the event lasts; the server is stopped when it is over (None = idle stop only)
     loaded: bool = False  # the event's session is already on the server (a player woke it early, or it started)
     end_warned: bool = False  # the "ends in 5 minutes" chat message went out
+    rsvp_message: str | None = None  # id of the bot's announcement in ACM_DISCORD_CHANNEL (reactions = sign-ups)
+    rsvp_text: str = ""  # the text that message shows now; it is edited only when this changes
     state: str = "pending"  # pending | running (started, waiting for its end) | done | failed | missed
     result: str = ""  # why it failed / was missed
     created_at: datetime = Field(default_factory=_now)
+
+
+class Rsvp(SQLModel, table=True):
+    """One Discord user's answer to a schedule's announcement, read from their reactions (schedule._rsvp)."""
+
+    __tablename__ = "rsvps"
+
+    schedule_id: int = Field(primary_key=True)  # no FK: schedule.delete removes the rows itself
+    discord_id: str = Field(primary_key=True)
+    user_id: int | None = Field(default=None, foreign_key="users.id", index=True)  # the linked account, None while the Discord user has not linked one
+    status: str  # yes | maybe | no
 
 
 class Penalty(SQLModel, table=True):
