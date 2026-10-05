@@ -151,12 +151,14 @@ def standings(championship_id: int, sess: SessionDep) -> list[dict]:
             pos = entry["position"]  # after penalties; None = disqualified, scores nothing
             points = c.points_system[pos - 1] if pos and pos <= len(c.points_system) else 0
             row = totals.setdefault(
-                guid, {"driver_guid": guid, "driver_name": entry["driver_name"], "points": 0, "wins": 0, "penalty_points": 0}
+                guid, {"driver_guid": guid, "driver_name": entry["driver_name"], "points": 0, "wins": 0, "podiums": 0, "races": 0, "penalty_points": 0}
             )
             row["driver_name"] = entry["driver_name"]
             row["points"] += points - entry["points_penalty"]
             row["penalty_points"] += entry["points_penalty"]
             row["wins"] += pos == 1
+            row["podiums"] += bool(pos and pos <= 3)
+            row["races"] += 1
 
     ranked = sorted(totals.values(), key=lambda r: (-r["points"], -r["wins"]))
     for i, row in enumerate(ranked):
