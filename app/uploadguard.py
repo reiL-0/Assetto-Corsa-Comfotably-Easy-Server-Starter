@@ -56,7 +56,7 @@ def check_zip(zf: zipfile.ZipFile, *, max_files: int = MAX_FILES, max_total: int
 
 
 def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_TOTAL) -> None:
-    """The same count/size limits on what was really unpacked (the only check possible for a .rar)."""
+    """The same count/size limits on what was really unpacked (a last look after the sandboxed unpacking)."""
     n = total = 0
     for f in root.rglob("*"):
         if f.is_file():

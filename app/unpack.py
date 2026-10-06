@@ -3,10 +3,9 @@
 The manager never opens an upload itself: `run_sandboxed` starts `python -m app.unpack` as a child with
 - a systemd scope (when `ACM_LIMITS_SCOPE` is on) capping memory, CPU and task count and stopping it after `RuntimeMaxSec`, plus rlimits (CPU time, file size);
 - a wall-clock timeout in the parent, which kills the child's whole process group;
-- a real byte/file counter: the child writes member by member and stops the moment a limit is crossed, whatever the headers claimed; a `.rar` is
-  unpacked by `bsdtar` under a watchdog that kills it when the folder grows past the limits;
+- a real byte/file counter: the child writes member by member and stops the moment a limit is crossed, whatever the headers claimed;
 - a free-disk check before it starts (the scratch dir is on the data disk) and one unpacking at a time (`SLOTS`): the others queue.
-The child result is one JSON line. Only the child ever touches the untrusted bytes. Stronger isolation (container, gVisor) can wrap the same command later.
+The child result is one JSON line. Only `.zip` is accepted (decision 2026-10-06: no `.rar`, whose unpacker is an external program with a history of bugs, and no loose files). Only the child ever touches the untrusted bytes. Stronger isolation (container, gVisor) can wrap the same command later.
 """
 
 from __future__ import annotations
@@ -20,13 +19,13 @@ import stat
 import subprocess
 import sys
 import threading
-import time
 import zipfile
 from pathlib import Path
 
 from app import uploadguard
 from app.config import settings
 
+NOT_ZIP = "only .zip archives are accepted (not .rar, and no loose files): put the car or track folder inside one .zip"
 SLOTS = threading.Semaphore(1)   # ponytail: one unpacking at a time (they are rare and heavy); raise if uploads queue up
 CHUNK = 1 << 20
 MIN_FREE_MARGIN = 1.2            # free disk needed = the byte limit x this
@@ -60,47 +59,15 @@ def _extract_zip(archive: Path, dest: Path, max_total: int, max_files: int, max_
     return files, total
 
 
-def _tree_size(root: Path) -> tuple[int, int]:
-    n = total = 0
-    for dirpath, _dirs, names in os.walk(root):
-        for f in names:
-            n += 1
-            try:
-                total += os.lstat(os.path.join(dirpath, f)).st_size
-            except OSError:
-                pass
-    return n, total
-
-
-def _extract_rar(archive: Path, dest: Path, max_total: int, max_files: int) -> tuple[int, int]:
-    if not shutil.which("bsdtar"):
-        raise uploadguard.Rejected("rar needs bsdtar on this machine (apt install libarchive-tools); send a .zip instead")
-    p = subprocess.Popen(["bsdtar", "-xf", str(archive), "-C", str(dest)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    while p.poll() is None:   # watchdog: bsdtar cannot count for us
-        n, total = _tree_size(dest)
-        if n > max_files or total > max_total:
-            p.kill()
-            p.wait()
-            raise uploadguard.Rejected("the archive unpacks to more than the allowed size")
-        time.sleep(0.3)
-    if p.returncode:
-        raise uploadguard.Rejected("cannot read the rar archive")
-    return _tree_size(dest)
-
-
 def child_main(argv: list[str]) -> int:
     archive, dest = Path(argv[0]), Path(argv[1])
     max_total, max_files, max_file, cpu_s = (int(x) for x in argv[2:6])
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_s, cpu_s + 5))
     resource.setrlimit(resource.RLIMIT_FSIZE, (max_file + CHUNK, max_file + CHUNK))   # no single file past the limit, bsdtar included
     try:
-        magic = archive.open("rb").read(8)
-        if magic[:4] == b"PK\x03\x04":
-            files, total = _extract_zip(archive, dest, max_total, max_files, max_file)
-        elif magic[:6] == b"Rar!\x1a\x07":
-            files, total = _extract_rar(archive, dest, max_total, max_files)
-        else:
-            raise uploadguard.Rejected("not a zip or rar archive")
+        if archive.open("rb").read(4) != b"PK\x03\x04":
+            raise uploadguard.Rejected(NOT_ZIP)
+        files, total = _extract_zip(archive, dest, max_total, max_files, max_file)
         print(json.dumps({"ok": True, "files": files, "bytes": total}))
         return 0
     except (uploadguard.Rejected, zipfile.BadZipFile) as e:

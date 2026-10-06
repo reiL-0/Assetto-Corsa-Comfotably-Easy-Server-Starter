@@ -137,7 +137,7 @@ def test_chunked_upload_resumes_unpacks_and_reports_errors():
     api.put(f"{V}/content/uploads/{bad}", params={"offset": 0}, content=b"this is not an archive")
     api.post(f"{V}/content/uploads/{bad}/complete")
     st = _wait(bad)
-    assert st["state"] == "error" and "not a zip or rar" in st["error"]
+    assert st["state"] == "error" and "only .zip archives" in st["error"]
 
 
 def test_upload_endpoints_are_admin_only_and_validated():

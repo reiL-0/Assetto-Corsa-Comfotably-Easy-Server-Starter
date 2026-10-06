@@ -174,7 +174,7 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
 
 
 def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
-    """Unpacks a .zip or .rar (single top-level dir = the content's name) into `dest_parent`. Returns that name.
+    """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
     Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
     `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures."""
     with archive.open("rb") as fh:
@@ -184,8 +184,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         if magic[:4] == b"PK\x03\x04":
             with zipfile.ZipFile(archive) as zf:
                 uploadguard.check_zip(zf)   # cheap early refusal from the headers (names, count, sizes, ratios); the real limits are enforced while unpacking
-        elif magic[:6] != b"Rar!\x1a\x07":
-            raise HTTPException(400, "not a zip or rar archive")
+        else:
+            raise HTTPException(400, unpack.NOT_ZIP)
         try:
             unpack.run_sandboxed(archive, scratch)   # in a limited child process with a byte counter and a timeout (app/unpack.py)
         except OSError as e:
@@ -196,7 +196,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
         tops = [p for p in scratch.iterdir()]
         if len(tops) != 1 or not tops[0].is_dir():
-            raise HTTPException(400, "archive must contain exactly one top-level folder (the content's name)")
+            raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
         root = _safe(tops[0].name)
         if pack and dest_parent in (_cars_dir(), _tracks_dir()):
             uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
@@ -218,7 +218,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
 
 
 async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False) -> str:
-    """Streams an uploaded .zip/.rar to disk (tracks are hundreds of MB) and unpacks it."""
+    """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
@@ -397,7 +397,7 @@ class InboxIn(BaseModel):
 
 @router.post("/tracks/import", status_code=201)
 async def import_track(body: InboxIn) -> dict:
-    """Unpack a .zip/.rar that was copied to the server's inbox (for archives over the proxy's upload limit)."""
+    """Unpack a .zip that was copied to the server's inbox (for archives over the proxy's upload limit)."""
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
