@@ -116,11 +116,13 @@ def test_the_upload_endpoint_reports_a_stopped_unpacking_as_a_400(monkeypatch):
     assert r.status_code == 400 and "took longer" in r.text
 
 
-@pytest.mark.skipif(not shutil.which("bsdtar"), reason="needs bsdtar")
-def test_a_non_rar_with_a_rar_name_is_not_trusted(tmp_path):
-    arc = tmp_path / "x.rar"
-    arc.write_bytes(b"Rar!\x1a\x07\x00" + os.urandom(64))
-    dest = tmp_path / "o"
-    dest.mkdir()
-    with pytest.raises(uploadguard.Rejected):
-        unpack.run_sandboxed(arc, dest)
+def test_only_a_zip_with_one_folder_is_accepted_no_rar_and_no_loose_files():
+    rar = b"Rar!\x1a\x07\x00" + b"x" * 64
+    r = api.post("/api/v1/content/cars", files={"file": ("a.rar", rar, "application/octet-stream")})
+    assert r.status_code == 400 and "only .zip" in r.text
+    r = api.post("/api/v1/content/cars", files={"file": ("data.acd", b"just a loose file", "application/octet-stream")})
+    assert r.status_code == 400 and "only .zip" in r.text
+    loose = api.post("/api/v1/content/cars", files={"file": ("l.zip", _zip({"car/data.acd": b"1", "readme.txt": b"loose beside the folder"}), "application/zip")})
+    assert loose.status_code == 400 and "exactly one folder" in loose.text
+    only_files = api.post("/api/v1/content/cars", files={"file": ("f.zip", _zip({"data.acd": b"1", "ui_car.json": b"{}"}), "application/zip")})
+    assert only_files.status_code == 400 and "exactly one folder" in only_files.text

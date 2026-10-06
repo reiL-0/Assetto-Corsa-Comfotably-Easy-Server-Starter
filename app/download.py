@@ -70,7 +70,7 @@ def _get(op, url: str, limit: int | None = None):
 
 def drive_id(u: urllib.parse.SplitResult) -> str:
     if "/folders/" in u.path:
-        raise ValueError("Drive folders are not supported: share a single .zip/.rar file")
+        raise ValueError("Drive folders are not supported: share a single .zip file")
     m = re.search(r"/file/d/([\w-]+)", u.path)
     fid = m.group(1) if m else (urllib.parse.parse_qs(u.query).get("id") or [""])[0]
     if not fid:
