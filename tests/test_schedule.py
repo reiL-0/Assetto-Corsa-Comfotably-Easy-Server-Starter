@@ -251,7 +251,10 @@ def test_announcement_layout(monkeypatch):
     assert f"<t:{int(start)}:F>" in text and "<@&42>" in text and "Parrilla invertida (toda)" in text and "15 vueltas" in text
     assert f"Práctica: 15 min · <t:{int(start)}:t>" in text and f"Clasificación: 15 min · <t:{int(start) + 900}:t>" in text and f"15 vueltas · <t:{int(start) + 1800}:t>" in text
     assert "✅ 3 · ❔ 1 · ❌ 0" in text and text.endswith("Descarga: https://x.test")
-    assert out["allowed_mentions"] == {"parse": ["roles"]}
+    assert out["allowed_mentions"] == {"parse": ["roles"]} and "Clima" not in text          # no weather chosen: the line is left out
+    wx = lambda g: {"track": "spa", "cars": ["clio"], "options": {"weather": [{"graphics": x} for x in g]}}
+    assert announcement.variables("T", "S", wx(["7_heavy_clouds_type=8"]), start, {"yes": 0, "maybe": 0, "no": 0})["clima_line"] == "🌦️ Clima: Lluvia fuerte"
+    assert announcement.variables("T", "S", wx(["3_clear", "5_light_clouds", "6_mid_clouds"]), start, {"yes": 0, "maybe": 0, "no": 0})["clima"] == "Realista"
 
 
 def test_announcement_template_is_editable_and_validated():

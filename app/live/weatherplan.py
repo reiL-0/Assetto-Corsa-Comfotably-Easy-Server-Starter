@@ -120,6 +120,7 @@ class Weather:
     def __post_init__(self) -> None:
         self.mode = self.plan.get("mode", "entries")
         self.transition_s = float(self.plan.get("transition_s", 60))
+        self.visual = self.plan.get("driving") == "visual"   # rain and wet asphalt are seen, but grip stays 100 % and there is no standing water
         self.entries = [Entry.from_dict(e) for e in self.plan.get("entries", [])]
 
     def start_session(self, session: int | None) -> bool:
@@ -150,7 +151,7 @@ class Weather:
         else:
             self.wetness = max(0.0, self.wetness - self.dry_rate * dt)
             self.water = max(0.0, self.water - self.water_rate / 4 * dt)
-        return {**s, "rain": rain, "wetness": self.wetness, "water": self.water, "grip": 1.0 - self.grip_loss * self.wetness,
+        return {**s, "rain": rain, "wetness": self.wetness, "water": 0.0 if self.visual else self.water, "grip": 1.0 if self.visual else 1.0 - self.grip_loss * self.wetness,
                 "humidity": min(1.0, max(s.get("humidity") or 0.0, 0.5 + 0.4 * rain)), "pressure": s.get("pressure") or 1013.0}
 
     def _entry_state(self, t: float) -> dict:

@@ -36,7 +36,8 @@ class WeatherDirector:
         self.live_at, self.sent_key, self.sent_at = -1e9, None, -1e9
         srv = (server_cfg or {}).get("SERVER", {})
         self.mult = float(srv.get("TIME_OF_DAY_MULT", 1) or 1)
-        minutes = 780 + float(srv.get("SUN_ANGLE", 0) or 0) * 60 / 16   # the same mapping the Control AC form uses (angle 0 = 13:00)
+        sun = data.get("sun_angle")   # the plan's own sun angle (set live from Control AC) wins over the server's
+        minutes = 780 + float(srv.get("SUN_ANGLE", 0) or 0 if sun is None else sun) * 60 / 16   # the same mapping the Control AC form uses (angle 0 = 13:00)
         self.t0 = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
         self.clock0, self.last = time.monotonic(), ""
         self.task = asyncio.ensure_future(self.run())
@@ -48,8 +49,10 @@ class WeatherDirector:
         return int(self.t0.timestamp() + (time.monotonic() - self.clock0) * self.mult)
 
     async def run(self) -> None:
+        delay = min(2.0, self.period)   # first pass soon so a change made in Control AC shows at once
         while self.inst.running:
-            await asyncio.sleep(self.period)
+            await asyncio.sleep(delay)
+            delay = self.period
             client = self.inst.acsp
             if not client or not self.inst.running:
                 continue

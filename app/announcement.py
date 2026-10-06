@@ -29,6 +29,7 @@ LINE = "━━━━━━━━━━━━━━━━━━"
 
 # name -> what it holds. The blocks (horario, formato, reacciones, notas) come with their own heading and are empty when there is nothing to say.
 VARS = {
+    "clima": "Clima de la sesión («Lluvia fuerte», «Realista»…), vacío si no hay", "clima_line": "«🌦️ Clima: …», vacío si no hay",
     "title": "Título del evento", "server": "Nombre del servidor", "track": "Circuito (nombre del ui_track.json)", "cars": "Autos, separados por coma",
     "role": "Mención del rol (ACM_DISCORD_ROLE), vacío si no hay", "role_line": "«🚨 ATENCIÓN @rol 🚨», vacío si no hay rol",
     "start": "Inicio de la sesión, fecha completa (cada lector la ve en su zona)", "start_rel": "«en 2 horas»", "start_time": "Solo la hora",
@@ -38,7 +39,7 @@ VARS = {
     "requisitos": "Bloque REQUISITOS: CSP y lo que hay que instalar, con enlaces (se edita en Eventos & Calendario), vacío si no hay",
     "notas": "Bloque NOTAS (las notas y el info del calendario), vacío si no hay", "notes": "Las notas tal cual", "info": "El info del calendario tal cual",
 }
-DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n\n{horario}\n\n{formato}\n\n{requisitos}\n\n"
+DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n{clima_line}\n\n{horario}\n\n{formato}\n\n{requisitos}\n\n"
                       + LINE + "\n\n{reacciones}\n\n{notas}"}
 
 
@@ -55,6 +56,21 @@ def _track_name(track: str, config: str) -> str:
 def _car_names(session: dict) -> str:
     cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
     return ", ".join(content._read_json(content._cars_dir() / c / "ui" / "ui_car.json").get("name") or c for c in cars)
+
+
+CSP_WEATHER = {0: "Tormenta ligera", 1: "Tormenta", 2: "Tormenta fuerte", 3: "Llovizna ligera", 4: "Llovizna", 5: "Llovizna fuerte", 6: "Lluvia ligera", 7: "Lluvia",
+               8: "Lluvia fuerte", 15: "Despejado", 16: "Pocas nubes", 17: "Nubes dispersas", 18: "Nublado", 19: "Cubierto", 20: "Niebla", 21: "Neblina"}
+# the presets of Control AC / the calendar (graphics of their blocks -> name); anything else gets no name
+WEATHER_PRESETS = {("3_clear",): "Ideal", ("3_clear", "5_light_clouds", "6_mid_clouds"): "Realista", ("6_mid_clouds",): "Nublado", ("2_light_fog",): "Niebla"}
+
+
+def weather_name(session: dict) -> str:
+    """The weather of a session as a player reads it: a CSP type («Lluvia fuerte»), a preset («Realista») or "" (a hand-made one)."""
+    blocks = (session.get("options") or {}).get("weather") or []
+    graphics = tuple(b.get("graphics", "") for b in blocks)
+    if len(graphics) == 1 and (m := re.search(r"_type=(\d+)$", graphics[0])):
+        return CSP_WEATHER.get(int(m[1]), "")
+    return WEATHER_PRESETS.get(graphics, "")
 
 
 def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "") -> dict[str, str]:
@@ -74,9 +90,11 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
         fmt.append("🔄 Parrilla invertida" + (" (toda)" if rg == -1 else f" (los primeros {rg})"))
     c = " · ".join(f"{e} {counts[st]}" for e, st in RSVP.items())
     role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
+    clima = weather_name(session)
     extra = "\n".join(x for x in (notes.strip(), info.strip()) if x)
     return {
         "title": title, "server": server, "track": _track_name(session.get("track", "?"), session.get("track_config", "")), "cars": _car_names(session),
+        "clima": clima, "clima_line": f"🌦️ Clima: {clima}" if clima else "",
         "role": role, "role_line": f"🚨 ATENCIÓN {role} 🚨" if role else "",
         "start": f"<t:{int(start_at)}:F>", "start_rel": f"<t:{int(start_at)}:R>", "start_time": f"<t:{int(start_at)}:t>",
         "practice_min": str(session.get("practice_min") or 0), "qualify_min": str(session.get("qualify_min") or 0), "race": race,

@@ -525,6 +525,8 @@ class WeatherPlanIn(BaseModel):
     transition_s: float = Field(default=90, ge=20, le=900)          # each change is a smooth blend of this many seconds (long ones are gentler)
     update_s: float = Field(default=30, ge=5, le=120)               # seconds between commands to the clients
     live: LiveWeatherIn | None = None
+    driving: Literal["real", "visual"] = "real"                    # visual: the weather is only seen (grip 100 %, no water on the track); real: it changes the grip
+    sun_angle: int | None = Field(default=None, ge=-80, le=80)      # sun position sent to CSP clients (0 = 13:00, 16 degrees per hour); None = the server's SUN_ANGLE
 
     @model_validator(mode="after")
     def _complete(self) -> WeatherPlanIn:

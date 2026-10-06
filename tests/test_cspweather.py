@@ -115,3 +115,33 @@ def test_weather_plan_endpoints_validate_and_store():
     assert api.put(f"{V}/servers/{sid}/weather_plan", json=live).json()["weather_plan"]["live"]["refresh_min"] == 5
     assert api.post(f"{V}/servers/{sid}/csp_weather", json={"current": 7, "rain": 0.6}).status_code == 409   # not running: nothing to send to
     assert api.delete(f"{V}/servers/{sid}/weather_plan").status_code == 204 and api.get(f"{V}/servers/{sid}").json()["weather_plan"] is None
+
+
+def test_plan_sun_angle_overrides_the_server_one_and_is_validated():
+    class Inst:
+        running = False
+    async def clock(plan):
+        d = cspweather.WeatherDirector(Inst, plan, {"SERVER": {"SUN_ANGLE": 0}})
+        d.stop()
+        return d.t0
+    base = {"mode": "entries", "entries": [{"type": 15}]}
+    t0, t1 = asyncio.run(clock(base)), asyncio.run(clock({**base, "sun_angle": 16}))
+    assert (t1 - t0).total_seconds() == 3600                      # 16 degrees = one hour later than the server's angle 0
+    sid = api.post(f"{V}/servers", json={"name": "Wx sun"}).json()["id"]
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={**base, "sun_angle": 99}).status_code == 422
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={**base, "sun_angle": -32}).json()["weather_plan"]["sun_angle"] == -32
+
+
+def test_visual_driving_keeps_the_rain_but_not_the_grip_loss_or_the_water():
+    def run(driving):
+        w = cspweather.Weather({"mode": "entries", "driving": driving, "entries": [{"type": 8, "sessions": ["race"]}]}) if hasattr(cspweather, "Weather") else None
+        w.start_session(3)
+        for _ in range(40):
+            s = w.step(30, 0)
+        return s
+    real, vis = run("real"), run("visual")
+    assert real["grip"] < 1 and real["water"] > 0
+    assert vis["grip"] == 1.0 and vis["water"] == 0.0 and vis["rain"] > 0 and vis["wetness"] > 0     # still raining and wet to the eye
+    sid = api.post(f"{V}/servers", json={"name": "Wx visual"}).json()["id"]
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={"entries": [{"type": 7}], "driving": "visual"}).json()["weather_plan"]["driving"] == "visual"
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={"entries": [{"type": 7}], "driving": "x"}).status_code == 422
