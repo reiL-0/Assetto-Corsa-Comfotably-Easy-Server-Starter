@@ -62,3 +62,30 @@ def test_pack_upload_drops_models_and_textures_but_keeps_skin_names():
 def test_unsafe_or_bomb_archives_are_refused_with_a_sentence():
     r = client.post("/api/v1/content/cars", files={"file": ("bad.zip", _zip({"x/../../evil": b"1"}), "application/zip")})
     assert r.status_code == 400 and "unsafe" in r.text
+
+
+def _track_zip(name: str) -> bytes:
+    return _zip({f"{name}/models.ini": b"[MODEL_0]", f"{name}/data/surfaces.ini": b"[SURFACE_0]", f"{name}/{name}.kn5": b"K" * 500})
+
+
+def test_a_car_sent_as_a_track_and_a_track_sent_as_a_car_are_installed_where_they_belong():
+    car = _zip({"mix_car/data.acd": b"d", "mix_car/ui/ui_car.json": b'{"name": "mix"}', "mix_car/mix_car.kn5": b"K" * 500})
+    r = client.post("/api/v1/content/tracks", files={"file": ("c.zip", car, "application/zip")})        # a car, uploaded as a track
+    assert r.status_code == 201 and r.json()["car"] == "mix_car" and "installed as a car" in r.json()["note"], r.text
+    assert (content._cars_dir() / "mix_car" / "data.acd").is_file() and not (content._tracks_dir() / "mix_car").exists()
+    r = client.post("/api/v1/content/cars", files={"file": ("t.zip", _track_zip("mix_track"), "application/zip")})   # a track, uploaded as a car
+    assert r.status_code == 201 and r.json()["track"] == "mix_track" and "installed as a track" in r.json()["note"], r.text
+    assert (content._tracks_dir() / "mix_track" / "models.ini").is_file() and not (content._cars_dir() / "mix_track").exists()
+    ok = client.post("/api/v1/content/tracks", files={"file": ("ok.zip", _track_zip("right_track"), "application/zip")})
+    assert ok.json() == {"track": "right_track"}                                                          # correct uploads answer as before
+
+
+def test_detect_kind_says_nothing_when_it_is_not_clear(tmp_path):
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "readme.txt").write_text("?")
+    assert uploadguard.detect_kind(tmp_path / "x") is None
+    both = tmp_path / "both"
+    (both / "ui").mkdir(parents=True)
+    (both / "ui" / "ui_car.json").write_text("{}")
+    (both / "models.ini").write_text("[M]")
+    assert uploadguard.detect_kind(both) is None                                                           # car and track markers: the uploader's choice stands
