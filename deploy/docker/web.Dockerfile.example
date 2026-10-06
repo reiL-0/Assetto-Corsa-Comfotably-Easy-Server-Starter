@@ -1,0 +1,10 @@
+# BORRADOR sin construir (2026-10-06). Copiar como `Dockerfile` en la raíz del repo OPR WP (o apuntar WEB_DOCKERFILE aquí).
+FROM python:3.12-slim
+RUN useradd --system --uid 996 --create-home opr && mkdir -p /app/data && chown -R opr:opr /app
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+USER opr
+# UN solo worker: el puente en vivo, las cachés y los búferes de telemetría viven en el proceso (ver ARCHITECTURE.md §13 de la web).
+CMD ["gunicorn", "-w", "1", "--threads", "64", "-b", "127.0.0.1:5100", "wsgi:app"]

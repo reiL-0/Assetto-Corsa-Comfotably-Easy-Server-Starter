@@ -1,0 +1,55 @@
+# BORRADOR sin construir ni probar (2026-10-06): no había daemon de Docker para validarlo. Revisar con deploy/docker/README.md antes de usarlo.
+#
+# Pila para el PC de CDMX: la web, el túnel de Cloudflare y (opcional) el manager. Todo en la red del host, porque la web habla con el manager por
+# 127.0.0.1:8080 y el túnel con la web por 127.0.0.1:5100; nada publica puertos. Los puertos de juego (9600-9699) los abre el MANAGER en el host
+# y llegan por el túnel WireGuard del nodo de borde (app/edge.py), no por aquí.
+#
+#   cp .env.example .env   (rutas y secretos)   ·   docker compose up -d web cloudflared
+#   docker compose --profile manager up -d      (solo si decides correr el manager en contenedor: ver el aviso del README)
+name: opr
+
+services:
+  web:
+    build:
+      context: ${WEB_DIR:?ruta del repo OPR WP}
+      dockerfile: ${WEB_DOCKERFILE:-./Dockerfile}
+    network_mode: host
+    env_file: ${WEB_ENV_FILE:-./web.env}          # OPR_DB_URL, OPR_SECRET_KEY, OPR_ACM_URL=http://127.0.0.1:8080/api/v1, tokens… (nunca en el repo)
+    environment:
+      OPR_BIND: 127.0.0.1:5100
+    volumes:
+      - ${DATA_ROOT:-/srv/opr}/web:/app/data      # base de datos SQLite, copias y todo lo que debe sobrevivir
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5100/api/servers', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest         # fijar una versión concreta antes de producción
+    network_mode: host
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN_FILE: /run/secrets/cf_token
+    secrets: [cf_token]
+    restart: unless-stopped
+    depends_on: [web]
+
+  manager:
+    profiles: [manager]                           # AVISO: ver README (reiniciar este contenedor detiene los acServer)
+    build:
+      context: ${MANAGER_DIR:-../..}
+      dockerfile: deploy/docker/Dockerfile.manager
+    network_mode: host
+    env_file: ${MANAGER_ENV_FILE:-./manager.env}   # ACM_*: ACM_HOST=127.0.0.1, ACM_PORT=8080, ACM_ACSERVER_CMD=/opt/acserver/acServer, …
+    volumes:
+      - ${DATA_ROOT:-/srv/opr}/acm-data:/data
+      - ${ACSERVER_DIR:-/opt/acserver}:/opt/acserver   # el binario, system/ y content/ (las subidas caen aquí)
+    restart: unless-stopped
+    init: true                                     # recoge los procesos hijo (acServer) que terminan
+
+secrets:
+  cf_token:
+    file: ${CF_TOKEN_FILE:-./cloudflared.token}
