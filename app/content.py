@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import download, integrity, metrics, uploadguard
+from app import catalog, download, integrity, metrics, uploadguard
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -204,10 +204,16 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         root = _safe(tops[0].name)
         if pack and dest_parent in (_cars_dir(), _tracks_dir()):
             uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
+        cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
+        kind = "car" if dest_parent == _cars_dir() else "track"
+        if cataloged:
+            digest, size, nfiles = catalog.digest_dir(tops[0])
+            catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
         dest_parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
-        if dest_parent in (_cars_dir(), _tracks_dir()):   # not skins: the checksums cover only physics and track files
-            integrity.seal_installed("car" if dest_parent == _cars_dir() else "track", root)
+        if cataloged:
+            integrity.seal_installed(kind, root)
+            catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload")
         return root
     except uploadguard.Rejected as e:
         raise HTTPException(400, str(e)) from e
