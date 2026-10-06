@@ -173,6 +173,13 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
     )
 
 
+class Installed(str):
+    """The name of what was installed; `.kind` is where it really went («car»/«track», or "" for skins) and `.note` says so when that is not what was asked."""
+
+    kind: str = ""
+    note: str = ""
+
+
 def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
     """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
     Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
@@ -198,6 +205,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         if len(tops) != 1 or not tops[0].is_dir():
             raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
         root = _safe(tops[0].name)
+        note = ""
+        if dest_parent in (_cars_dir(), _tracks_dir()):
+            asked = "car" if dest_parent == _cars_dir() else "track"
+            found = uploadguard.detect_kind(tops[0])
+            if found and found != asked:   # a car sent as a track (or the other way round) goes where it belongs
+                dest_parent = _cars_dir() if found == "car" else _tracks_dir()
+                note = f"looked like a {found}, not a {asked}: installed as a {found}"
         if pack and dest_parent in (_cars_dir(), _tracks_dir()):
             uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
@@ -207,10 +221,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
             catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
         dest_parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+        res = Installed(root)
+        res.note = note
         if cataloged:
+            res.kind = kind
             integrity.seal_installed(kind, root)
             catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload")
-        return root
+        return res
     except uploadguard.Rejected as e:
         raise HTTPException(400, str(e)) from e
     finally:
@@ -245,9 +262,15 @@ def download_car(car: str) -> FileResponse:
     return _zip_response(_cars_dir() / _safe(car), f"{car}.zip")
 
 
+def _installed(name: str, asked: str) -> dict:
+    """The upload answer: {asked: name}, or {actual kind: name, "note": ...} when the content was installed as the other kind."""
+    kind = getattr(name, "kind", "") or asked
+    return {kind: str(name)} | ({"note": name.note} if getattr(name, "note", "") else {})
+
+
 @router.post("/cars", status_code=201)
 async def upload_car(file: UploadFile, pack: bool = False) -> dict:
-    return {"car": await _unzip_upload(file, _cars_dir(), pack)}
+    return _installed(await _unzip_upload(file, _cars_dir(), pack), "car")
 
 
 @router.post("/cars/{car}/skins", status_code=201)
@@ -324,7 +347,8 @@ def _finish(uid: str) -> None:
     u = _uploads[uid]
     dest = _tracks_dir() if u["kind"] == "track" else _cars_dir()
     try:
-        u["result"] = _extract(u["path"], dest, u.get("pack", False))
+        res = _extract(u["path"], dest, u.get("pack", False))
+        u["result"], u["note"] = str(res), getattr(res, "note", "")
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -387,7 +411,7 @@ def upload_from_link(body: LinkIn) -> dict:
 @router.get("/uploads/{uid}")
 def upload_status(uid: str) -> dict:
     u = _upload(uid)
-    return {k: u.get(k) for k in ("kind", "size", "total", "state", "result", "error")}
+    return {k: u.get(k) for k in ("kind", "size", "total", "state", "result", "note", "error")}
 
 
 class InboxIn(BaseModel):
@@ -401,12 +425,12 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
-    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack)}
+    return _installed(await run_in_threadpool(_extract, src, _tracks_dir(), body.pack), "track")
 
 
 @router.post("/tracks", status_code=201)
 async def upload_track(file: UploadFile, pack: bool = False) -> dict:
-    return {"track": await _unzip_upload(file, _tracks_dir(), pack)}
+    return _installed(await _unzip_upload(file, _tracks_dir(), pack), "track")
 
 
 @router.post("/entry_list")
