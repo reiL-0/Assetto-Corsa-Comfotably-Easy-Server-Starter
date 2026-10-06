@@ -70,6 +70,7 @@ def add_from_zip(archive: Path, kind: str, tenant_id: int, actor: str) -> dict:
     try:
         top = content.unpack_top(archive, scratch)
         name = content._safe(top.name)
+        kind = uploadguard.detect_kind(top) or kind   # a car sent as a track (or the other way round) is kept as what it is
         uploadguard.prune(top, kind)
         digest, size, nfiles = catalog.digest_dir(top)
         catalog.check_not_blocked(digest)

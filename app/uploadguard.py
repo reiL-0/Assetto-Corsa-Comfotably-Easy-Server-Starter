@@ -66,6 +66,15 @@ def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_T
                 raise Rejected("the archive unpacks to more files or bytes than allowed")
 
 
+def detect_kind(top: Path) -> str | None:
+    """«car» or «track» from what the unpacked folder holds, or None when it is not clear (then the kind the uploader chose stands).
+    A car has `ui/ui_car.json` or `data.acd` (or an unpacked `data/` with `car.ini`); a track has `models*.ini` or a `data/surfaces.ini` (also inside a layout folder)."""
+    names = {p.name.lower() for p in top.iterdir()}
+    car = (top / "ui" / "ui_car.json").is_file() or "data.acd" in names or (top / "data" / "car.ini").is_file()
+    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or any(top.glob("**/data/surfaces.ini")) or any(top.glob("ui/**/ui_track.json"))
+    return "car" if car and not track else "track" if track and not car else None
+
+
 def keep_in_pack(kind: str, rel: str) -> bool:
     """Is this file (path inside the car/track folder, `/`-separated) part of the server pack?"""
     p = PurePosixPath(rel)

@@ -124,3 +124,10 @@ def test_chunked_upload_and_nobody_elses_upload_id():
             break
         time.sleep(0.1)
     assert st["state"] == "done" and st["result"]["name"] == "tc_chunked", st
+
+
+def test_a_car_uploaded_as_a_track_is_kept_as_a_car_for_the_customer():
+    a = _tenant("tc-kind")
+    r = _up(a, "tc_really_a_car", kind="track")
+    assert r.status_code == 201 and r.json()["kind"] == "car"
+    assert [(i["kind"], i["name"]) for i in a.get(f"{V}/tenant/content").json()["items"]] == [("car", "tc_really_a_car")]
