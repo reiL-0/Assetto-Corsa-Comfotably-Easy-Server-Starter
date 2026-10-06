@@ -18,6 +18,15 @@ los pilotos y un acServer sin modificar, y añade esos mensajes. Es un experimen
 - **No lo usa nadie más** todavía: ni el manager ni el supervisor. Si la prueba sale bien, se integra como un servicio opcional por servidor (el `Waker` y `wake.py` ya hacen de intermediario del HTTP).
 - **Pruebas:** `tests/test_relay.py` (paquetes, plan, relé UDP con un acServer simulado, relé TCP).
 
+## Captura de un AssettoServer real (2026-10-06, hecha por la sesión de Claude del PC con el juego; informe en `OPR WP/todo/` / `HANDOFF.md`)
+Referencia: AssettoServer 0.0.54 con RainFX. Lo que **desmiente** mis suposiciones y lo que se confirmó:
+- **No existe** el mensaje TCP de apretón de manos de CSP (`AB 03 FF …`) ni un `0x78` en el join: esa parte la deduje mal. Los `AB 03` que sí hay son eventos online de Lua.
+- WeatherFX se anuncia por **HTTP `/api/details`**: `features: ["WEATHERFX_V1","SPECTATING_AWARE","LOWER_CLIENTS_SENDING_RATE","EMOJI","CLIENT_MESSAGES","CLIENT_UDP_MESSAGES"]`, `track` y `trackBase` con el prefijo `csp/<build>/../` (2744 en ese servidor), `poweredBy`, `currentWeatherId`, `ambientTemperature`, `roadTemperature`, `grip` (%), `windSpeed`, `windDirection`, `until`, `wrappedPort`, `tport`. El mismo prefijo viaja en la trama TCP `3E` (respuesta del apretón de manos), en el nombre de la pista.
+- El cliente anuncia en su `3D` las funciones de CSP (`WEATHERFX_V1/V2/V3`, `CLIENT_MESSAGES`, `CUSTOM_UPDATE`, …, y su build).
+- El paquete UDP `AB 01` (34 B, cada segundo) coincide en estructura; verificados ambiente, asfalto y agarre; **sin verificar** viento, humedad, presión, lluvia, mojado, charcos (en la captura no llovía). La hora sube +10 por segundo con multiplicador x10.
+- El log de CSP dice «Weather FX: operate in fallback mode» **también en el servidor real**: no distingue éxito de fallo.
+- Consecuencia: el relé ahora (1) escribe `csp/<build>/../` delante de la pista en la `3E` (acServer sigue cargando la pista sin prefijo: en Linux la ruta con prefijo no se resuelve, pero aquí solo se edita lo que ve el cliente) y en `/INFO`, (2) contesta `/api/details` con `features` y el clima actual, (3) **ya no inyecta** el apretón de manos (opción `--inject-after` sigue disponible), (4) la hora del paquete avanza con `--time-mult` (10 por defecto). Si CSP aplica el clima con esto es lo que falta por probar.
+
 ## Lo aprendido en las pruebas (2026-10-06)
 - Entrar por el relé funciona (TCP, UDP y lobby); un ping del lobby contestado por acServer destapaba su puerto interno (ahora lo contesta el relé).
 - El log de CSP del cliente (`custom_shaders_patch.log`) dice **«Weather FX: operate in fallback mode»** y, con el apretón de manos de CSP inyectado justo tras la respuesta del servidor, **«Requesting car list :: unexpected packet received»**: llegaba antes de tiempo y se ignoraba. AssettoServer lo manda dentro de su «primera actualización» (junto al clima vainilla): por eso `inject_after` es ahora `weather` (tras el primer `WeatherUpdate` del servidor).

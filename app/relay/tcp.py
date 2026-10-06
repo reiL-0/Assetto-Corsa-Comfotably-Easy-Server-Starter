@@ -2,7 +2,8 @@
 
 Client -> server bytes are copied untouched. Server -> client bytes are cut into frames (`protocol.split_frames`) so the relay can:
 - rewrite the UDP port in the handshake answer (acServer announces its internal one; the client must send UDP to the relay's public port);
-- add a CSP handshake frame (minimum CSP build + «server-driven WeatherFX») at the point the client expects it: AssettoServer sends it inside its
+- put the CSP minimum build in front of the track name (`csp/<build>/../<track>`, as a real AssettoServer does: captured);
+- (optional, off by default: a real AssettoServer does NOT send it at join, captured) add a CSP handshake frame (minimum CSP build + «server-driven WeatherFX») at the point the client expects it: AssettoServer sends it inside its
   «first update» burst, i.e. right after the vanilla weather frame (`inject_after="weather"`). Sent earlier (after the handshake answer) the client logs
   «Requesting car list :: unexpected packet received» and ignores it (first spike); WeatherFX then stays in «fallback mode».
 """
@@ -25,8 +26,21 @@ def rewrite_udp_port(payload: bytes, port: int) -> bytes:
     return payload[:pos] + struct.pack("<H", port) + payload[pos + 2:]
 
 
+def rewrite_track(payload: bytes, min_csp: int) -> bytes:
+    """HandshakeResponse: after the UDP port (u16) and the refresh rate (u8) comes the track name (UTF-8, length byte). With a minimum CSP build the
+    real AssettoServer sends `csp/<build>/../<track>` there (captured from a real join); Content Manager and CSP read it, acServer itself keeps
+    its plain track because the relay edits only what the client is told."""
+    pos = 1 + 1 + payload[1] * 4 + 2 + 1
+    n = payload[pos]
+    track = payload[pos + 1:pos + 1 + n]
+    if not min_csp or track.startswith(b"csp/"):
+        return payload
+    new = b"csp/%d/../" % min_csp + track
+    return payload[:pos] + bytes([len(new)]) + new + payload[pos + 1 + n:]
+
+
 class TcpRelay:
-    def __init__(self, upstream_port: int, public_udp_port: int, *, inject_after: str | None = "weather", min_csp: int = 0,
+    def __init__(self, upstream_port: int, public_udp_port: int, *, inject_after: str | None = None, min_csp: int = 0,
                  weather_fx: bool = True, on_connect: Callable[[], None] | None = None) -> None:
         self.upstream_port, self.public_udp_port = upstream_port, public_udp_port
         self.inject_after, self.min_csp, self.weather_fx = inject_after, min_csp, weather_fx
@@ -65,7 +79,7 @@ class TcpRelay:
             for payload in p.split_frames(buf):
                 pid = payload[0] if payload else -1
                 if pid == p.NEW_CAR_CONNECTION:
-                    payload = rewrite_udp_port(payload, self.public_udp_port)
+                    payload = rewrite_track(rewrite_udp_port(payload, self.public_udp_port), self.min_csp)
                 dst.write(p.frame(payload))
                 if trigger is not None and pid == trigger and not done:   # once per connection
                     done = True

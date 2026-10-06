@@ -2,7 +2,8 @@ import asyncio
 import struct
 
 from app.relay import protocol as p
-from app.relay.tcp import TcpRelay, rewrite_udp_port
+from app.relay import http as relay_http
+from app.relay.tcp import TcpRelay, rewrite_track, rewrite_udp_port
 from app.relay.udp import UdpRelay
 from app.relay.weather import Conditions, Plan
 
@@ -83,7 +84,7 @@ def test_tcp_relay_rewrites_the_udp_port_and_adds_the_csp_handshake():
             await asyncio.sleep(0.2)
             w.close()
         srv = await asyncio.start_server(server, "127.0.0.1", 0)
-        relay = TcpRelay(srv.sockets[0].getsockname()[1], 9680, inject_after="weather", min_csp=3898)
+        relay = TcpRelay(srv.sockets[0].getsockname()[1], 9680, inject_after="weather", min_csp=3898)   # (the optional handshake injection is still supported)
         front = await asyncio.start_server(relay.handle, "127.0.0.1", 0)
         r, w = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
         w.write(b"x")
@@ -96,3 +97,15 @@ def test_tcp_relay_rewrites_the_udp_port_and_adds_the_csp_handshake():
         srv.close()
         front.close()
     asyncio.run(scenario())
+
+
+def test_track_gets_the_csp_build_in_front_and_details_announce_weatherfx():
+    name = "Srv"
+    hs = bytes([p.NEW_CAR_CONNECTION, len(name)]) + b"".join(c.encode("utf-32-le") for c in name) + struct.pack("<H", 9751) + bytes([18]) + bytes([5]) + b"imola" + b"rest"
+    out = rewrite_track(hs, 2744)
+    pos = 1 + 1 + 4 * 3 + 2 + 1
+    assert out[pos] == len(b"csp/2744/../imola") and out[pos + 1:pos + 1 + out[pos]] == b"csp/2744/../imola" and out.endswith(b"rest")
+    assert rewrite_track(out, 2744) == out and rewrite_track(hs, 0) == hs                          # not twice, not without a build
+    d = relay_http.build_details({"track": "imola-gp", "cport": 9681, "name": "x"}, 2744, {"current": 7, "ambient": 14, "road": 12, "grip": 0.9})
+    assert "WEATHERFX_V1" in d["features"] and d["track"] == "csp/2744/../imola-gp" and d["trackBase"] == "csp/2744/../imola"
+    assert (d["ambientTemperature"], d["grip"], d["wrappedPort"]) == (14, 90, 9681)
