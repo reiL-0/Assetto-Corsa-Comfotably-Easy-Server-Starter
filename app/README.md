@@ -2,7 +2,7 @@
 
 **Purpose:** API HTTP (FastAPI + SQLModel/SQLite) que crea, configura, arranca y vigila servidores de Assetto Corsa (`acServer` nativo
 de Kunos), con control en vivo por el protocolo UDP ACSP. Cada módulo es un router `/api/v1/...` (se agrupan en `api/v1/__init__.py`);
-no hay endpoints «solo para la UI». Subcarpetas: `live/` (ACSP, tiempos en vivo — su README), `api/` (router versionado), `admin/` (página HTML).
+no hay endpoints «solo para la UI». Subcarpetas: `live/` (ACSP, tiempos en vivo — su README), `relay/` (relé delante de acServer: prueba de viabilidad del clima de CSP dirigido por el servidor — su README), `api/` (router versionado), `admin/` (página HTML).
 
 ## Files
 
