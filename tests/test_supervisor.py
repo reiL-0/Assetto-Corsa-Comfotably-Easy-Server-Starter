@@ -19,7 +19,10 @@ def test_start_capture_stop(tmp_path, monkeypatch):
     async def scenario():
         inst = await supervisor.start(99, tmp_path)
         try:
-            await asyncio.sleep(0.4)
+            for _ in range(60):   # the log is followed every WATCH_EVERY: wait for it instead of guessing how long a loaded machine takes
+                if any("tick" in line for line in inst.log):
+                    break
+                await asyncio.sleep(0.1)
             assert inst.running
             assert any("tick" in line for line in inst.log)
         finally:
