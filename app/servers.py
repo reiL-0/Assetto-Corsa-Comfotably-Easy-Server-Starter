@@ -247,9 +247,10 @@ DEFAULT_WEATHER = {"GRAPHICS": "3_clear", "BASE_TEMPERATURE_AMBIENT": 18, "BASE_
 
 
 class WeatherIn(BaseModel):
-    """One [WEATHER_n] block. acServer cycles through them; the name is only sent to the clients (they need it installed)."""
+    """One [WEATHER_n] block. acServer cycles through them; the name is only sent to the clients (they need it installed). With CSP the name
+    ends in `_type=<WeatherFX id>` (3_clear_type=15, 7_heavy_clouds_type=7 for rain): CSP clients show that weather, others the stock folder."""
 
-    graphics: str = Field(default="3_clear", pattern=r"^[\w.\-]{1,60}$")
+    graphics: str = Field(default="3_clear", pattern=r"^[\w.\-=]{1,80}$")   # CSP weather names carry _type=<id> (WeatherFX type)
     ambient: int = Field(default=18, ge=-10, le=50)  # °C
     road: int = Field(default=6, ge=-20, le=50)  # °C ABOVE the ambient (acServer's BASE_TEMPERATURE_ROAD is relative)
     ambient_var: int = Field(default=1, ge=0, le=20)

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from app import schedule, supervisor, timeline
+from app import requirements, schedule, supervisor, timeline
 from app.config import settings
 from app.db import engine
 from app.models import Server
@@ -129,7 +129,8 @@ def details(s: Server, live: bytes | None) -> dict:
     except ValueError:
         info = facade_info(s)
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
-    info["description"] = s.welcome
+    req = requirements.lines()   # what the player must install, under the welcome text
+    info["description"] = s.welcome + ("\n\nRequisitos:\n" + "\n".join(req) if req else "")
     return info
 
 

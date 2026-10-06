@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app import content
+from app import content, requirements
 from app.config import settings
 from app.db import SessionDep
 from app.models import Setting
@@ -35,9 +35,10 @@ VARS = {
     "practice_min": "Minutos de práctica", "qualify_min": "Minutos de clasificación", "race": "«15 vueltas» o «60 min»",
     "horario": "Bloque HORARIO", "formato": "Bloque FORMATO: cada sesión con su hora", "reacciones": "Invitación a reaccionar y los contadores",
     "counts": "Solo los contadores «✅ 3 · ❔ 1 · ❌ 0»", "yes": "Cuántos van", "maybe": "Cuántos indecisos", "no": "Cuántos no pueden",
+    "requisitos": "Bloque REQUISITOS: CSP y lo que hay que instalar, con enlaces (se edita en Eventos & Calendario), vacío si no hay",
     "notas": "Bloque NOTAS (las notas y el info del calendario), vacío si no hay", "notes": "Las notas tal cual", "info": "El info del calendario tal cual",
 }
-DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n\n{horario}\n\n{formato}\n\n"
+DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n\n{horario}\n\n{formato}\n\n{requisitos}\n\n"
                       + LINE + "\n\n{reacciones}\n\n{notas}"}
 
 
@@ -82,6 +83,7 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
         "horario": f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)", "formato": ("🏁 **FORMATO**\n" + "\n".join(fmt)) if fmt else "",
         "reacciones": f"Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n{c}", "counts": c,
         "yes": str(counts["yes"]), "maybe": str(counts["maybe"]), "no": str(counts["no"]),
+        "requisitos": ("📦 **REQUISITOS**\n" + "\n".join(requirements.lines())) if requirements.lines() else "",
         "notas": f"📋 **NOTAS**\n{extra}" if extra else "", "notes": notes.strip(), "info": info.strip(),
     }
 

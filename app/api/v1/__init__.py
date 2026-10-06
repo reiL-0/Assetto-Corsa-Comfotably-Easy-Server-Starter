@@ -18,6 +18,7 @@ from app.league import router as league_router
 from app.league import susp_router
 from app.live.acsm import router as acsm_router
 from app.metrics import router as metrics_router
+from app.requirements import router as requirements_router
 from app.penalties import router as penalties_router
 from app.servers import router as servers_router
 from app.servers import steward as steward_router
@@ -43,6 +44,7 @@ api_router.include_router(penalties_router)  # stewards write penalties (its own
 api_router.include_router(events_router, dependencies=[Depends(guard("steward"))])  # carries passwords: steward reads, admin writes
 api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin writes
 api_router.include_router(announcement_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits the message
+api_router.include_router(requirements_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits
 api_router.include_router(integrity_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin seals
 api_router.include_router(telemetry_router)  # public: the in-game app has no login, it sends its SteamID64
 api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only
