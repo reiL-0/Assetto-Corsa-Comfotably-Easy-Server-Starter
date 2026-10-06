@@ -42,8 +42,8 @@ def test_director_plays_the_entries_of_the_running_session_and_greets_late_cars(
         running = True
         server_id = 1
         acsp = type("C", (), {"send": staticmethod(sent.append), "on_client_loaded": None, "board": _board(3, 0)})()
-    monkeypatch.setattr(cspweather, "PERIOD", 0.01)
-    plan = {"mode": "entries", "transition_s": 1, "entries": [
+    monkeypatch.setattr(cspweather, "KEEPALIVE", 0.0)   # (the keepalive would otherwise hide that a plan with nothing new is not repeated: see below)
+    plan = {"mode": "entries", "transition_s": 1, "update_s": 0.01, "entries": [
         {"type": 15, "duration_min": 0.05, "sessions": ["race"], "ambient": 24}, {"type": 7, "sessions": ["race"], "ambient": 16, "wind_max": 10},
         {"type": 8, "sessions": ["qualify"]}]}
 
@@ -62,6 +62,25 @@ def test_director_plays_the_entries_of_the_running_session_and_greets_late_cars(
     chats = [m for m in sent if m[0] == acsp.BROADCAST_CHAT]
     greets = [m for m in sent if m[0] == acsp.SEND_CHAT]
     assert len(chats) >= 3 and len(greets) == 1 and greets[0][1] == 3 and greets[0][2:] in [m[1:] for m in chats]
+
+
+def test_director_does_not_repeat_an_unchanged_weather(monkeypatch):
+    sent = []
+
+    class Inst:
+        running = True
+        server_id = 1
+        acsp = type("C", (), {"send": staticmethod(sent.append), "on_client_loaded": None, "board": _board(3, 0)})()
+    monkeypatch.setattr(cspweather, "KEEPALIVE", 3600.0)
+
+    async def scenario():
+        d = cspweather.WeatherDirector(Inst, {"mode": "entries", "update_s": 0.01, "entries": [{"type": 15, "sessions": ["race"]}]}, {})
+        await asyncio.sleep(0.3)
+        Inst.running = False
+        await asyncio.sleep(0.05)
+        d.stop()
+    asyncio.run(scenario())
+    assert len([m for m in sent if m[0] == acsp.BROADCAST_CHAT]) == 1       # many ticks, one broadcast: nothing changed
 
 
 def test_timeline_blends_entries_and_live_types_map_from_wmo_codes():
@@ -86,6 +105,8 @@ def test_weather_plan_endpoints_validate_and_store():
     sid = api.post(f"{V}/servers", json={"name": "Wx plan"}).json()["id"]
     bad = [{"mode": "entries"}, {"mode": "live"}, {"entries": [{"type": 99}]}, {"entries": [{"sessions": ["warmup"]}]}, {"mode": "live", "live": {"lat": 99, "lon": 0}}]
     assert all(api.put(f"{V}/servers/{sid}/weather_plan", json=b).status_code == 422 for b in bad)
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={"entries": [{"type": 15}] * 9}).status_code == 422          # few changes
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json={"entries": [{"type": 15}], "transition_s": 5}).status_code == 422
     plan = {"mode": "entries", "transition_s": 40, "entries": [{"type": 15, "duration_min": 5, "sessions": ["race"], "ambient": 26, "road": 11},
                                                                {"type": 7, "sessions": ["race"], "wind_max": 12}]}
     stored = api.put(f"{V}/servers/{sid}/weather_plan", json=plan).json()["weather_plan"]

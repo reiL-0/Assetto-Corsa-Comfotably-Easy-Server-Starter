@@ -521,8 +521,9 @@ class LiveWeatherIn(BaseModel):
 
 class WeatherPlanIn(BaseModel):
     mode: Literal["entries", "live"] = "entries"        # entries: the list below per session; live: the real weather of `live` (lat, lon)
-    entries: list[WeatherEntryIn] = Field(default=[], max_length=20)
-    transition_s: float = Field(default=60, ge=1, le=900)   # each change is a smooth blend of this many seconds
+    entries: list[WeatherEntryIn] = Field(default=[], max_length=8)   # few changes: each one makes every client recompute clouds and rain (frame drops on weaker PCs)
+    transition_s: float = Field(default=90, ge=20, le=900)          # each change is a smooth blend of this many seconds (long ones are gentler)
+    update_s: float = Field(default=30, ge=5, le=120)               # seconds between commands to the clients
     live: LiveWeatherIn | None = None
 
     @model_validator(mode="after")

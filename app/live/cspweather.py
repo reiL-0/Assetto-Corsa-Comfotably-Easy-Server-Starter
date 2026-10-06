@@ -1,6 +1,6 @@
 """A server's weather plan, played to CSP clients as `cspcmd.weather_set_v2` chat commands (the way CM's dynamic-conditions plugin does).
 
-`WeatherDirector` is owned by a `supervisor.Instance`. Every `PERIOD` seconds it asks `weatherplan.Weather` for the conditions of the session that is
+`WeatherDirector` is owned by a `supervisor.Instance`. Every `update_s` seconds (30 by default) it asks `weatherplan.Weather` for the conditions of the session that is
 running (the session clock of the ACSP board says which session and how far in; in live mode the weather of the chosen place, refreshed every few minutes)
 and broadcasts them; a car that finishes loading gets the latest one at once. The simulated date follows the server's time-of-day settings
 (SUN_ANGLE, TIME_OF_DAY_MULT).
@@ -17,11 +17,13 @@ from app.live import acsp, cspcmd
 from app.live.weatherplan import Weather, fetch_live
 
 log = logging.getLogger("acmanager.cspweather")
-PERIOD = 5.0   # seconds between broadcasts (and the time CSP is told to take to reach each one)
+PERIOD = 30.0   # default seconds between broadcasts (plan["update_s"]); also the time CSP is told to take to reach each one. The official plugin used a minute:
+                # every command makes each client recompute clouds and rain, and transitions are where players with weaker PCs lose frames
+KEEPALIVE = 60.0   # an unchanged weather is still repeated this often (a late joiner is greeted separately)
 
 
-def command(state: dict, unix: int) -> str:
-    return cspcmd.weather_set_v2(timestamp=unix, current=state["current"], upcoming=state["upcoming"], transition=state["transition"], time_to_apply=PERIOD,
+def command(state: dict, unix: int, period: float = PERIOD) -> str:
+    return cspcmd.weather_set_v2(timestamp=unix, current=state["current"], upcoming=state["upcoming"], transition=state["transition"], time_to_apply=period,
                                  ambient=state["ambient"], road=state["road"], grip=state["grip"], humidity=state.get("humidity", 0.5),
                                  wind_deg=state.get("wind_deg", 0.0), wind_kmh=state.get("wind_kmh", 0.0), pressure=state.get("pressure", 1013.0),
                                  rain=state["rain"], wetness=state["wetness"], water=state["water"])
@@ -30,7 +32,8 @@ def command(state: dict, unix: int) -> str:
 class WeatherDirector:
     def __init__(self, inst, data: dict, server_cfg: dict | None = None) -> None:
         self.inst, self.weather = inst, Weather(data)
-        self.live_at = -1e9
+        self.period = float(data.get("update_s") or PERIOD)
+        self.live_at, self.sent_key, self.sent_at = -1e9, None, -1e9
         srv = (server_cfg or {}).get("SERVER", {})
         self.mult = float(srv.get("TIME_OF_DAY_MULT", 1) or 1)
         minutes = 780 + float(srv.get("SUN_ANGLE", 0) or 0) * 60 / 16   # the same mapping the Control AC form uses (angle 0 = 13:00)
@@ -46,7 +49,7 @@ class WeatherDirector:
 
     async def run(self) -> None:
         while self.inst.running:
-            await asyncio.sleep(PERIOD)
+            await asyncio.sleep(self.period)
             client = self.inst.acsp
             if not client or not self.inst.running:
                 continue
@@ -62,10 +65,13 @@ class WeatherDirector:
                     log.warning("live weather of server %s: no answer", self.inst.server_id)
             if not w.start_session(board.session.get("session_type")):
                 continue   # this session has no entry: the server's own weather applies
-            state = w.step(PERIOD, board.elapsed_ms() / 1000)
+            state = w.step(self.period, board.elapsed_ms() / 1000)
             if state:
-                self.last = command(state, self._unix())
-                client.send(acsp.encode_broadcast_chat(self.last))
+                self.last = command(state, self._unix(), self.period)
+                key = (state["current"], state["upcoming"], round(state["transition"], 2), round(state["ambient"]), round(state["wind_kmh"]), round(state["rain"], 2))
+                if key != self.sent_key or time.monotonic() - self.sent_at >= KEEPALIVE:   # nothing new: do not make every client recompute
+                    self.sent_key, self.sent_at = key, time.monotonic()
+                    client.send(acsp.encode_broadcast_chat(self.last))
 
     def greet(self, car_id: int) -> None:
         if self.last and self.inst.acsp:
