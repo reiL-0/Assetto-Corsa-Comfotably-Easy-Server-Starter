@@ -33,7 +33,7 @@ async def main() -> None:
     a.add_argument("--ambient", type=float, default=20)
     a.add_argument("--loop", type=float, default=0, help="repeat the plan every this many seconds (0 = once)")
     a.add_argument("--min-csp", type=int, default=0)
-    a.add_argument("--inject-after", choices=["handshake", "car_list", "none"], default="handshake")
+    a.add_argument("--inject-after", choices=["handshake", "car_list", "weather", "none"], default="weather")
     a.add_argument("--no-weather-fx-flag", action="store_true", help="send the CSP handshake without the «requires WeatherFX» flag")
     args = a.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")

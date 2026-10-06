@@ -78,20 +78,20 @@ def test_tcp_relay_rewrites_the_udp_port_and_adds_the_csp_handshake():
     async def scenario():
         async def server(r, w):   # acServer stand-in: answers a request with the handshake, then the car list
             await r.read(1)
-            w.write(p.frame(hs) + p.frame(bytes([p.CAR_LIST, 1])))
+            w.write(p.frame(hs) + p.frame(bytes([p.CAR_LIST, 1])) + p.frame(bytes([p.WEATHER_UPDATE, 9])) + p.frame(bytes([p.WEATHER_UPDATE, 8])))
             await w.drain()
             await asyncio.sleep(0.2)
             w.close()
         srv = await asyncio.start_server(server, "127.0.0.1", 0)
-        relay = TcpRelay(srv.sockets[0].getsockname()[1], 9680, inject_after="handshake", min_csp=3898)
+        relay = TcpRelay(srv.sockets[0].getsockname()[1], 9680, inject_after="weather", min_csp=3898)
         front = await asyncio.start_server(relay.handle, "127.0.0.1", 0)
         r, w = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
         w.write(b"x")
         await asyncio.sleep(0.4)
         buf = bytearray(await r.read(4096))
         frames = p.split_frames(buf)
-        assert [f[0] for f in frames] == [p.NEW_CAR_CONNECTION, p.EXTENDED, p.CAR_LIST]           # the CSP handshake sits right after the handshake answer
-        assert struct.unpack_from("<H", frames[0], 2 + 4 * 3)[0] == 9680 and frames[1] == p.csp_handshake_in(3898, True)
+        assert [f[0] for f in frames] == [p.NEW_CAR_CONNECTION, p.CAR_LIST, p.WEATHER_UPDATE, p.EXTENDED, p.WEATHER_UPDATE]   # once, right after the first vanilla weather frame
+        assert struct.unpack_from("<H", frames[0], 2 + 4 * 3)[0] == 9680 and frames[3] == p.csp_handshake_in(3898, True)
         w.close()
         srv.close()
         front.close()

@@ -18,6 +18,11 @@ los pilotos y un acServer sin modificar, y añade esos mensajes. Es un experimen
 - **No lo usa nadie más** todavía: ni el manager ni el supervisor. Si la prueba sale bien, se integra como un servicio opcional por servidor (el `Waker` y `wake.py` ya hacen de intermediario del HTTP).
 - **Pruebas:** `tests/test_relay.py` (paquetes, plan, relé UDP con un acServer simulado, relé TCP).
 
+## Lo aprendido en las pruebas (2026-10-06)
+- Entrar por el relé funciona (TCP, UDP y lobby); un ping del lobby contestado por acServer destapaba su puerto interno (ahora lo contesta el relé).
+- El log de CSP del cliente (`custom_shaders_patch.log`) dice **«Weather FX: operate in fallback mode»** y, con el apretón de manos de CSP inyectado justo tras la respuesta del servidor, **«Requesting car list :: unexpected packet received»**: llegaba antes de tiempo y se ignoraba. AssettoServer lo manda dentro de su «primera actualización» (junto al clima vainilla): por eso `inject_after` es ahora `weather` (tras el primer `WeatherUpdate` del servidor).
+- Los paquetes UDP de clima se envían cada segundo pero el cliente no los aplicaba: con el apretón mal colocado el cliente no estaba en modo servidor.
+
 ## Lo que la prueba debe responder
 1. ¿El cliente acepta el apretón de manos CSP inyectado (cuándo: tras el apretón o tras la lista de autos) y el valor `HANDSHAKE_IN = 0` es el correcto?
 2. ¿Acepta paquetes UDP de clima que salen del puerto público del relé?

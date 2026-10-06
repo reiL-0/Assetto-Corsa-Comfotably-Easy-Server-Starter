@@ -2,7 +2,9 @@
 
 Client -> server bytes are copied untouched. Server -> client bytes are cut into frames (`protocol.split_frames`) so the relay can:
 - rewrite the UDP port in the handshake answer (acServer announces its internal one; the client must send UDP to the relay's public port);
-- add a CSP handshake frame (minimum CSP build + «server-driven WeatherFX») right after the handshake answer or the car list.
+- add a CSP handshake frame (minimum CSP build + «server-driven WeatherFX») at the point the client expects it: AssettoServer sends it inside its
+  «first update» burst, i.e. right after the vanilla weather frame (`inject_after="weather"`). Sent earlier (after the handshake answer) the client logs
+  «Requesting car list :: unexpected packet received» and ignores it (first spike); WeatherFX then stays in «fallback mode».
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ def rewrite_udp_port(payload: bytes, port: int) -> bytes:
 
 
 class TcpRelay:
-    def __init__(self, upstream_port: int, public_udp_port: int, *, inject_after: str | None = "handshake", min_csp: int = 0,
+    def __init__(self, upstream_port: int, public_udp_port: int, *, inject_after: str | None = "weather", min_csp: int = 0,
                  weather_fx: bool = True, on_connect: Callable[[], None] | None = None) -> None:
         self.upstream_port, self.public_udp_port = upstream_port, public_udp_port
         self.inject_after, self.min_csp, self.weather_fx = inject_after, min_csp, weather_fx
@@ -56,7 +58,8 @@ class TcpRelay:
             await dst.drain()
 
     async def _edit(self, src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
-        buf = bytearray()
+        buf, done = bytearray(), False
+        trigger = {"handshake": p.NEW_CAR_CONNECTION, "car_list": p.CAR_LIST, "weather": p.WEATHER_UPDATE}.get(self.inject_after or "")
         while data := await src.read(65536):
             buf += data
             for payload in p.split_frames(buf):
@@ -64,7 +67,8 @@ class TcpRelay:
                 if pid == p.NEW_CAR_CONNECTION:
                     payload = rewrite_udp_port(payload, self.public_udp_port)
                 dst.write(p.frame(payload))
-                if self.inject_after and ((pid == p.NEW_CAR_CONNECTION and self.inject_after == "handshake") or (pid == p.CAR_LIST and self.inject_after == "car_list")):
+                if trigger is not None and pid == trigger and not done:   # once per connection
+                    done = True
                     dst.write(p.frame(p.csp_handshake_in(self.min_csp, self.weather_fx)))
                     self.n_injected += 1
             await dst.drain()
