@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import download, integrity, metrics
+from app import download, integrity, metrics, uploadguard
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -174,18 +174,17 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
     )
 
 
-def _extract(archive: Path, dest_parent: Path) -> str:
+def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
     """Unpacks a .zip or .rar (single top-level dir = the content's name) into `dest_parent`. Returns that name.
-    Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it."""
+    Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
+    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures."""
     with archive.open("rb") as fh:
         magic = fh.read(8)
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
     try:
         if magic[:4] == b"PK\x03\x04":
             with zipfile.ZipFile(archive) as zf:
-                for n in zf.namelist():
-                    if n.startswith("/") or ".." in Path(n).parts:
-                        raise HTTPException(400, f"unsafe archive path: {n!r}")
+                uploadguard.check_zip(zf)   # names, file count, sizes and ratios, from the headers (nothing unpacked yet)
                 zf.extractall(scratch)
         elif magic[:6] == b"Rar!\x1a\x07":
             if not shutil.which("bsdtar"):
@@ -195,6 +194,7 @@ def _extract(archive: Path, dest_parent: Path) -> str:
                 raise HTTPException(400, f"cannot read rar: {r.stderr.strip()[:200]}")
         else:
             raise HTTPException(400, "not a zip or rar archive")
+        uploadguard.check_tree(scratch)   # ponytail: for a .rar this runs after unpacking (bsdtar has no cheap header check); a bomb is stopped by the disk of the scratch dir
         for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
             if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
@@ -202,22 +202,26 @@ def _extract(archive: Path, dest_parent: Path) -> str:
         if len(tops) != 1 or not tops[0].is_dir():
             raise HTTPException(400, "archive must contain exactly one top-level folder (the content's name)")
         root = _safe(tops[0].name)
+        if pack and dest_parent in (_cars_dir(), _tracks_dir()):
+            uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
         dest_parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
         if dest_parent in (_cars_dir(), _tracks_dir()):   # not skins: the checksums cover only physics and track files
             integrity.seal_installed("car" if dest_parent == _cars_dir() else "track", root)
         return root
+    except uploadguard.Rejected as e:
+        raise HTTPException(400, str(e)) from e
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-async def _unzip_upload(file: UploadFile, dest_parent: Path) -> str:
+async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False) -> str:
     """Streams an uploaded .zip/.rar to disk (tracks are hundreds of MB) and unpacks it."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
     try:
-        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent)
+        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack)
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -240,8 +244,8 @@ def download_car(car: str) -> FileResponse:
 
 
 @router.post("/cars", status_code=201)
-async def upload_car(file: UploadFile) -> dict:
-    return {"car": await _unzip_upload(file, _cars_dir())}
+async def upload_car(file: UploadFile, pack: bool = False) -> dict:
+    return {"car": await _unzip_upload(file, _cars_dir(), pack)}
 
 
 @router.post("/cars/{car}/skins", status_code=201)
@@ -277,6 +281,7 @@ _uploads: dict[str, dict] = {}
 
 class UploadIn(BaseModel):
     kind: Literal["track", "car"]
+    pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
 
 
 def _upload(uid: str) -> dict:
@@ -291,7 +296,7 @@ def upload_start(body: UploadIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -317,7 +322,7 @@ def _finish(uid: str) -> None:
     u = _uploads[uid]
     dest = _tracks_dir() if u["kind"] == "track" else _cars_dir()
     try:
-        u["result"] = _extract(u["path"], dest)
+        u["result"] = _extract(u["path"], dest, u.get("pack", False))
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -342,6 +347,7 @@ def upload_complete(uid: str) -> dict:
 class LinkIn(BaseModel):
     kind: Literal["track", "car"]
     url: str = Field(min_length=8, max_length=2000)
+    pack: bool = False
 
 
 def _fetch_then_finish(uid: str, url: str) -> None:
@@ -371,7 +377,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 
@@ -384,6 +390,7 @@ def upload_status(uid: str) -> dict:
 
 class InboxIn(BaseModel):
     file: str  # a file name inside the inbox dir
+    pack: bool = False
 
 
 @router.post("/tracks/import", status_code=201)
@@ -392,12 +399,12 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
-    return {"track": await run_in_threadpool(_extract, src, _tracks_dir())}
+    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack)}
 
 
 @router.post("/tracks", status_code=201)
-async def upload_track(file: UploadFile) -> dict:
-    return {"track": await _unzip_upload(file, _tracks_dir())}
+async def upload_track(file: UploadFile, pack: bool = False) -> dict:
+    return {"track": await _unzip_upload(file, _tracks_dir(), pack)}
 
 
 @router.post("/entry_list")
