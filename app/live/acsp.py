@@ -315,6 +315,7 @@ class ACSPClient(asyncio.DatagramProtocol):
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
+        self.on_client_loaded = None  # callable(car_id) or None: a car finished loading (app/live/cspweather.py greets it with the current weather)
         self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
         self.events: deque[dict] = deque(maxlen=max_events)
         self.n_events = 0  # total ever appended; the deque forgets old ones, /live needs a cursor
@@ -363,6 +364,8 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
+        elif t == "client_loaded" and self.on_client_loaded:
+            self.on_client_loaded(event["car_id"])
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
             # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
             joined = {**event, "type": "new_connection"}

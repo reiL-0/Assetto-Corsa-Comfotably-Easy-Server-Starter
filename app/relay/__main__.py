@@ -17,7 +17,7 @@ import time
 from app.relay import http, protocol as p
 from app.relay.tcp import TcpRelay
 from app.relay.udp import UdpRelay
-from app.relay.weather import Conditions, Plan
+from app.live.weatherplan import Conditions, Plan
 
 log = logging.getLogger("acmanager.relay")
 

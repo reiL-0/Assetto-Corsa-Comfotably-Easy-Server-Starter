@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
 from app import content, csp, integrity, supervisor, timeline
+from app.live import cspcmd, cspweather
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
@@ -49,6 +50,7 @@ class ServerOut(BaseModel):
     integrity_extras: bool = False
     welcome: str = ""
     csp_extra: str = ""
+    weather_plan: dict | None = None  # played to CSP clients as hidden chat commands (app/live/cspweather.py)
     session: dict | None = None  # the last SessionIn applied through /apply (None for a server never set up from the panel)
 
 
@@ -72,6 +74,7 @@ def _out(s: Server) -> ServerOut:
         wake=s.wake,
         welcome=s.welcome,
         csp_extra=s.csp_extra,
+        weather_plan=s.weather_plan,
         session=s.session,
         integrity=s.integrity,
         integrity_extras=s.integrity_extras,
@@ -485,12 +488,74 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+    inst.set_weather_plan(s.weather_plan, s.config)
     timeline.start_resume(server_id, planned, planned_at)   # if the session clock ran while the server was off, move it to where the clock is
     return {"running": inst.running, "pid": inst.pid}
 
 
 class WakeIn(BaseModel):
     mode: Literal["off", "window", "always"]
+
+
+class WeatherPlanIn(BaseModel):
+    steps: list[tuple[float, int]] = Field(min_length=1, max_length=20)   # (seconds from the start of the plan, WeatherFX type id 0..32: 15 clear, 7 rain, 8 heavy rain...)
+    transition_s: float = Field(default=30, ge=1, le=600)                  # each change is a smooth blend that ends at the step's second
+    loop_s: float = Field(default=0, ge=0, le=86400)                       # repeat every this many seconds (0 = once)
+    ambient: float = Field(default=20, ge=-10, le=50)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> WeatherPlanIn:
+        if any(not 0 <= t <= 32 for _, t in self.steps) or [x for x, _ in self.steps] != sorted(x for x, _ in self.steps):
+            raise ValueError("steps: seconds in ascending order and WeatherFX types 0..32")
+        return self
+
+
+def _restart_weather(s: Server) -> None:
+    inst = supervisor.get(s.id)
+    if inst:
+        inst.set_weather_plan(s.weather_plan, s.config)
+
+
+@router.put("/{server_id}/weather_plan", response_model=ServerOut)
+def set_weather_plan(server_id: int, body: WeatherPlanIn, sess: SessionDep) -> ServerOut:
+    """The weather this server plays to CSP clients (hidden chat commands, see app/live/cspweather.py): starts at once on a running server, otherwise at its next start."""
+    s = _get(sess, server_id)
+    s.weather_plan = body.model_dump()
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    _restart_weather(s)
+    return _out(s)
+
+
+@router.delete("/{server_id}/weather_plan", status_code=204)
+def clear_weather_plan(server_id: int, sess: SessionDep) -> None:
+    s = _get(sess, server_id)
+    s.weather_plan = None
+    sess.add(s)
+    sess.commit()
+    _restart_weather(s)
+
+
+class CspWeatherIn(BaseModel):
+    current: int = Field(default=15, ge=0, le=32)
+    upcoming: int | None = Field(default=None, ge=0, le=32)
+    transition: float = Field(default=0, ge=0, le=1)
+    ambient: float = Field(default=20, ge=-10, le=50)
+    road: float = Field(default=22, ge=-10, le=70)
+    grip: float = Field(default=1.0, ge=0.6, le=1.0)
+    rain: float = Field(default=0, ge=0, le=1)
+    wetness: float = Field(default=0, ge=0, le=1)
+    water: float = Field(default=0, ge=0, le=1)
+
+
+@steward.post("/{server_id}/csp_weather")
+def send_csp_weather(server_id: int, body: CspWeatherIn, sess: SessionDep) -> dict:
+    """Send these conditions to every CSP client once, right now (a test, or a manual weather change). A running plan overwrites them at its next step."""
+    _get(sess, server_id)
+    text = cspweather.command({**body.model_dump(), "upcoming": body.current if body.upcoming is None else body.upcoming}, int(time.time()))
+    _acsp(server_id).send(acsp.encode_broadcast_chat(text))
+    return {"sent": True, "chars": len(text)}
 
 
 class CspExtraIn(BaseModel):
@@ -529,6 +594,8 @@ async def adopt_running(sess: Session) -> int:
             s.id, Path(settings.data_dir) / "instances" / str(s.id),
             acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http_internal"],
         )
+        if inst:
+            inst.set_weather_plan(s.weather_plan, s.config)
         n += inst is not None
     return n
 

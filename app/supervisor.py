@@ -69,6 +69,7 @@ class Instance:
         self.started_at = started_at or time.time()
         self.log: deque[str] = deque(maxlen=settings.log_lines)
         self.acsp: acsp.ACSPClient | None = None
+        self.director = None   # app.live.cspweather.WeatherDirector while the server has a weather plan
         self.logboard = LogBoard()   # the leaderboard read from the log: what the site shows while there is no ACSP socket
         self._acsp_retry: asyncio.Task | None = None
         self.exit_code: int | None = None
@@ -131,6 +132,8 @@ class Instance:
         if not self._stopping and self.exit_code not in (0, -15):  # ended on its own and not by a stop/terminate
             metrics.log(self.server_id, "server_crash", value=self.exit_code, name=f"up {int(self.uptime)}s")
         self.pid_path.unlink(missing_ok=True)
+        if self.director:
+            self.director.stop()
         if self.acsp:   # its socket would still hold our local port and the next start could not bind it
             self.acsp.close()
         if self._acsp_retry:
@@ -188,6 +191,13 @@ class Instance:
             self.acsp.close()
         if self._acsp_retry:
             self._acsp_retry.cancel()
+
+    def set_weather_plan(self, plan: dict | None, server_cfg: dict | None = None) -> None:
+        """Start (or replace, or with None stop) the weather plan played to CSP clients on this running server."""
+        from app.live.cspweather import WeatherDirector   # (late: it imports acsp, like this module)
+        if self.director:
+            self.director.stop()
+        self.director = WeatherDirector(self, plan, server_cfg) if plan and self.running else None
 
     async def connect_acsp(self, remote_port: int, local_port: int, host: str, car_slots: int = 0) -> None:
         """Open our side of the plugin socket. If the port is not free (a socket of an earlier run closing) try a few times, then keep

@@ -1,5 +1,8 @@
 # app/relay — relé delante de acServer (prueba de viabilidad: clima de CSP dirigido por el servidor)
 
+> **Vía descartada a favor de `app/live/cspweather.py`** (2026-10-06): el cliente no aplicó los paquetes UDP de AssettoServer que el relé inyectaba. El plugin oficial `plugin-dynamic-conditions`
+> de CSP muestra el camino que sí existe con el acServer de Kunos: comandos de CSP en **mensajes de chat ocultos** por ACSP, sin relé (ver `app/live/README.md`). Se conserva por lo aprendido; se puede borrar si el chat funciona.
+
 **Purpose:** acServer de Kunos no puede enviar a los clientes las condiciones de clima de Custom Shaders Patch (lluvia, mojado, transiciones), que son las que
 mueven RainFX y la física. AssettoServer lo hace con un paquete UDP extendido y un apretón de manos CSP por TCP. Este paquete es un **relé** que se pone entre
 los pilotos y un acServer sin modificar, y añade esos mensajes. Es un experimento (`python -m app.relay`), no está conectado al manager.

@@ -5,7 +5,7 @@ from app.relay import protocol as p
 from app.relay import http as relay_http
 from app.relay.tcp import TcpRelay, rewrite_track, rewrite_udp_port
 from app.relay.udp import UdpRelay
-from app.relay.weather import Conditions, Plan
+from app.live.weatherplan import Conditions, Plan
 
 
 def test_weather_packet_round_trip_and_framing():
