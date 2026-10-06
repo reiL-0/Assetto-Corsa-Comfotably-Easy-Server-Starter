@@ -7,7 +7,6 @@ import hashlib
 import json
 import secrets
 import shutil
-import subprocess
 import tempfile
 import threading
 import zipfile
@@ -20,7 +19,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import catalog, download, integrity, metrics, uploadguard
+from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -184,17 +183,14 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
     try:
         if magic[:4] == b"PK\x03\x04":
             with zipfile.ZipFile(archive) as zf:
-                uploadguard.check_zip(zf)   # names, file count, sizes and ratios, from the headers (nothing unpacked yet)
-                zf.extractall(scratch)
-        elif magic[:6] == b"Rar!\x1a\x07":
-            if not shutil.which("bsdtar"):
-                raise HTTPException(501, "rar needs bsdtar (apt install libarchive-tools)")
-            r = subprocess.run(["bsdtar", "-xf", str(archive), "-C", str(scratch)], capture_output=True, text=True, check=False)
-            if r.returncode:
-                raise HTTPException(400, f"cannot read rar: {r.stderr.strip()[:200]}")
-        else:
+                uploadguard.check_zip(zf)   # cheap early refusal from the headers (names, count, sizes, ratios); the real limits are enforced while unpacking
+        elif magic[:6] != b"Rar!\x1a\x07":
             raise HTTPException(400, "not a zip or rar archive")
-        uploadguard.check_tree(scratch)   # ponytail: for a .rar this runs after unpacking (bsdtar has no cheap header check); a bomb is stopped by the disk of the scratch dir
+        try:
+            unpack.run_sandboxed(archive, scratch)   # in a limited child process with a byte counter and a timeout (app/unpack.py)
+        except OSError as e:
+            raise HTTPException(507, str(e)) from e
+        uploadguard.check_tree(scratch)   # last look at what really landed
         for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
             if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")

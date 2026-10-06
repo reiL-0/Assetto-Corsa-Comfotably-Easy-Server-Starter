@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # Where the per-server CPU/RAM limits are enforced (systemd transient scope around acServer, see supervisor.limit_prefix): "" = not enforced,
     # "user" = the manager's own systemd user manager (needs `loginctl enable-linger <user>`), "system" = the system one (manager running as root).
     limits_scope: str = ""
+    unpack_timeout: int = 900   # seconds an uploaded archive may take to unpack before the child is killed (app/unpack.py)
+    unpack_mem_mb: int = 1024   # memory cap of that child when limits_scope is on
     port_range_start: int = 9600
     port_range_end: int = 9700
     log_lines: int = 500  # per-instance stdout ring buffer
