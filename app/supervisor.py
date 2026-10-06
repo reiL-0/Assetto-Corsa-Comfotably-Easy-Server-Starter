@@ -226,10 +226,25 @@ _instances: dict[int, Instance] = {}
 before_start: list = []   # called with the server id right before an acServer is spawned (app/wake.py frees the ports it holds for it)
 
 
+def limit_prefix(server_id: int, cpu_percent: int | None, mem_mb: int | None) -> list[str]:
+    """`systemd-run --scope` words that put acServer in its own cgroup with these limits (the kernel enforces them, not us). The scope execs acServer
+    in place, so the pid, `server.pid` and `adopt` work unchanged. [] when there is nothing to limit or `settings.limits_scope` is off."""
+    if not (cpu_percent or mem_mb) or settings.limits_scope not in ("user", "system"):
+        return []
+    p = ["systemd-run", "--scope", "--quiet", "--collect", f"--unit=acserver-{server_id}"] + (["--user"] if settings.limits_scope == "user" else [])
+    if cpu_percent:
+        p += ["-p", f"CPUQuota={cpu_percent}%"]
+    if mem_mb:
+        p += ["-p", f"MemoryMax={mem_mb}M", "-p", "MemorySwapMax=0"]
+    return p
+
+
 async def start(
     server_id: int,
     cwd: Path,
     *,
+    cpu_percent: int | None = None,
+    mem_mb: int | None = None,
     acsp_local_port: int | None = None,
     acsp_remote_port: int | None = None,
     acsp_host: str = "127.0.0.1",
@@ -249,8 +264,9 @@ async def start(
         log_path.replace(cwd / "server.log.1")  # the previous run stays readable for one more start
     with open(log_path, "wb") as out:
         proc = await asyncio.create_subprocess_exec(
-            *shlex.split(settings.acserver_cmd),
+            *limit_prefix(server_id, cpu_percent, mem_mb), *shlex.split(settings.acserver_cmd),
             cwd=cwd,
+            env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"},   # (systemd-run --user finds its bus there)
             stdin=asyncio.subprocess.DEVNULL,
             stdout=out,
             stderr=out,

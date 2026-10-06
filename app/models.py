@@ -51,6 +51,8 @@ class Server(SQLModel, table=True):
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...
     anchor_at: float | None = None   # ...and when it started (unix s); the session clock runs from here even when the server is off
+    cpu_limit: int | None = None  # CPU quota of this server in % of one core (100 = one core); None = unlimited (supervisor.limit_prefix)
+    mem_limit_mb: int | None = None  # RAM cap in MB (the kernel kills the server above it); None = unlimited
     wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

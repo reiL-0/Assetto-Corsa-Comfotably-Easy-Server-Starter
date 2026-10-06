@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # AC dedicated server. argv for the binary, e.g. "/opt/ac/acServer".
     # Empty -> start endpoints refuse.
     acserver_cmd: str = ""
+    # Where the per-server CPU/RAM limits are enforced (systemd transient scope around acServer, see supervisor.limit_prefix): "" = not enforced,
+    # "user" = the manager's own systemd user manager (needs `loginctl enable-linger <user>`), "system" = the system one (manager running as root).
+    limits_scope: str = ""
     port_range_start: int = 9600
     port_range_end: int = 9700
     log_lines: int = 500  # per-instance stdout ring buffer

@@ -46,6 +46,7 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
     integrity_extras: bool = False
     welcome: str = ""
@@ -72,6 +73,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
         weather_plan=s.weather_plan,
@@ -485,6 +487,8 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
             acsp_remote_port=p["plugin"],
             acsp_local_port=p["plugin_local"],
             http_port=p["http_internal"],
+            cpu_percent=s.cpu_limit,
+            mem_mb=s.mem_limit_mb,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -596,6 +600,22 @@ def set_csp_extra(server_id: int, body: CspExtraIn, sess: SessionDep) -> ServerO
     (app/csp.py). Written to `cfg/welcome.txt` the next time the server starts or a session is applied; kept across sessions."""
     s = _get(sess, server_id)
     s.csp_extra = body.text.strip()
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
+
+
+class LimitsIn(BaseModel):
+    cpu_percent: int | None = Field(default=None, ge=10, le=800)   # 100 = one core; None = unlimited
+    mem_mb: int | None = Field(default=None, ge=256, le=65536)     # None = unlimited
+
+
+@router.put("/{server_id}/limits", response_model=ServerOut)
+def set_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> ServerOut:
+    """CPU and RAM caps of this server, enforced by the OS from its next start (a running acServer keeps the ones it started with)."""
+    s = _get(sess, server_id)
+    s.cpu_limit, s.mem_limit_mb = body.cpu_percent, body.mem_mb
     sess.add(s)
     sess.commit()
     sess.refresh(s)

@@ -16,20 +16,26 @@ from sqlmodel import Session, select
 from app.models import ChampionshipEvent, LeagueMember, Penalty
 
 
+NO_LAP_MS = 999_999_999   # the BestLap acServer writes for a car that set no lap
+
+
 def parse_result_file(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     session_type = data.get("Type", "")
     is_race = session_type == "Race"
 
     classification = []
-    for i, r in enumerate(data.get("Result", [])):
+    for r in data.get("Result", []):
+        if not r.get("DriverName") and not r.get("DriverGuid"):
+            continue  # acServer lists every empty slot too (BestLap 999999999): nobody drove it
+        best = r.get("BestLap")
         classification.append(
             {
-                "position": i + 1,
+                "position": len(classification) + 1,
                 "driver_name": r.get("DriverName"),
                 "driver_guid": r.get("DriverGuid"),
                 "car_model": r.get("CarModel"),
-                "best_lap_ms": r.get("BestLap"),
+                "best_lap_ms": best if best and best < NO_LAP_MS else None,  # no lap set: acServer writes 999999999
                 "total_time_ms": r.get("TotalTime"),
             }
         )
