@@ -59,8 +59,15 @@ def _log(sess: Session, actor: str, action: str, hash_: str = "", holder: str = 
     sess.add(CatalogEvent(actor=actor, action=action, hash=hash_, holder=holder, detail=detail[:500]))
 
 
+def blob_path(hash_: str) -> Path:
+    from app.config import settings
+    return Path(settings.data_dir) / "blobs" / hash_
+
+
 def _dir_of(blob: ContentBlob) -> Path:
     from app import content   # lazy: content imports this module
+    if blob.store == "blob":
+        return blob_path(blob.hash)
     return (content._cars_dir() if blob.kind == "car" else content._tracks_dir()) / blob.name
 
 
@@ -71,11 +78,11 @@ def check_not_blocked(hash_: str) -> None:
             raise HTTPException(403, f"this content was removed after a rights claim ({b.reason or 'no reason given'}) and cannot be uploaded again")
 
 
-def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holder: str = LEAGUE, actor: str = "") -> None:
+def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holder: str = LEAGUE, actor: str = "", store: str = "shared") -> None:
     """An install just happened: note the blob and make `holder` an active holder (uploading counts as declaring the licence)."""
     with Session(engine) as sess:
         if not sess.get(ContentBlob, hash_):
-            sess.add(ContentBlob(hash=hash_, kind=kind, name=name, size=size, files=files))
+            sess.add(ContentBlob(hash=hash_, kind=kind, name=name, size=size, files=files, store=store))
         row = sess.exec(select(ContentHolder).where(ContentHolder.hash == hash_, ContentHolder.holder == holder)).first()
         if row and row.status in ("revoked", "disputed"):
             raise HTTPException(403, f"{name!r} was {row.status} for this account after a rights claim; ask the administrator")

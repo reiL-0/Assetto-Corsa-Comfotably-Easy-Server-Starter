@@ -99,6 +99,7 @@ class ContentBlob(SQLModel, table=True):
     name: str  # the folder name AC looks for
     size: int = 0
     files: int = 0
+    store: str = "shared"  # shared = the acServer content/ folder (our league); blob = <data>/blobs/<hash> (a customer's upload, composed into each server)
     source_url: str = ""  # the modder's official page, shown to players as «Descargar» (we never serve the files)
     created_at: datetime = Field(default_factory=_now)
 

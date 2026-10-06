@@ -173,13 +173,11 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
     )
 
 
-def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
-    """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
-    Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
-    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures."""
+def unpack_top(archive: Path, scratch: Path) -> Path:
+    """Safely unpacks a .zip into the empty `scratch` dir and returns its single top-level folder (the car's or track's name). Raises HTTPException.
+    The archive is checked from its headers, unpacked in the limited child process (app/unpack.py), and what landed is checked again."""
     with archive.open("rb") as fh:
         magic = fh.read(8)
-    scratch = Path(tempfile.mkdtemp(dir=_scratch()))
     try:
         if magic[:4] == b"PK\x03\x04":
             with zipfile.ZipFile(archive) as zf:
@@ -191,28 +189,38 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         except OSError as e:
             raise HTTPException(507, str(e)) from e
         uploadguard.check_tree(scratch)   # last look at what really landed
-        for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
-            if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
-                raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
-        tops = [p for p in scratch.iterdir()]
-        if len(tops) != 1 or not tops[0].is_dir():
-            raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
-        root = _safe(tops[0].name)
-        if pack and dest_parent in (_cars_dir(), _tracks_dir()):
-            uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
+    except uploadguard.Rejected as e:
+        raise HTTPException(400, str(e)) from e
+    for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
+        if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
+            raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
+    tops = [p for p in scratch.iterdir()]
+    if len(tops) != 1 or not tops[0].is_dir():
+        raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
+    _safe(tops[0].name)
+    return tops[0]
+
+
+def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
+    """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
+    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures."""
+    scratch = Path(tempfile.mkdtemp(dir=_scratch()))
+    try:
+        top = unpack_top(archive, scratch)
+        root = _safe(top.name)
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
         kind = "car" if dest_parent == _cars_dir() else "track"
+        if pack and cataloged:
+            uploadguard.prune(top, kind)
         if cataloged:
-            digest, size, nfiles = catalog.digest_dir(tops[0])
+            digest, size, nfiles = catalog.digest_dir(top)
             catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
         dest_parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+        shutil.copytree(top, dest_parent / root, dirs_exist_ok=True)
         if cataloged:
             integrity.seal_installed(kind, root)
             catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload")
         return root
-    except uploadguard.Rejected as e:
-        raise HTTPException(400, str(e)) from e
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 
 from app import content, csp, integrity, supervisor, timeline
 from app.live import cspcmd, cspweather
-from app import tenancy
+from app import tenancy, tenantcontent
 from app.auth import CurrentUser, require
 from app.config import settings
 from app.db import SessionDep, engine
@@ -153,6 +153,8 @@ def _write_instance(s: Server) -> Path:
     # acServer reads content/ and system/ relative to its cwd: share the install's copies.
     bin_dir = settings.acserver_dir()
     for name in ("content", "system"):
+        if name == "content" and s.tenant_id is not None:
+            continue   # a customer's server gets a content/ made only of what that customer holds (below)
         link = d / name
         if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
@@ -160,6 +162,8 @@ def _write_instance(s: Server) -> Path:
         plan = tenancy.plan_of(sess, s)   # a customer's server is written within its plan
     (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s, plan))
     (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s, plan))
+    if s.tenant_id is not None:
+        tenantcontent.compose(s, d)
     welcome = d / "cfg" / "welcome.txt"
     if s.welcome or s.csp_extra.strip():
         welcome.write_text(csp.welcome_with_extra(s.welcome, s.csp_extra))
@@ -175,6 +179,7 @@ def create(body: ServerIn, sess: SessionDep, user: CurrentUser) -> ServerOut:
     plan = tenancy.enforce_new_server(sess, user)   # a customer: its tenant must be active and under the plan's server limit
     s = Server(
         tenant_id=user.tenant_id,
+        integrity="off" if plan else "warn",   # the seals cover the shared content/, not a customer's
         cpu_limit=plan.cpu_percent if plan else None,
         mem_limit_mb=plan.mem_mb if plan else None,
         name=body.name,
@@ -492,6 +497,8 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
     s = _get(sess, server_id)
     if not settings.acserver_cmd:
         raise HTTPException(400, "ACM_ACSERVER_CMD is not configured")
+    if s.tenant_id is not None and (miss := tenantcontent.missing(s)):
+        raise HTTPException(409, "your content is missing: " + ", ".join(miss) + " (upload it first)")
     integrity.gate(sess, s)   # 409 in «require» mode when the content differs from its seal
     planned, planned_at = timeline.server_position(s), time.time()   # where the session clock is, read before acServer re-anchors it
     p = _ports(s.base_port)

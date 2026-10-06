@@ -27,6 +27,7 @@ ALLOW: list[tuple[set[str] | None, re.Pattern]] = [
     (None, re.compile(rf"^{API}/servers/\{{server_id\}}$")),
     (None, re.compile(rf"^{API}/servers/\{{server_id\}}/.+$")),
     ({"POST"}, re.compile(rf"^{API}/binaries/verify$")),
+    (None, re.compile(rf"^{API}/tenant/content(/.*)?$")),   # its own cars and tracks (app/tenantcontent.py)
     (None, re.compile(rf"^{API}/auth/(me|logout|tokens|tokens/\{{token_id\}})$")),
 ]
 SERVER_ONLY_DENY = re.compile(rf"^{API}/servers/\{{server_id\}}/(limits|binary)$")   # set by the plan / the operator
