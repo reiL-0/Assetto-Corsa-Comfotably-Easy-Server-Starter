@@ -11,18 +11,20 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.requests import HTTPConnection
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
 from app import content, csp, integrity, supervisor, timeline
 from app.live import cspcmd, cspweather
-from app.auth import require
+from app import tenancy
+from app.auth import CurrentUser, require
 from app.config import settings
-from app.db import SessionDep
+from app.db import SessionDep, engine
 from app.live import acsp
 from app.live.acsp import ACSPClient
-from app.models import Server
+from app.models import Plan, Server
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 
 router = APIRouter(prefix="/servers", tags=["servers"])
@@ -46,6 +48,7 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    tenant_id: int | None = None
     limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
     integrity_extras: bool = False
@@ -73,6 +76,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        tenant_id=s.tenant_id,
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
@@ -94,15 +98,15 @@ def _ini_value(v: Scalar) -> str:
 def _render_ini(sections: dict[str, dict[str, Scalar]]) -> str:
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str  # keep KEY casing
-    for name, kv in sections.items():
-        cp[name] = {k: _ini_value(v) for k, v in kv.items()}
+    for name, kv in sections.items():   # no line breaks anywhere: a value must not be able to add keys to the file acServer reads
+        cp[tenancy.clean_text(name)] = {tenancy.clean_text(k): tenancy.clean_text(_ini_value(v)) for k, v in kv.items()}
     buf = io.StringIO()
     cp.write(buf, space_around_delimiters=False)
     return buf.getvalue()
 
 
-def render_server_cfg(s: Server) -> str:
-    """server_cfg.ini with allocated ports merged into [SERVER] (user values win)."""
+def render_server_cfg(s: Server, plan: Plan | None = None) -> str:
+    """server_cfg.ini with allocated ports merged into [SERVER] (user values win; a customer's plan forces ports, slots and plain content names)."""
     sections = {name: dict(kv) for name, kv in s.config.items()}
     server = sections.setdefault("SERVER", {})
     p = _ports(s.base_port)
@@ -115,11 +119,14 @@ def render_server_cfg(s: Server) -> str:
     else:
         server.pop("WELCOME_MESSAGE", None)
     server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
+    if plan:
+        sections, _ = tenancy.clamp_config(sections, s.entry_list, plan, p)
     return _render_ini(sections)
 
 
-def render_entry_list(s: Server) -> str:
-    return _render_ini({f"CAR_{i}": car for i, car in enumerate(s.entry_list)})
+def render_entry_list(s: Server, plan: Plan | None = None) -> str:
+    cars = s.entry_list[: plan.slots] if plan else s.entry_list
+    return _render_ini({f"CAR_{i}": car for i, car in enumerate(cars)})
 
 
 # --- persistence helpers ---------------------------------------------------
@@ -149,8 +156,10 @@ def _write_instance(s: Server) -> Path:
         link = d / name
         if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
-    (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s))
-    (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s))
+    with Session(engine) as sess:
+        plan = tenancy.plan_of(sess, s)   # a customer's server is written within its plan
+    (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s, plan))
+    (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s, plan))
     welcome = d / "cfg" / "welcome.txt"
     if s.welcome or s.csp_extra.strip():
         welcome.write_text(csp.welcome_with_extra(s.welcome, s.csp_extra))
@@ -162,8 +171,12 @@ def _write_instance(s: Server) -> Path:
 # --- routes --------------------------------------------------------------
 
 @router.post("", response_model=ServerOut, status_code=201)
-def create(body: ServerIn, sess: SessionDep) -> ServerOut:
+def create(body: ServerIn, sess: SessionDep, user: CurrentUser) -> ServerOut:
+    plan = tenancy.enforce_new_server(sess, user)   # a customer: its tenant must be active and under the plan's server limit
     s = Server(
+        tenant_id=user.tenant_id,
+        cpu_limit=plan.cpu_percent if plan else None,
+        mem_limit_mb=plan.mem_mb if plan else None,
         name=body.name,
         config=body.config,
         entry_list=body.entry_list,
@@ -176,8 +189,8 @@ def create(body: ServerIn, sess: SessionDep) -> ServerOut:
 
 
 @router.get("", response_model=list[ServerOut])
-def list_servers(sess: SessionDep) -> list[ServerOut]:
-    return [_out(s) for s in sess.exec(select(Server)).all()]
+def list_servers(sess: SessionDep, conn: HTTPConnection) -> list[ServerOut]:
+    return [_out(s) for s in tenancy.visible(conn, list(sess.exec(select(Server)).all()))]
 
 
 @router.get("/{server_id}", response_model=ServerOut)
@@ -208,12 +221,14 @@ def delete(server_id: int, sess: SessionDep) -> None:
 
 @router.get("/{server_id}/server_cfg.ini", response_class=PlainTextResponse)
 def server_cfg_ini(server_id: int, sess: SessionDep) -> str:
-    return render_server_cfg(_get(sess, server_id))
+    s = _get(sess, server_id)
+    return render_server_cfg(s, tenancy.plan_of(sess, s))
 
 
 @router.get("/{server_id}/entry_list.ini", response_class=PlainTextResponse)
 def entry_list_ini(server_id: int, sess: SessionDep) -> str:
-    return render_entry_list(_get(sess, server_id))
+    s = _get(sess, server_id)
+    return render_entry_list(s, tenancy.plan_of(sess, s))
 
 
 @router.put("/{server_id}/server_cfg.ini", response_model=ServerOut)
@@ -487,8 +502,8 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
             acsp_remote_port=p["plugin"],
             acsp_local_port=p["plugin_local"],
             http_port=p["http_internal"],
-            cpu_percent=s.cpu_limit,
-            mem_mb=s.mem_limit_mb,
+            cpu_percent=tenancy.limits_for(sess, s)[0],   # a customer's server starts with its plan's caps
+            mem_mb=tenancy.limits_for(sess, s)[1],
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

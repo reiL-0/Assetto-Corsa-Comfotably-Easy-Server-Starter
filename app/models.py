@@ -18,6 +18,7 @@ class User(SQLModel, table=True):
     username: str
     password_hash: str | None = None
     role: str = "driver"
+    tenant_id: int | None = None  # a customer's account: sees and controls only that tenant's servers (app/tenancy.py); None = our own staff
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -31,6 +32,7 @@ class Token(SQLModel, table=True):
     token_hash: str = Field(unique=True, index=True)
     name: str = "session"
     expires_at: datetime | None = None
+    server_id: int | None = None  # a per-server token: works only on this server, with the role of the user that made it (app/tenancy.py)
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -51,11 +53,40 @@ class Server(SQLModel, table=True):
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...
     anchor_at: float | None = None   # ...and when it started (unix s); the session clock runs from here even when the server is off
+    tenant_id: int | None = None  # whose server it is (None = our own league's); the plan of the tenant caps slots, CPU and RAM (app/tenancy.py)
     cpu_limit: int | None = None  # CPU quota of this server in % of one core (100 = one core); None = unlimited (supervisor.limit_prefix)
     mem_limit_mb: int | None = None  # RAM cap in MB (the kernel kills the server above it); None = unlimited
     wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+class Plan(SQLModel, table=True):
+    """What a customer pays for (app/tenancy.py). The limits are enforced by us (slots in the config we write, CPU/RAM by the OS), never trusted from the customer."""
+
+    __tablename__ = "plans"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    max_servers: int = 1
+    slots: int = 16  # players per server (MAX_CLIENTS is clamped to this)
+    cpu_percent: int | None = None  # per server, 100 = one core; None = unlimited
+    mem_mb: int | None = None  # per server
+    disk_mb: int | None = None  # content quota of the tenant (reserved: enforced when content is kept per tenant)
+    panel_enabled: bool = True  # False: API only, for customers who bring their own panel
+    created_at: datetime = Field(default_factory=_now)
+
+
+class Tenant(SQLModel, table=True):
+    """A customer: its users and servers are theirs alone."""
+
+    __tablename__ = "tenants"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    plan_id: int = Field(foreign_key="plans.id")
+    status: str = "active"  # active | suspended (every request of its users is refused)
+    created_at: datetime = Field(default_factory=_now)
 
 
 class ContentBlob(SQLModel, table=True):

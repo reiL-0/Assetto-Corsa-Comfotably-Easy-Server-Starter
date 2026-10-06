@@ -12,6 +12,7 @@ from fastapi.requests import HTTPConnection
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
+from app import tenancy
 from app.db import SessionDep
 from app.models import Token, User
 
@@ -53,7 +54,9 @@ def current_user(conn: HTTPConnection, sess: SessionDep) -> User:
     t = _find_token(sess, _raw_token(conn))
     if not t:
         raise HTTPException(401, "not authenticated", headers={"WWW-Authenticate": "Bearer"})
-    return sess.get(User, t.user_id)
+    user = sess.get(User, t.user_id)
+    tenancy.check_scope(conn, sess, user, t)   # a customer's account or a per-server token only reaches its own servers (403/404 otherwise)
+    return user
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
@@ -86,13 +89,14 @@ def guard(read: Role = "driver"):
     return dep
 
 
-def _issue(sess: SessionDep, user: User, name: str, ttl: timedelta | None) -> tuple[Token, str]:
+def _issue(sess: SessionDep, user: User, name: str, ttl: timedelta | None, server_id: int | None = None) -> tuple[Token, str]:
     raw = secrets.token_urlsafe(32)
     t = Token(
         user_id=user.id,
         token_hash=_sha(raw),
         name=name,
         expires_at=datetime.now(UTC) + ttl if ttl else None,
+        server_id=server_id,
     )
     sess.add(t)
     sess.commit()
@@ -105,6 +109,7 @@ class UserOut(BaseModel):
     username: str
     role: Role
     discord_id: str | None = None
+    tenant_id: int | None = None
     timezone: str
 
 

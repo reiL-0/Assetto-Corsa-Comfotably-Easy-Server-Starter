@@ -24,6 +24,7 @@ from app.penalties import router as penalties_router
 from app.servers import router as servers_router
 from app.servers import steward as steward_router
 from app.telemetry import router as telemetry_router
+from app.tenants import router as tenants_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -37,6 +38,7 @@ api_router.include_router(auth_router)
 api_router.include_router(discord_router)  # link/unlink the caller's own Discord account
 # Reads: any logged-in user, except servers (config carries ADMIN_PASSWORD, plus logs) -> steward.
 # Writes: admin. Steward-only moderation routes live on their own router.
+api_router.include_router(tenants_router)  # plans/customers: our admins (its own guard); per-server tokens: that server's admin
 api_router.include_router(servers_router, dependencies=[Depends(guard("steward"))])
 api_router.include_router(steward_router)
 api_router.include_router(metrics_router)  # steward reads
