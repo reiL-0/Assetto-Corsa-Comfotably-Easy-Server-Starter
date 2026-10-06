@@ -91,3 +91,28 @@ def test_saved_event_keeps_the_options():
     assert got["abs_allowed"] == 2 and got["weather"][0]["graphics"] == "7_heavy_clouds" and got["fuel_rate"] is None
     r = api.post(f"{V}/events/{eid}/run", json={"server_id": sid, "restart": False})
     assert r.status_code == 200 and r.json()["config"]["WEATHER_0"]["GRAPHICS"] == "7_heavy_clouds"
+
+
+def test_csp_extra_options_hide_in_the_welcome_message():
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from pathlib import Path
+    from app import csp
+    from app.config import settings
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    ini = "[SCRIPT_1]\nSCRIPT = https://example.test/probe.lua\nREQUIRED = 0\n"
+    assert csp.decode(csp.welcome_with_extra("Hola", ini)) == ini and csp.welcome_with_extra("Hola", "  ") == "Hola"
+    msg = csp.welcome_with_extra("Hola", ini)
+    assert msg.startswith("Hola" + "\t" * 32 + "$CSP0:") and "=" not in msg.split("$CSP0:")[1]   # padding trimmed, as CSP expects
+    sid = api.post("/api/v1/servers", json={"name": "Csp"}).json()["id"]
+    assert api.put(f"/api/v1/servers/{sid}/csp_extra", json={"text": ini}).json()["csp_extra"] == ini.strip()
+    assert "WELCOME_MESSAGE=cfg/welcome.txt" in api.get(f"/api/v1/servers/{sid}/server_cfg.ini").text   # no plain welcome, but extra options need the file
+    from app.db import engine
+    from app.models import Server
+    from app.servers import _write_instance
+    from sqlmodel import Session
+    with Session(engine) as s:
+        d = _write_instance(s.get(Server, sid))
+    assert csp.decode((d / "cfg" / "welcome.txt").read_text()) == ini.strip() + "\n"
+    assert api.put(f"/api/v1/servers/{sid}/csp_extra", json={"text": ""}).json()["csp_extra"] == ""

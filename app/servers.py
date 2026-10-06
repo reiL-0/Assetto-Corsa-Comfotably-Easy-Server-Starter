@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
-from app import content, integrity, supervisor, timeline
+from app import content, csp, integrity, supervisor, timeline
 from app.auth import require
 from app.config import settings
 from app.db import SessionDep
@@ -48,6 +48,7 @@ class ServerOut(BaseModel):
     integrity: str = "warn"
     integrity_extras: bool = False
     welcome: str = ""
+    csp_extra: str = ""
     session: dict | None = None  # the last SessionIn applied through /apply (None for a server never set up from the panel)
 
 
@@ -70,6 +71,7 @@ def _out(s: Server) -> ServerOut:
         entry_list=s.entry_list,
         wake=s.wake,
         welcome=s.welcome,
+        csp_extra=s.csp_extra,
         session=s.session,
         integrity=s.integrity,
         integrity_extras=s.integrity_extras,
@@ -103,7 +105,7 @@ def render_server_cfg(s: Server) -> str:
     server.setdefault("UDP_PORT", p["udp"])
     server["HTTP_PORT"] = p["http_internal"]   # the manager owns the public HTTP port
     server.setdefault("UDP_PLUGIN_LOCAL_PORT", p["plugin"])
-    if s.welcome:
+    if s.welcome or s.csp_extra.strip():
         server["WELCOME_MESSAGE"] = "cfg/welcome.txt"   # relative to the instance directory, acServer's working directory
     else:
         server.pop("WELCOME_MESSAGE", None)
@@ -145,8 +147,8 @@ def _write_instance(s: Server) -> Path:
     (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s))
     (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s))
     welcome = d / "cfg" / "welcome.txt"
-    if s.welcome:
-        welcome.write_text(s.welcome)
+    if s.welcome or s.csp_extra.strip():
+        welcome.write_text(csp.welcome_with_extra(s.welcome, s.csp_extra))
     else:
         welcome.unlink(missing_ok=True)
     return d
@@ -489,6 +491,22 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
 
 class WakeIn(BaseModel):
     mode: Literal["off", "window", "always"]
+
+
+class CspExtraIn(BaseModel):
+    text: str = Field(default="", max_length=6000)  # INI; "" removes it
+
+
+@router.put("/{server_id}/csp_extra", response_model=ServerOut)
+def set_csp_extra(server_id: int, body: CspExtraIn, sess: SessionDep) -> ServerOut:
+    """Custom Shaders Patch extra options of this server (`[SCRIPT_n]`, `[EXTRA_RULES]`...), sent to CSP clients hidden in the welcome message
+    (app/csp.py). Written to `cfg/welcome.txt` the next time the server starts or a session is applied; kept across sessions."""
+    s = _get(sess, server_id)
+    s.csp_extra = body.text.strip()
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
 
 
 @router.put("/{server_id}/wake", response_model=ServerOut)

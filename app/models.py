@@ -44,6 +44,7 @@ class Server(SQLModel, table=True):
     config: dict = Field(default_factory=dict, sa_type=JSON)
     entry_list: list = Field(default_factory=list, sa_type=JSON)
     welcome: str = ""  # text shown to a driver on joining (WELCOME_MESSAGE file); changes with each session
+    csp_extra: str = ""  # Custom Shaders Patch extra options (INI) hidden at the end of the welcome message (app/csp.py); kept across sessions
     session: dict | None = Field(default=None, sa_type=JSON)  # the last servers.SessionIn applied (no admin password): what the panel edits and the calendar starts from
     integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
