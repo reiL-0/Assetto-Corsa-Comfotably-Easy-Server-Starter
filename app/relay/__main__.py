@@ -31,6 +31,7 @@ async def main() -> None:
     a.add_argument("--plan", default="15:0")
     a.add_argument("--transition", type=float, default=30)
     a.add_argument("--ambient", type=float, default=20)
+    a.add_argument("--loop", type=float, default=0, help="repeat the plan every this many seconds (0 = once)")
     a.add_argument("--min-csp", type=int, default=0)
     a.add_argument("--inject-after", choices=["handshake", "car_list", "none"], default="handshake")
     a.add_argument("--no-weather-fx-flag", action="store_true", help="send the CSP handshake without the «requires WeatherFX» flag")
@@ -44,7 +45,7 @@ async def main() -> None:
     await asyncio.start_server(tcp.handle, "0.0.0.0", args.public)
     await asyncio.start_server(http.handler(args.http, args.public, args.public, args.public + 1), "0.0.0.0", args.public + 1)
     plan = Plan([(float(s), int(t)) for t, s in (x.split(":") for x in args.plan.split(","))], args.transition)
-    cond = Conditions(plan, ambient=args.ambient)
+    cond = Conditions(plan, ambient=args.ambient, loop=args.loop or None)
     log.info("relay up: public %s (tcp+udp) / %s (http) -> acServer tcp %s udp %s http %s; plan %s", args.public, args.public + 1, args.tcp, args.udp, args.http, args.plan)
     tick = 0
     while True:

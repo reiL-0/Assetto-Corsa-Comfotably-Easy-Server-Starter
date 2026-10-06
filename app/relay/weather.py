@@ -40,11 +40,12 @@ class Conditions:
     dry_rate: float = 1 / 600
     water_rate: float = 1 / 180
     grip_loss: float = 0.2        # grip lost at full wetness
+    loop: float | None = None     # repeat the plan every this many seconds
     state: dict = field(default_factory=dict)
 
     def step(self, dt: float) -> dict:
         self.t += dt
-        cur, up, tr = self.plan.at(self.t)
+        cur, up, tr = self.plan.at(self.t % self.loop if self.loop else self.t)
         rain = RAIN.get(cur, 0.0) * (1 - tr) + RAIN.get(up, 0.0) * tr
         k = 1 if rain > 0.05 else -1
         self.wetness = min(1.0, max(0.0, self.wetness + k * (self.wet_rate if k > 0 else self.dry_rate) * dt * max(rain, 0.3 if k < 0 else 0)))
