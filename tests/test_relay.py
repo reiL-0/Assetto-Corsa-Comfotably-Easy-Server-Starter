@@ -109,3 +109,24 @@ def test_track_gets_the_csp_build_in_front_and_details_announce_weatherfx():
     d = relay_http.build_details({"track": "imola-gp", "cport": 9681, "name": "x"}, 2744, {"current": 7, "ambient": 14, "road": 12, "grip": 0.9})
     assert "WEATHERFX_V1" in d["features"] and d["track"] == "csp/2744/../imola-gp" and d["trackBase"] == "csp/2744/../imola"
     assert (d["ambientTemperature"], d["grip"], d["wrappedPort"]) == (14, 90, 9681)
+
+
+def test_vanilla_weather_frames_can_be_dropped():
+    async def scenario():
+        async def server(r, w):
+            await r.read(1)
+            w.write(p.frame(bytes([p.CAR_LIST, 1])) + p.frame(bytes([p.WEATHER_UPDATE, 9])) + p.frame(bytes([p.SUN_ANGLE_UPDATE, 4])) + p.frame(bytes([0x47, 2])))
+            await w.drain()
+            await asyncio.sleep(0.2)
+            w.close()
+        srv = await asyncio.start_server(server, "127.0.0.1", 0)
+        relay = TcpRelay(srv.sockets[0].getsockname()[1], 9680, inject_after=None, drop_vanilla_weather=True)
+        front = await asyncio.start_server(relay.handle, "127.0.0.1", 0)
+        r, w = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
+        w.write(b"x")
+        await asyncio.sleep(0.4)
+        assert [f[0] for f in p.split_frames(bytearray(await r.read(4096)))] == [p.CAR_LIST, 0x47]
+        w.close()
+        srv.close()
+        front.close()
+    asyncio.run(scenario())

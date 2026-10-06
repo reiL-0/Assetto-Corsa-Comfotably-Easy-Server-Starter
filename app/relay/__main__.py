@@ -35,6 +35,8 @@ async def main() -> None:
     a.add_argument("--min-csp", type=int, default=2744, help="minimum CSP build announced to the clients (a real AssettoServer with WeatherFX used 2744)")
     a.add_argument("--time-mult", type=float, default=10, help="clock speed of the `unix` field of the weather packet (the server's TIME_OF_DAY_MULT)")
     a.add_argument("--inject-after", choices=["handshake", "car_list", "weather", "none"], default="none")
+    a.add_argument("--keep-vanilla-weather", action="store_true", help="do not drop acServer's vanilla weather/sun-angle frames (dropped by default)")
+    a.add_argument("--dump-tcp", type=int, default=0, help="log the first N bytes (hex) of every server->client TCP frame")
     a.add_argument("--no-weather-fx-flag", action="store_true", help="send the CSP handshake without the «requires WeatherFX» flag")
     args = a.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -42,7 +44,7 @@ async def main() -> None:
     udp = UdpRelay(args.udp, lobby_http_port=args.public + 1)
     await loop.create_datagram_endpoint(lambda: udp, local_addr=("0.0.0.0", args.public))
     tcp = TcpRelay(args.tcp, args.public, inject_after=None if args.inject_after == "none" else args.inject_after, min_csp=args.min_csp,
-                   weather_fx=not args.no_weather_fx_flag)
+                   weather_fx=not args.no_weather_fx_flag, drop_vanilla_weather=not args.keep_vanilla_weather, dump=args.dump_tcp)
     await asyncio.start_server(tcp.handle, "0.0.0.0", args.public)
     holder: dict = {}
     await asyncio.start_server(http.handler(args.http, args.public, args.public, args.public + 1, min_csp=args.min_csp, conditions=lambda: holder.get("cond")), "0.0.0.0", args.public + 1)

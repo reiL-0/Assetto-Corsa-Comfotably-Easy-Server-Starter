@@ -41,10 +41,11 @@ def rewrite_track(payload: bytes, min_csp: int) -> bytes:
 
 class TcpRelay:
     def __init__(self, upstream_port: int, public_udp_port: int, *, inject_after: str | None = None, min_csp: int = 0,
-                 weather_fx: bool = True, on_connect: Callable[[], None] | None = None) -> None:
+                 weather_fx: bool = True, on_connect: Callable[[], None] | None = None, drop_vanilla_weather: bool = False, dump: int = 0) -> None:
         self.upstream_port, self.public_udp_port = upstream_port, public_udp_port
         self.inject_after, self.min_csp, self.weather_fx = inject_after, min_csp, weather_fx
         self.on_connect = on_connect
+        self.drop_vanilla_weather, self.dump = drop_vanilla_weather, dump   # dump: log the first bytes of each server frame (to compare with a real AssettoServer)
         self.n_conns = self.n_injected = 0
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -78,8 +79,12 @@ class TcpRelay:
             buf += data
             for payload in p.split_frames(buf):
                 pid = payload[0] if payload else -1
+                if self.dump:
+                    log.info("tcp S>C id=%02x len=%d %s", pid, len(payload), payload[:self.dump].hex())
                 if pid == p.NEW_CAR_CONNECTION:
                     payload = rewrite_track(rewrite_udp_port(payload, self.public_udp_port), self.min_csp)
+                if self.drop_vanilla_weather and pid in (p.WEATHER_UPDATE, p.SUN_ANGLE_UPDATE):
+                    continue   # with WeatherFX the client gets its weather only from the UDP packets (a real AssettoServer sends no vanilla weather at join)
                 dst.write(p.frame(payload))
                 if trigger is not None and pid == trigger and not done:   # once per connection
                     done = True

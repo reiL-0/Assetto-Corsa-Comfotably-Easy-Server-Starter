@@ -14,6 +14,7 @@ NEW_CAR_CONNECTION = 0x3E       # the server's handshake answer (HandshakeRespon
 CAR_LIST = 0x40
 CAR_CONNECT = 0x4E          # first UDP datagram of a client: [id][session id]
 WEATHER_UPDATE = 0x78       # vanilla weather: ambient, road, graphics name (UTF-32), wind
+SUN_ANGLE_UPDATE = 0x54     # vanilla sun angle (a stock acServer sends it with the weather; the WeatherFX implementation of AssettoServer sends neither)
 EXTENDED = 0xAB             # CSP's extension: [0xAB][sub id][...]
 
 # CSPMessageTypeTcp / CSPMessageTypeUdp
