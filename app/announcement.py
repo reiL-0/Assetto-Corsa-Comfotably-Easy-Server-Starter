@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app import content, requirements
+from app import catalog, content, requirements
 from app.config import settings
 from app.db import SessionDep
 from app.models import Setting
@@ -36,10 +36,11 @@ VARS = {
     "practice_min": "Minutos de práctica", "qualify_min": "Minutos de clasificación", "race": "«15 vueltas» o «60 min»",
     "horario": "Bloque HORARIO", "formato": "Bloque FORMATO: cada sesión con su hora", "reacciones": "Invitación a reaccionar y los contadores",
     "counts": "Solo los contadores «✅ 3 · ❔ 1 · ❌ 0»", "yes": "Cuántos van", "maybe": "Cuántos indecisos", "no": "Cuántos no pueden",
+    "descargas": "Bloque DESCARGAS: enlaces a la página oficial del autor de la pista y los autos (los pone un admin en el catálogo), vacío si no hay",
     "requisitos": "Bloque REQUISITOS: CSP y lo que hay que instalar, con enlaces (se edita en Eventos & Calendario), vacío si no hay",
     "notas": "Bloque NOTAS (las notas y el info del calendario), vacío si no hay", "notes": "Las notas tal cual", "info": "El info del calendario tal cual",
 }
-DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n{clima_line}\n\n{horario}\n\n{formato}\n\n{requisitos}\n\n"
+DEFAULT = {"content": "🏁 **{title}** | {server}\n{role_line}\n\n" + LINE + "\n\n📍 Circuito: {track}\n🏎️ Auto: {cars}\n{clima_line}\n\n{horario}\n\n{formato}\n\n{requisitos}\n\n{descargas}\n\n"
                       + LINE + "\n\n{reacciones}\n\n{notas}"}
 
 
@@ -73,6 +74,12 @@ def weather_name(session: dict) -> str:
     return WEATHER_PRESETS.get(graphics, "")
 
 
+def _downloads(session: dict) -> str:
+    cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
+    links = catalog.download_links(session.get("track", ""), cars)
+    return ("⬇️ **DESCARGAS**\n" + "\n".join(f"• {'Pista' if x['kind'] == 'track' else 'Auto'} {x['name']}: <{x['url']}>" for x in links)) if links else ""
+
+
 def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "") -> dict[str, str]:
     """Every `{name}` of `VARS` for one event. `start_at` is when the practice opens; qualifying and race follow one after the other."""
     at = int(start_at)
@@ -101,6 +108,7 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
         "horario": f"⏰ **HORARIO**\n<t:{int(start_at)}:F> (<t:{int(start_at)}:R>)", "formato": ("🏁 **FORMATO**\n" + "\n".join(fmt)) if fmt else "",
         "reacciones": f"Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n{c}", "counts": c,
         "yes": str(counts["yes"]), "maybe": str(counts["maybe"]), "no": str(counts["no"]),
+        "descargas": _downloads(session),
         "requisitos": ("📦 **REQUISITOS**\n" + "\n".join(requirements.lines())) if requirements.lines() else "",
         "notas": f"📋 **NOTAS**\n{extra}" if extra else "", "notes": notes.strip(), "info": info.strip(),
     }

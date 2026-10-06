@@ -113,3 +113,17 @@ def test_scan_registers_content_that_was_installed_before_the_catalog():
     assert r["remaining"] == 0 and _item("cat_old")["holders"][0]["holder"] == "league"
     with Session(engine) as s:
         assert s.exec(select(ContentHolder).where(ContentHolder.holder == "league")).first()
+
+
+def test_the_official_pages_of_a_sessions_content_go_to_discord_and_the_event_pages():
+    from app import announcement
+    _up("dl_car")
+    h = _item("dl_car")["hash"]
+    assert api.put(f"{V}/catalog/{h}/source", json={"url": "https://www.overtake.gg/downloads/dl-car.1/"}).status_code == 200
+    _up("dl_nolink")
+    sess = {"track": "dl_track", "cars": ["dl_car", "dl_nolink"]}
+    assert api.get(f"{V}/catalog/downloads?track=dl_track&cars=dl_car,dl_nolink").json() == [{"kind": "car", "name": "dl_car", "url": "https://www.overtake.gg/downloads/dl-car.1/"}]
+    v = announcement.variables("T", "S", sess, 1.0, {"yes": 0, "maybe": 0, "no": 0})
+    assert "⬇️ **DESCARGAS**" in v["descargas"] and "<https://www.overtake.gg/downloads/dl-car.1/>" in v["descargas"] and "dl_nolink" not in v["descargas"]
+    assert announcement.variables("T", "S", {"track": "x", "cars": ["nothing"]}, 1.0, {"yes": 0, "maybe": 0, "no": 0})["descargas"] == ""
+    assert "{descargas}" in announcement.DEFAULT["content"]

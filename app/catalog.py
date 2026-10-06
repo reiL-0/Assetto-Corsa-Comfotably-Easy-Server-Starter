@@ -25,6 +25,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from app.db import SessionDep, engine
@@ -119,6 +120,23 @@ def _set_status(sess: Session, holder_id: int, status: str, action: str, note: s
     return {"holder": h.id, "status": h.status, "purged": purge_if_orphan(sess, h.hash, actor) if status in ("revoked", "disputed") else False}
 
 
+# --- where players get the content ---------------------------------------------------------------------------------------------
+
+def download_links(track: str, cars: list[str]) -> list[dict]:
+    """The official pages (set by an admin, `source_url`) of the track and cars of a session, for the «Descargar» buttons. We never serve the files:
+    only content with a known page is listed; the rest is left out (the organiser shares it)."""
+    out, seen = [], set()
+    try:
+        with Session(engine) as sess:
+            for b in sess.exec(select(ContentBlob).where(ContentBlob.source_url != "")):
+                if ((b.kind == "track" and b.name == track) or (b.kind == "car" and b.name in cars)) and (b.kind, b.name) not in seen:
+                    seen.add((b.kind, b.name))
+                    out.append({"kind": b.kind, "name": b.name, "url": b.source_url})
+    except OperationalError:   # the module-level SAMPLE of announcement.py is built before the tables exist
+        return []
+    return sorted(out, key=lambda x: (x["kind"] != "track", x["name"]))
+
+
 # --- proof of possession ------------------------------------------------------------------------------------------
 
 def _files(blob: ContentBlob) -> list[tuple[str, int]]:
@@ -178,6 +196,12 @@ def _item(sess: Session, b: ContentBlob) -> dict:
 @router.get("")
 def list_items(sess: SessionDep) -> list[dict]:
     return [_item(sess, b) for b in sess.exec(select(ContentBlob).order_by(ContentBlob.kind, ContentBlob.name))]
+
+
+@router.get("/downloads")
+def downloads(track: str = "", cars: str = "") -> list[dict]:
+    """Links to the official pages of a track and cars (comma-separated), for the event pages and the Discord announcement."""
+    return download_links(track, [c for c in cars.split(",") if c])
 
 
 @router.get("/events")
