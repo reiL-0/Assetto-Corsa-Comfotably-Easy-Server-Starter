@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from app import supervisor
-from app.content import _tracks_dir
+from app.content import _read_json, _tracks_dir
 
 router = APIRouter(prefix="/servers/{server_id}/acsm", tags=["acsm-compat"])
 
@@ -23,9 +23,15 @@ _NAME = re.compile(r"^[\w.\-]+$")  # one path segment: no separators, no "..": t
 @router.get("/api/live-timings/leaderboard.json")
 def leaderboard(server_id: int) -> dict:
     inst = supervisor.get(server_id)
-    if not inst or not inst.running or not inst.acsp:
+    if not inst or not inst.running:
         raise HTTPException(409, "server not running")  # 4xx, not 5xx: a stopped server is normal and must not count as a manager error; sites treat a failed fetch as "offline"
-    return inst.acsp.board.leaderboard()
+    if inst.acsp:
+        return inst.acsp.board.leaderboard()
+    out = inst.logboard.board.leaderboard()   # no plugin socket (yet): the same table read from acServer's log
+    info = _read_json(inst.cwd / "info.json")
+    track, _, config = str(info.get("track", "")).partition("-")
+    out.update(ServerName=info.get("name", ""), Track=track, TrackConfig=config)
+    return out
 
 
 def _asset(track: str, config: str, rel: str) -> Path:

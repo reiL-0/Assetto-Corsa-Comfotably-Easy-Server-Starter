@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shlex
 import signal
@@ -23,6 +24,9 @@ from pathlib import Path
 from app import integrity, metrics
 from app.config import settings
 from app.live import acsp
+from app.live.logboard import LogBoard
+
+log = logging.getLogger("acmanager.supervisor")
 
 IDLE_POLL = 15.0  # seconds between idle checks
 SAMPLE_EVERY = 60.0  # how often the number of players on track is recorded
@@ -65,6 +69,8 @@ class Instance:
         self.started_at = started_at or time.time()
         self.log: deque[str] = deque(maxlen=settings.log_lines)
         self.acsp: acsp.ACSPClient | None = None
+        self.logboard = LogBoard()   # the leaderboard read from the log: what the site shows while there is no ACSP socket
+        self._acsp_retry: asyncio.Task | None = None
         self.exit_code: int | None = None
         self.http_port = http_port
         self._stopping = False
@@ -110,6 +116,7 @@ class Instance:
         for line in data[:end].decode(errors="replace").splitlines():
             self.log.append(line)
             integrity.on_log_line(self.server_id, line)
+            self.logboard.feed(line)
 
     async def _watch(self) -> None:
         """Follow the log, and notice when the process ends on its own (not through `stop`)."""
@@ -124,6 +131,10 @@ class Instance:
         if not self._stopping and self.exit_code not in (0, -15):  # ended on its own and not by a stop/terminate
             metrics.log(self.server_id, "server_crash", value=self.exit_code, name=f"up {int(self.uptime)}s")
         self.pid_path.unlink(missing_ok=True)
+        if self.acsp:   # its socket would still hold our local port and the next start could not bind it
+            self.acsp.close()
+        if self._acsp_retry:
+            self._acsp_retry.cancel()
 
     async def _sample_online(self) -> None:
         """One sample a minute of how many are on track: the series behind peak / player-minutes."""
@@ -175,6 +186,29 @@ class Instance:
                 task.cancel()
         if self.acsp:
             self.acsp.close()
+        if self._acsp_retry:
+            self._acsp_retry.cancel()
+
+    async def connect_acsp(self, remote_port: int, local_port: int, host: str, car_slots: int = 0) -> None:
+        """Open our side of the plugin socket. If the port is not free (a socket of an earlier run closing) try a few times, then keep
+        trying in the background: the server runs either way (the site falls back to the log meanwhile) and must never be left unowned."""
+        for attempt in range(3):
+            try:
+                self.acsp = await acsp.connect(self.server_id, remote_port, local_port, host, car_slots=car_slots)
+                return
+            except OSError as e:
+                log.warning("ACSP socket for server %s not ready (%s), try %s", self.server_id, e, attempt + 1)
+                await asyncio.sleep(1)
+        self._acsp_retry = asyncio.create_task(self._retry_acsp(remote_port, local_port, host, car_slots))
+
+    async def _retry_acsp(self, remote_port: int, local_port: int, host: str, car_slots: int) -> None:
+        while self.running and not self.acsp:
+            await asyncio.sleep(5)
+            try:
+                self.acsp = await acsp.connect(self.server_id, remote_port, local_port, host, car_slots=car_slots)
+                log.info("ACSP socket for server %s connected after retrying", self.server_id)
+            except OSError:
+                continue
 
 
 # ponytail: in-memory registry, single process. After a manager restart `adopt` rebuilds it from the pid files.
@@ -214,9 +248,9 @@ async def start(
         )
     inst = Instance(server_id, cwd, proc=proc, http_port=http_port)
     (cwd / "server.pid").write_text(json.dumps({"pid": proc.pid, "started_at": inst.started_at}))
+    _instances[server_id] = inst   # registered before the plugin socket: a failure there must not leave a running acServer nobody owns
     if acsp_local_port and acsp_remote_port:
-        inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host)
-    _instances[server_id] = inst
+        await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host)
     metrics.log(server_id, "server_start")
     return inst
 
@@ -242,9 +276,9 @@ async def adopt(
         return None
     log_size = (cwd / "server.log").stat().st_size if (cwd / "server.log").exists() else 0
     inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384), http_port=http_port)
-    if acsp_local_port and acsp_remote_port:
-        inst.acsp = await acsp.connect(server_id, acsp_remote_port, acsp_local_port, acsp_host, car_slots=car_slots)
     _instances[server_id] = inst
+    if acsp_local_port and acsp_remote_port:
+        await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host, car_slots)
     metrics.log(server_id, "server_adopted", name=f"pid {pid}")
     return inst
 

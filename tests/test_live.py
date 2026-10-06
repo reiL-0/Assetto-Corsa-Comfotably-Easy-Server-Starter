@@ -195,3 +195,41 @@ def test_a_banned_player_is_kicked_when_connecting():
     c._apply({"type": "new_connection", "car_id": 5, "driver_name": "Troll", "driver_guid": "76561198000000077", "car_model": "bmw", "car_skin": "red"})
     c._apply({"type": "new_connection", "car_id": 6, "driver_name": "Ana", "driver_guid": "76561198000000078", "car_model": "bmw", "car_skin": "red"})
     assert sent == [acsp_mod.encode_kick_user(5)]
+
+
+LOG = """Looking for available slot by name for GUID 76561199225182067 emka_bmw
+Dispatching TCP message to emka_bmw (0) [C.JASSO []]
+Looking for available slot by name for GUID 76561198404723781 emka_bmw
+Dispatching TCP message to emka_bmw (1) [15 | Rafael.poma []]
+SENDING session name : Qualify
+SENDING session index : 0
+SENDING session type : 2
+SENDING session time : 15
+SENDING session laps : 0
+LAP WITH CUTS:C.JASSO, 8 cuts, laptime 328740
+SendLapCompletedMessage
+1) C.JASSO BEST: 1:31:250 TOTAL: 3:05:100 Laps:2 SesID:0 HasFinished:false
+2) 15 | Rafael.poma BEST: 16666:39:999 TOTAL: 0:00:000 Laps:0 SesID:1 HasFinished:false
+3)  BEST: 16666:39:999 TOTAL: 0:00:000 Laps:0 SesID:2 HasFinished:false
+Some other line
+""".splitlines()
+
+
+def test_leaderboard_is_read_from_the_server_log():
+    from app.live.logboard import LogBoard
+    lb = LogBoard()
+    for line in LOG:
+        lb.feed(line)
+    out = lb.board.leaderboard()
+    assert out["Name"] == "Qualify" and out["Type"] == 2 and out["Time"] == 15
+    a, b = out["ConnectedDrivers"]
+    assert (a["CarInfo"]["DriverName"], a["CarInfo"]["DriverGUID"], a["CarInfo"]["CarModel"]) == ("C.JASSO", "76561199225182067", "emka_bmw")
+    assert a["Cars"]["emka_bmw"]["BestLap"] == 91250 * 1_000_000 and a["TotalNumLaps"] == 2 and a["Cars"]["emka_bmw"]["TotalLapTime"] == 185100 * 1_000_000
+    assert b["Cars"]["emka_bmw"]["BestLap"] == 0 and b["CarInfo"]["DriverGUID"] == "76561198404723781"   # "no lap yet" is not a time
+    lb.feed("NextSession")   # a new session: everybody back to zero, still connected
+    assert lb.board.leaderboard()["ConnectedDrivers"][0]["TotalNumLaps"] == 0
+    lb.feed("SendLapCompletedMessage")
+    lb.feed("1) C.JASSO BEST: 1:30:000 TOTAL: 1:30:000 Laps:1 SesID:0 HasFinished:false")   # 15 | Rafael.poma left: not in the block any more
+    lb.feed("x")
+    names = [d["CarInfo"]["DriverName"] for d in lb.board.leaderboard()["ConnectedDrivers"]]
+    assert names == ["C.JASSO"]

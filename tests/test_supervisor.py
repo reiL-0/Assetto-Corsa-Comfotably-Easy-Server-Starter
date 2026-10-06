@@ -98,3 +98,36 @@ def test_adopt_ignores_stale_and_foreign_pid_files(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
 
+
+
+def test_a_busy_plugin_port_does_not_leave_the_server_unowned(tmp_path, monkeypatch):
+    """The ACSP socket could not be bound (an earlier run's socket still closing): the acServer is still registered, and the socket is
+    connected as soon as the port frees up."""
+    script = tmp_path / "fake_acserver.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    calls, client = [], object()
+
+    async def fake_connect(*a, **k):
+        calls.append(1)
+        if len(calls) <= 3:
+            raise OSError("could not bind to local_addr")
+        return client
+    monkeypatch.setattr(acsp, "connect", fake_connect)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(supervisor.asyncio, "sleep", lambda s: real_sleep(0.01))
+
+    async def scenario():
+        inst = await supervisor.start(98, tmp_path, acsp_local_port=1, acsp_remote_port=2)
+        try:
+            assert supervisor.get(98) is inst and inst.acsp is None   # registered even though the socket failed
+            for _ in range(100):
+                if inst.acsp:
+                    break
+                await real_sleep(0.02)
+            assert inst.acsp is client
+        finally:
+            inst.acsp = None   # (a stand-in object: nothing to close)
+            await supervisor.stop(98)
+
+    asyncio.run(scenario())
