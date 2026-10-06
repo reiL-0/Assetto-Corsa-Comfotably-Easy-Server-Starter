@@ -25,34 +25,72 @@ def test_weather_command_round_trip_and_size():
     assert cspcmd.deserialize(cspcmd.handshake_in(3898, True)) == (0, b"\x3a\x0f\x00\x00\x01")
 
 
-def test_director_broadcasts_the_plan_and_greets_a_car_that_finished_loading(monkeypatch):
+def _board(session_type, elapsed_ms):
+    class B:
+        session = {"session_type": session_type}
+
+        @staticmethod
+        def elapsed_ms():
+            return elapsed_ms
+    return B
+
+
+def test_director_plays_the_entries_of_the_running_session_and_greets_late_cars(monkeypatch):
     sent = []
 
     class Inst:
         running = True
-        acsp = type("C", (), {"send": staticmethod(sent.append), "on_client_loaded": None})()
+        server_id = 1
+        acsp = type("C", (), {"send": staticmethod(sent.append), "on_client_loaded": None, "board": _board(3, 0)})()
     monkeypatch.setattr(cspweather, "PERIOD", 0.01)
+    plan = {"mode": "entries", "transition_s": 1, "entries": [
+        {"type": 15, "duration_min": 0.05, "sessions": ["race"], "ambient": 24}, {"type": 7, "sessions": ["race"], "ambient": 16, "wind_max": 10},
+        {"type": 8, "sessions": ["qualify"]}]}
 
     async def scenario():
-        d = cspweather.WeatherDirector(Inst, {"steps": [[0, 15], [0.05, 7]], "transition_s": 1}, {"SERVER": {"SUN_ANGLE": 16, "TIME_OF_DAY_MULT": 10}})
-        await asyncio.sleep(0.3)
+        d = cspweather.WeatherDirector(Inst, plan, {"SERVER": {"SUN_ANGLE": 16, "TIME_OF_DAY_MULT": 10}})
+        await asyncio.sleep(0.2)
         Inst.acsp.on_client_loaded(3)     # the director hooked itself into the ACSP client
+        Inst.acsp.board = _board(1, 0)    # practice has no entry: nothing is sent, the server's own weather applies
+        n = len(sent)
+        await asyncio.sleep(0.1)
+        assert len(sent) <= n + 1
         Inst.running = False
         await asyncio.sleep(0.05)
         d.stop()
     asyncio.run(scenario())
     chats = [m for m in sent if m[0] == acsp.BROADCAST_CHAT]
     greets = [m for m in sent if m[0] == acsp.SEND_CHAT]
-    assert len(chats) >= 3 and len(greets) == 1 and greets[0][1] == 3                           # the late car gets a command addressed to it
-    assert greets[0][2:] in [m[1:] for m in chats]                                              # ...the same text the plan last broadcast
+    assert len(chats) >= 3 and len(greets) == 1 and greets[0][1] == 3 and greets[0][2:] in [m[1:] for m in chats]
+
+
+def test_timeline_blends_entries_and_live_types_map_from_wmo_codes():
+    from random import Random
+    from app.live.weatherplan import Entry, Timeline, Weather, live_type
+    tl = Timeline([Entry(type=15, duration_min=10), Entry(type=7, duration_min=5), Entry(type=15)], 60, Random(1))
+    assert tl.at(0) == (0, 0, 0.0) and tl.at(570) == (0, 1, 0.5) and tl.at(620) == (1, 1, 0.0) and tl.at(870) == (1, 2, 0.5) and tl.at(900) == (2, 2, 0.0) and tl.at(5000) == (2, 2, 0.0)
+    assert (live_type(0, 5), live_type(2, 50), live_type(3, 95), live_type(61, 100), live_type(65, 100), live_type(95, 100), live_type(45, 100)) == (15, 17, 19, 6, 8, 1, 20)
+    w = Weather({"mode": "live", "transition_s": 10, "live": {"lat": 1, "lon": 2}})
+    assert w.step(1.0) is None                                                      # no data yet
+    w.live = {"type": 15, "ambient": 20, "wind_kmh": 5, "wind_deg": 90, "humidity": 0.4, "pressure": 1010}
+    assert w.step(1.0)["current"] == 15
+    w.live = {**w.live, "type": 7}
+    s = w.step(5.0)
+    assert (s["current"], s["upcoming"]) == (15, 7) and 0.4 < s["transition"] < 0.6 and s["wind_kmh"] == 5 and s["pressure"] == 1010
+    for _ in range(3):
+        s = w.step(5.0)
+    assert (s["current"], s["transition"]) == (7, 0.0) and s["rain"] > 0.5 and s["wetness"] > 0           # blended in, raining, the track wets
 
 
 def test_weather_plan_endpoints_validate_and_store():
     sid = api.post(f"{V}/servers", json={"name": "Wx plan"}).json()["id"]
-    bad = [{"steps": []}, {"steps": [[10, 15], [5, 7]]}, {"steps": [[0, 99]]}]
+    bad = [{"mode": "entries"}, {"mode": "live"}, {"entries": [{"type": 99}]}, {"entries": [{"sessions": ["warmup"]}]}, {"mode": "live", "live": {"lat": 99, "lon": 0}}]
     assert all(api.put(f"{V}/servers/{sid}/weather_plan", json=b).status_code == 422 for b in bad)
-    plan = {"steps": [[0, 15], [120, 7], [420, 15]], "transition_s": 40, "loop_s": 600, "ambient": 20}
-    assert api.put(f"{V}/servers/{sid}/weather_plan", json=plan).json()["weather_plan"] == plan
+    plan = {"mode": "entries", "transition_s": 40, "entries": [{"type": 15, "duration_min": 5, "sessions": ["race"], "ambient": 26, "road": 11},
+                                                               {"type": 7, "sessions": ["race"], "wind_max": 12}]}
+    stored = api.put(f"{V}/servers/{sid}/weather_plan", json=plan).json()["weather_plan"]
+    assert stored["transition_s"] == 40 and stored["entries"][0]["road"] == 11 and stored["entries"][1]["duration_min"] == 0 and stored["live"] is None
+    live = {"mode": "live", "live": {"lat": 47.22, "lon": 14.76, "refresh_min": 5}}
+    assert api.put(f"{V}/servers/{sid}/weather_plan", json=live).json()["weather_plan"]["live"]["refresh_min"] == 5
     assert api.post(f"{V}/servers/{sid}/csp_weather", json={"current": 7, "rain": 0.6}).status_code == 409   # not running: nothing to send to
-    assert supervisor.get(sid) is None
     assert api.delete(f"{V}/servers/{sid}/weather_plan").status_code == 204 and api.get(f"{V}/servers/{sid}").json()["weather_plan"] is None

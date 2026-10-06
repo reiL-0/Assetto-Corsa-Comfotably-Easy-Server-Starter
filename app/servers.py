@@ -497,16 +497,40 @@ class WakeIn(BaseModel):
     mode: Literal["off", "window", "always"]
 
 
-class WeatherPlanIn(BaseModel):
-    steps: list[tuple[float, int]] = Field(min_length=1, max_length=20)   # (seconds from the start of the plan, WeatherFX type id 0..32: 15 clear, 7 rain, 8 heavy rain...)
-    transition_s: float = Field(default=30, ge=1, le=600)                  # each change is a smooth blend that ends at the step's second
-    loop_s: float = Field(default=0, ge=0, le=86400)                       # repeat every this many seconds (0 = once)
+class WeatherEntryIn(BaseModel):
+    """One weather of the plan, as in AC Server Manager's editor (app/live/weatherplan.py)."""
+
+    type: int = Field(default=15, ge=0, le=32)          # WeatherFX type id: 15 clear, 7 rain, 8 heavy rain, 1 thunderstorm...
+    duration_min: float = Field(default=0, ge=0, le=1440)   # real minutes before moving to the next one; 0 = until the session ends
+    sessions: list[Literal["practice", "qualify", "race"]] = ["practice", "qualify", "race"]
     ambient: float = Field(default=20, ge=-10, le=50)
+    road: float = Field(default=6, ge=-20, le=40)        # added to the ambient temperature
+    ambient_var: float = Field(default=0, ge=0, le=20)
+    road_var: float = Field(default=0, ge=0, le=20)
+    wind_min: float = Field(default=0, ge=0, le=40)      # m/s
+    wind_max: float = Field(default=0, ge=0, le=40)
+    wind_dir: float = Field(default=0, ge=0, le=360)
+    wind_dir_var: float = Field(default=0, ge=0, le=180)
+
+
+class LiveWeatherIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    refresh_min: float = Field(default=10, ge=1, le=120)
+
+
+class WeatherPlanIn(BaseModel):
+    mode: Literal["entries", "live"] = "entries"        # entries: the list below per session; live: the real weather of `live` (lat, lon)
+    entries: list[WeatherEntryIn] = Field(default=[], max_length=20)
+    transition_s: float = Field(default=60, ge=1, le=900)   # each change is a smooth blend of this many seconds
+    live: LiveWeatherIn | None = None
 
     @model_validator(mode="after")
-    def _ordered(self) -> WeatherPlanIn:
-        if any(not 0 <= t <= 32 for _, t in self.steps) or [x for x, _ in self.steps] != sorted(x for x, _ in self.steps):
-            raise ValueError("steps: seconds in ascending order and WeatherFX types 0..32")
+    def _complete(self) -> WeatherPlanIn:
+        if self.mode == "entries" and not self.entries:
+            raise ValueError("entries: at least one weather")
+        if self.mode == "live" and not self.live:
+            raise ValueError("live: latitude and longitude are required")
         return self
 
 
@@ -518,7 +542,8 @@ def _restart_weather(s: Server) -> None:
 
 @router.put("/{server_id}/weather_plan", response_model=ServerOut)
 def set_weather_plan(server_id: int, body: WeatherPlanIn, sess: SessionDep) -> ServerOut:
-    """The weather this server plays to CSP clients (hidden chat commands, see app/live/cspweather.py): starts at once on a running server, otherwise at its next start."""
+    """The weather this server plays to CSP clients (hidden chat commands, see app/live/cspweather.py): a list of weathers per session (as in AC Server Manager)
+    or the live weather of a place. Starts at once on a running server, otherwise at its next start."""
     s = _get(sess, server_id)
     s.weather_plan = body.model_dump()
     sess.add(s)
