@@ -9,7 +9,8 @@ from __future__ import annotations
 import struct
 
 # ACServerProtocol ids
-NEW_CAR_CONNECTION = 0x3D   # the server's handshake answer (HandshakeResponse)
+REQUEST_NEW_CONNECTION = 0x3D   # the client's handshake request
+NEW_CAR_CONNECTION = 0x3E       # the server's handshake answer (HandshakeResponse); the first spike used 0x3D here by mistake, so nothing was edited or injected
 CAR_LIST = 0x40
 CAR_CONNECT = 0x4E          # first UDP datagram of a client: [id][session id]
 WEATHER_UPDATE = 0x78       # vanilla weather: ambient, road, graphics name (UTF-32), wind
