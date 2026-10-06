@@ -189,6 +189,15 @@ through it. Every server log line goes through `integrity.on_log_line`: a checks
     [Service]
     KillMode=process
 
+To keep acServer from losing time to the rest of the machine (web, backups, scrapers) when it spikes, give the service priority and its own cores; the acServers inherit it:
+
+    # /etc/systemd/system/acm.service.d/priority.conf
+    [Service]
+    Nice=-5
+    CPUAffinity=1 2 3
+
+(then `systemctl daemon-reload && systemctl restart acm`; an acServer already running keeps its old settings until it is restarted, or apply them by hand: `renice -n -5 -p <pid>` and `taskset -a -cp 1-3 <pid>`). acServer already runs several threads; its `Warning, server CPU overload` lines in `server.log` are the thing to watch.
+
 ### Penalty announcements
 
 Adding a penalty (`POST .../results/{file}/penalties`) posts the decision to `ACM_DISCORD_WEBHOOK` (server, session and track, driver, effect, the steward's reason; the steward's name is not shown), and removing one posts that it was withdrawn (`app/discord.py` `penalty_message`). A refused request posts nothing.

@@ -286,3 +286,33 @@ def test_a_running_server_is_relayed_and_still_gets_its_description(monkeypatch)
         asyncio.run(scenario())
     finally:
         up.shutdown()
+
+
+def test_acserver_http_answers_are_reused_for_a_few_seconds(monkeypatch):
+    from app import wake
+    calls = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+    monkeypatch.setattr(wake.urllib.request, "urlopen", lambda url, timeout: calls.append(url) or Resp(b'{"clients":1}'))
+    wake._upstream_cache.clear()
+    assert wake._upstream(9700, "/INFO") == wake._upstream(9700, "/INFO") == b'{"clients":1}' and len(calls) == 1
+    wake._upstream(9700, "/JSON|1")   # another path is another entry
+    assert len(calls) == 2
+    t = wake.time.monotonic()
+    monkeypatch.setattr(wake.time, "monotonic", lambda: t + wake.UPSTREAM_TTL + 1)
+    wake._upstream(9700, "/INFO")
+    assert len(calls) == 3                                   # expired: asked again
+    monkeypatch.setattr(wake.urllib.request, "urlopen", lambda url, timeout: (_ for _ in ()).throw(OSError()))
+    wake._upstream_cache.clear()
+    assert wake._upstream(9700, "/INFO") == b"" and (9700, "/INFO") not in wake._upstream_cache   # failures are not kept

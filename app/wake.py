@@ -100,13 +100,25 @@ def _abort(writer: asyncio.StreamWriter) -> None:
     writer.close()
 
 
+UPSTREAM_TTL = 5.0   # seconds an answer of acServer's HTTP port is reused: every player's game asks the lobby every ~15 s and each ask lands on acServer's main loop
+_upstream_cache: dict[tuple[int, str], tuple[float, bytes]] = {}
+
+
 def _upstream(port: int, path: str) -> bytes:
-    """acServer's own answer (its internal HTTP port); empty when it does not answer."""
+    """acServer's own answer (its internal HTTP port), reused for UPSTREAM_TTL seconds; empty when it does not answer."""
+    now = time.monotonic()
+    hit = _upstream_cache.get((port, path))
+    if hit and now - hit[0] < UPSTREAM_TTL:
+        return hit[1]
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
-            return r.read()
+            body = r.read()
     except (OSError, ValueError):
         return b""
+    if len(_upstream_cache) > 200:   # /JSON|<guid> has one key per player that ever asked
+        _upstream_cache.clear()
+    _upstream_cache[(port, path)] = (now, body)
+    return body
 
 
 def details(s: Server, live: bytes | None) -> dict:
