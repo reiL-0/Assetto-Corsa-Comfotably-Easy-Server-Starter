@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session
 
 from app.db import SessionDep, engine
@@ -40,8 +41,11 @@ class RequirementsIn(BaseModel):
 
 
 def current() -> dict:
-    with Session(engine) as s:
-        row = s.get(Setting, KEY)
+    try:
+        with Session(engine) as s:
+            row = s.get(Setting, KEY)
+    except OperationalError:   # the tables do not exist yet (announcement.SAMPLE is built when the module is imported, before init_db)
+        row = None
     return {"csp_build": 0, "items": [], **(row.value if row and row.value else {})}
 
 
