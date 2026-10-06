@@ -245,6 +245,7 @@ async def start(
     *,
     cpu_percent: int | None = None,
     mem_mb: int | None = None,
+    cmd: str | None = None,   # argv string of this server's acServer version (app/binaries.py); None = ACM_ACSERVER_CMD
     acsp_local_port: int | None = None,
     acsp_remote_port: int | None = None,
     acsp_host: str = "127.0.0.1",
@@ -253,7 +254,7 @@ async def start(
     current = _instances.get(server_id)
     if current and current.running:
         raise RuntimeError("already running")
-    if not settings.acserver_cmd:
+    if not (cmd or settings.acserver_cmd):
         raise RuntimeError("ACM_ACSERVER_CMD is not configured")
     for hook in before_start:
         hook(server_id)
@@ -264,7 +265,7 @@ async def start(
         log_path.replace(cwd / "server.log.1")  # the previous run stays readable for one more start
     with open(log_path, "wb") as out:
         proc = await asyncio.create_subprocess_exec(
-            *limit_prefix(server_id, cpu_percent, mem_mb), *shlex.split(settings.acserver_cmd),
+            *limit_prefix(server_id, cpu_percent, mem_mb), *shlex.split(cmd or settings.acserver_cmd),
             cwd=cwd,
             env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"},   # (systemd-run --user finds its bus there)
             stdin=asyncio.subprocess.DEVNULL,

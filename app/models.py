@@ -51,11 +51,28 @@ class Server(SQLModel, table=True):
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...
     anchor_at: float | None = None   # ...and when it started (unix s); the session clock runs from here even when the server is off
+    acserver_binary_id: int | None = None  # which registered acServer version this server runs (app/binaries.py); None = the global ACM_ACSERVER_CMD
     cpu_limit: int | None = None  # CPU quota of this server in % of one core (100 = one core); None = unlimited (supervisor.limit_prefix)
     mem_limit_mb: int | None = None  # RAM cap in MB (the kernel kills the server above it); None = unlimited
     wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+class AcBinary(SQLModel, table=True):
+    """An official acServer build we know by its SHA-256 (app/binaries.py). A client's upload is compared with these and then discarded: servers always run
+    OUR copy of the matching version, never an uploaded file."""
+
+    __tablename__ = "ac_binaries"
+
+    id: int | None = Field(default=None, primary_key=True)
+    version: str  # a label, e.g. "1.16.4"
+    platform: str  # linux | windows (a windows build is only ever compared with, it never runs here)
+    sha256: str = Field(index=True)
+    dir: str = ""  # linux: the folder holding `acServer` and its `system/`; where servers of this version run from
+    verified: bool = False  # compared with a clean official install (False = hashed from the folder we were given)
+    note: str = ""
+    created_at: datetime = Field(default_factory=_now)
 
 
 class Event(SQLModel, table=True):

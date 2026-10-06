@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, select
 
-from app import content, csp, integrity, supervisor, timeline
+from app import binaries, content, csp, integrity, supervisor, timeline
 from app.live import cspcmd, cspweather
 from app.auth import require
 from app.config import settings
@@ -46,6 +46,7 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    binary_id: int | None = None  # registered acServer version it runs (None = the global install)
     limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
     integrity_extras: bool = False
@@ -73,6 +74,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        binary_id=s.acserver_binary_id,
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
@@ -139,7 +141,7 @@ def _alloc_base_port(sess: SessionDep) -> int:
     raise HTTPException(507, "no free port block in configured range")
 
 
-def _write_instance(s: Server) -> Path:
+def _write_instance(s: Server, system_from: Path | None = None) -> Path:
     d = Path(settings.data_dir) / "instances" / str(s.id)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     (d / "results").mkdir(exist_ok=True)
@@ -147,8 +149,12 @@ def _write_instance(s: Server) -> Path:
     bin_dir = settings.acserver_dir()
     for name in ("content", "system"):
         link = d / name
-        if bin_dir and not link.exists() and (bin_dir / name).is_dir():
-            link.symlink_to(bin_dir / name)
+        src = (system_from or bin_dir) if name == "system" else bin_dir   # `system/` follows the server's acServer version, `content/` is shared
+        if src and (src / name).is_dir():
+            if link.is_symlink() and link.resolve() != (src / name).resolve():
+                link.unlink()   # the server was switched to another acServer version
+            if not link.exists():
+                link.symlink_to(src / name)
     (d / "cfg" / "server_cfg.ini").write_text(render_server_cfg(s))
     (d / "cfg" / "entry_list.ini").write_text(render_entry_list(s))
     welcome = d / "cfg" / "welcome.txt"
@@ -481,9 +487,11 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
     planned, planned_at = timeline.server_position(s), time.time()   # where the session clock is, read before acServer re-anchors it
     p = _ports(s.base_port)
     try:
+        bdir = binaries.dir_for(sess, s.acserver_binary_id)   # 409 if the chosen version cannot run
         inst = await supervisor.start(
             server_id,
-            _write_instance(s),
+            _write_instance(s, bdir or settings.acserver_dir()),
+            cmd=binaries.command_for(sess, s.acserver_binary_id),
             acsp_remote_port=p["plugin"],
             acsp_local_port=p["plugin_local"],
             http_port=p["http_internal"],
@@ -609,6 +617,22 @@ def set_csp_extra(server_id: int, body: CspExtraIn, sess: SessionDep) -> ServerO
 class LimitsIn(BaseModel):
     cpu_percent: int | None = Field(default=None, ge=10, le=800)   # 100 = one core; None = unlimited
     mem_mb: int | None = Field(default=None, ge=256, le=65536)     # None = unlimited
+
+
+class BinaryChoiceIn(BaseModel):
+    binary_id: int | None = None   # a registered Linux build (app/binaries.py); None = the global install
+
+
+@router.put("/{server_id}/binary", response_model=ServerOut)
+def set_binary(server_id: int, body: BinaryChoiceIn, sess: SessionDep) -> ServerOut:
+    """The acServer version this server runs, from the next start. 409 when that build cannot run on this machine."""
+    s = _get(sess, server_id)
+    binaries.dir_for(sess, body.binary_id)
+    s.acserver_binary_id = body.binary_id
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
 
 
 @router.put("/{server_id}/limits", response_model=ServerOut)
