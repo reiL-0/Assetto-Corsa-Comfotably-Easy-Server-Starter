@@ -21,7 +21,7 @@ los pilotos y un acServer sin modificar, y añade esos mensajes. Es un experimen
 ## Lo aprendido en las pruebas (2026-10-06)
 - Entrar por el relé funciona (TCP, UDP y lobby); un ping del lobby contestado por acServer destapaba su puerto interno (ahora lo contesta el relé).
 - El log de CSP del cliente (`custom_shaders_patch.log`) dice **«Weather FX: operate in fallback mode»** y, con el apretón de manos de CSP inyectado justo tras la respuesta del servidor, **«Requesting car list :: unexpected packet received»**: llegaba antes de tiempo y se ignoraba. AssettoServer lo manda dentro de su «primera actualización» (junto al clima vainilla): por eso `inject_after` es ahora `weather` (tras el primer `WeatherUpdate` del servidor).
-- Los paquetes UDP de clima se envían cada segundo pero el cliente no los aplicaba: con el apretón mal colocado el cliente no estaba en modo servidor.
+- **Corrección:** el «tipo 7» que el script de prueba informó no venía del relé: el acServer de prueba tenía un bloque `7_heavy_clouds_type=7` y lo eligió él al empezar la clasificación (el log del servidor lo muestra). **No hay todavía ninguna prueba de que lo inyectado tenga efecto** (el cliente sigue en «fallback mode», sin lluvia ni mojado). Antes de repetir hay que dejar un único bloque de clima en el servidor de prueba y comparar los bytes con los de un AssettoServer real.
 
 ## Lo que la prueba debe responder
 1. ¿El cliente acepta el apretón de manos CSP inyectado (cuándo: tras el apretón o tras la lista de autos) y el valor `HANDSHAKE_IN = 0` es el correcto?
