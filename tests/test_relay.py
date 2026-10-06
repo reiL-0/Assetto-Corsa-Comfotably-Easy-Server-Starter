@@ -43,7 +43,7 @@ def test_udp_relay_forwards_both_ways_and_injects_only_after_the_handshake():
                 got.append((data, addr))
                 self.t.sendto(b"srv:" + data, addr)
         srv, _ = await loop.create_datagram_endpoint(Server, local_addr=("127.0.0.1", 0))
-        relay = UdpRelay(srv.get_extra_info("sockname")[1])
+        relay = UdpRelay(srv.get_extra_info("sockname")[1], lobby_http_port=9681)
         pub, _ = await loop.create_datagram_endpoint(lambda: relay, local_addr=("127.0.0.1", 0))
         pub_addr = pub.get_extra_info("sockname")
 
@@ -59,8 +59,9 @@ def test_udp_relay_forwards_both_ways_and_injects_only_after_the_handshake():
         ta.sendto(b"\x4e\x01")     # A connects (CAR_CONNECT)
         tb.sendto(b"\xc8")         # B only pinged the lobby
         await asyncio.sleep(0.3)
-        assert a.rx[0][0] == b"srv:\x4e\x01" and a.rx[0][1] == pub_addr and b.rx[0][0] == b"srv:\xc8"   # replies come from the relay's address
-        assert len({addr for _, addr in got}) == 2                                                      # acServer sees one endpoint per client
+        assert a.rx[0][0] == b"srv:\x4e\x01" and a.rx[0][1] == pub_addr                                 # replies come from the relay's address
+        assert b.rx[0][0] == b"\xc8" + struct.pack("<H", 9681) and all(d != b"\xc8" for d, _ in got)    # the lobby ping is answered by the relay with its own HTTP port
+        assert len({addr for _, addr in got}) == 1                                                      # acServer sees one endpoint per client that reached it
         assert relay.inject(b"WEATHER") == 1
         await asyncio.sleep(0.2)
         assert (b"WEATHER", pub_addr) in a.rx and all(d != b"WEATHER" for d, _ in b.rx)

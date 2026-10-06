@@ -8,6 +8,7 @@ address; packets the relay injects leave from that same socket.
 from __future__ import annotations
 
 import asyncio
+import struct
 import time
 
 IDLE = 90.0   # seconds of silence after which a client's upstream socket is closed
@@ -22,8 +23,9 @@ class _Upstream(asyncio.DatagramProtocol):
 
 
 class UdpRelay(asyncio.DatagramProtocol):
-    def __init__(self, upstream_port: int, upstream_host: str = "127.0.0.1") -> None:
+    def __init__(self, upstream_port: int, upstream_host: str = "127.0.0.1", lobby_http_port: int | None = None) -> None:
         self.upstream = (upstream_host, upstream_port)
+        self.lobby_http_port = lobby_http_port   # the HTTP port players must be told about: acServer would answer a ping with its internal one
         self.public: asyncio.DatagramTransport | None = None
         self.clients: dict[tuple, tuple[asyncio.DatagramTransport, float]] = {}
         self.established: set[tuple] = set()   # clients that sent CAR_CONNECT: past the handshake, safe to inject into
@@ -34,6 +36,10 @@ class UdpRelay(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr: tuple) -> None:
         self.n_in += 1
+        if data[:1] == b"\xc8" and self.lobby_http_port:   # the lobby ping (Content Manager, LAN scan): answer it ourselves, `0xC8` + the public HTTP port
+            self.public.sendto(struct.pack("<BH", 0xC8, self.lobby_http_port), addr)
+            self.n_out += 1
+            return
         up = self.clients.get(addr)
         if up is None:
             asyncio.ensure_future(self._open(addr, data))

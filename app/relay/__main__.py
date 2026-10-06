@@ -38,7 +38,7 @@ async def main() -> None:
     args = a.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     loop = asyncio.get_running_loop()
-    udp = UdpRelay(args.udp)
+    udp = UdpRelay(args.udp, lobby_http_port=args.public + 1)
     await loop.create_datagram_endpoint(lambda: udp, local_addr=("0.0.0.0", args.public))
     tcp = TcpRelay(args.tcp, args.public, inject_after=None if args.inject_after == "none" else args.inject_after, min_csp=args.min_csp,
                    weather_fx=not args.no_weather_fx_flag)
