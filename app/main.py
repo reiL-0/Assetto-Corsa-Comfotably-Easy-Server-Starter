@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
-from app import integrity, metrics, schedule, servers, wake
+from app import integrity, metrics, resourcelog, schedule, servers, wake
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
@@ -37,9 +37,11 @@ async def lifespan(_app: FastAPI):
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     ticker = asyncio.create_task(schedule.run_forever())
     waking = asyncio.create_task(wake.run_forever())
+    sampling = asyncio.create_task(resourcelog.run_forever())   # a plain log file of CPU/RAM/steal per server, outside the pages
     yield
     ticker.cancel()
     waking.cancel()
+    sampling.cancel()
 
 
 app = FastAPI(

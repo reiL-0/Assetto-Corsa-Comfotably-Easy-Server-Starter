@@ -383,6 +383,8 @@ UTC and decides where a day ends.
 | `ACM_CORS_ORIGINS` | `[]`                       | JSON list of allowed cross-origin sites |
 | `ACM_ACSERVER_CMD` | `""`                       | argv for the AC dedicated server; empty = start disabled. Its directory must hold `content/` and `system/` (symlinked into each instance) |
 | `ACM_LIMITS_SCOPE` | `""` | where the per-server CPU/RAM caps (`PUT /servers/{id}/limits`) are enforced: `""` = not enforced, `user` = the manager user's systemd user manager (needs `loginctl enable-linger <user>`), `system` = the system manager (manager running as root). acServer then starts inside `systemd-run --scope -p CPUQuota=… -p MemoryMax=…`; takes effect at the next start. |
+| `ACM_RESOURCE_LOG_SECONDS` | `30` | how often CPU/RAM/steal per game server are appended to `<data_dir>/logs/resources-*.jsonl` (app/resourcelog.py); `0` = off. |
+| `ACM_RESOURCE_LOG_KEEP_DAYS` | `30` | days of resource log files kept. |
 | `ACM_PORT_RANGE_START` / `ACM_PORT_RANGE_END` | `9600` / `9700` | pool for per-server port blocks (4 apart) |
 | `ACM_LOG_LINES`    | `500`                      | per-instance stdout ring buffer size |
 | (content dir) | | with `ACM_ACSERVER_CMD` set, `content/` **is the acServer's own** (uploads land where the server reads them); otherwise `<data_dir>/content`. Big archives: copy to `<data_dir>/inbox/` and `POST /content/tracks/import {"file": "x.rar"}` (Cloudflare caps uploads at 100 MB). `.rar` needs `bsdtar` (`apt install libarchive-tools`). |
