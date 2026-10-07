@@ -1,0 +1,12 @@
+[Unit]
+Description=Aviso a Discord si el manager, el respaldo o el disco fallan
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/acm.env
+EnvironmentFile=-/etc/acm-watchdog.env
+ExecStart=/usr/bin/python3 /opt/acm/watchdog.py
+StateDirectory=acm-watchdog
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
