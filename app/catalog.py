@@ -77,9 +77,12 @@ def check_not_blocked(hash_: str) -> None:
 _FILE_EXT = (".zip", ".rar", ".7z", ".tar", ".gz", ".exe", ".msi")
 
 
-def check_source(url: str) -> str:
-    """The modder's page for the «Descargar» button: http(s) and a page, never a direct link to the archive (we point to the author, we do not hand out the file)."""
+def check_source(url: str, official: bool = False) -> str:
+    """The modder's page for the «Descargar» button: http(s) and a page, never a direct link to the archive (we point to the author, we do not hand out the file).
+    `official`: whoever gives the link confirms it is the author's official download page (kept in the catalog log)."""
     url = url.strip()
+    if url and not official:
+        raise HTTPException(400, "confirm that source_url is the official download page (source_official=true)")
     if url and (not re.fullmatch(r"https?://\S+", url) or len(url) > 500 or urlsplit(url).path.lower().endswith(_FILE_EXT)):
         raise HTTPException(400, "source_url must be the modder's page (http/https), not a direct link to the file")
     return url
@@ -94,6 +97,7 @@ def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holde
         blob = sess.get(ContentBlob, hash_)
         if source_url and not blob.source_url:
             blob.source_url = source_url
+            _log(sess, actor, "source", hash_, holder, f"{source_url} (confirmed as the official download page by the uploader)")
         row = sess.exec(select(ContentHolder).where(ContentHolder.hash == hash_, ContentHolder.holder == holder)).first()
         if row and row.status in ("revoked", "disputed"):
             raise HTTPException(403, f"{name!r} was {row.status} for this account after a rights claim; ask the administrator")
@@ -243,6 +247,7 @@ def scan_installed(sess: SessionDep, limit: int = 20) -> dict:
 
 class SourceIn(BaseModel):
     url: str = Field(default="", max_length=500)
+    official: bool = False   # «this is the official download page»: required with a url
 
 
 @router.put("/{hash_}/source")
@@ -250,8 +255,8 @@ def set_source(hash_: str, body: SourceIn, sess: SessionDep) -> dict:
     b = sess.get(ContentBlob, hash_)
     if not b:
         raise HTTPException(404, "unknown content")
-    b.source_url = check_source(body.url)
-    _log(sess, "admin", "source", hash_, "", body.url)
+    b.source_url = check_source(body.url, body.official)
+    _log(sess, "admin", "source", hash_, "", body.url + " (confirmed as official)" if body.url else "removed")
     sess.commit()
     return _item(sess, b)
 

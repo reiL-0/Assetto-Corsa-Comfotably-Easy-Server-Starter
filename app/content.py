@@ -218,13 +218,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "") -> str:
+async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "", official: bool = False) -> str:
     """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
     try:
-        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack, catalog.check_source(source_url))
+        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack, catalog.check_source(source_url, official))
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -247,8 +247,8 @@ def download_car(car: str) -> FileResponse:
 
 
 @router.post("/cars", status_code=201)
-async def upload_car(file: UploadFile, pack: bool = False, source_url: str = "") -> dict:
-    return {"car": await _unzip_upload(file, _cars_dir(), pack, source_url)}
+async def upload_car(file: UploadFile, pack: bool = False, source_url: str = "", source_official: bool = False) -> dict:
+    return {"car": await _unzip_upload(file, _cars_dir(), pack, source_url, source_official)}
 
 
 @router.post("/cars/{car}/skins", status_code=201)
@@ -286,6 +286,7 @@ class UploadIn(BaseModel):
     kind: Literal["track", "car"]
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
     source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
+    source_official: bool = False
 
 
 def _upload(uid: str) -> dict:
@@ -300,7 +301,7 @@ def upload_start(body: UploadIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url), "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -353,6 +354,7 @@ class LinkIn(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
     pack: bool = False
     source_url: str = ""
+    source_official: bool = False
 
 
 def _fetch_then_finish(uid: str, url: str) -> None:
@@ -382,7 +384,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 
@@ -397,6 +399,7 @@ class InboxIn(BaseModel):
     file: str  # a file name inside the inbox dir
     pack: bool = False
     source_url: str = ""
+    source_official: bool = False
 
 
 @router.post("/tracks/import", status_code=201)
@@ -405,12 +408,12 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
-    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url))}
+    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url, body.source_official))}
 
 
 @router.post("/tracks", status_code=201)
-async def upload_track(file: UploadFile, pack: bool = False, source_url: str = "") -> dict:
-    return {"track": await _unzip_upload(file, _tracks_dir(), pack, source_url)}
+async def upload_track(file: UploadFile, pack: bool = False, source_url: str = "", source_official: bool = False) -> dict:
+    return {"track": await _unzip_upload(file, _tracks_dir(), pack, source_url, source_official)}
 
 
 @router.post("/entry_list")

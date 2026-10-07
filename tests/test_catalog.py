@@ -101,7 +101,7 @@ def test_wrong_or_reused_proofs_and_bad_inputs_are_refused():
     assert api.post(f"{V}/catalog/prove", json={"nonce": ch["nonce"], "answer": ans, "holder": "x", "license_attested": False}).status_code == 400
     assert api.post(f"{V}/catalog/challenge", json={"hash": "f" * 64}).status_code == 404
     assert api.put(f"{V}/catalog/{h}/source", json={"url": "javascript:alert(1)"}).status_code == 400
-    assert api.put(f"{V}/catalog/{h}/source", json={"url": "https://www.overtake.gg/downloads/x.1/"}).json()["source_url"].startswith("https://")
+    assert api.put(f"{V}/catalog/{h}/source", json={"url": "https://www.overtake.gg/downloads/x.1/", "official": True}).json()["source_url"].startswith("https://")
 
 
 def test_scan_registers_content_that_was_installed_before_the_catalog():
@@ -119,7 +119,7 @@ def test_the_official_pages_of_a_sessions_content_go_to_discord_and_the_event_pa
     from app import announcement
     _up("dl_car")
     h = _item("dl_car")["hash"]
-    assert api.put(f"{V}/catalog/{h}/source", json={"url": "https://www.overtake.gg/downloads/dl-car.1/"}).status_code == 200
+    assert api.put(f"{V}/catalog/{h}/source", json={"url": "https://www.overtake.gg/downloads/dl-car.1/", "official": True}).status_code == 200
     _up("dl_nolink")
     sess = {"track": "dl_track", "cars": ["dl_car", "dl_nolink"]}
     assert api.get(f"{V}/catalog/downloads?track=dl_track&cars=dl_car,dl_nolink").json() == [{"kind": "car", "name": "dl_car", "url": "https://www.overtake.gg/downloads/dl-car.1/"}]
@@ -131,9 +131,11 @@ def test_the_official_pages_of_a_sessions_content_go_to_discord_and_the_event_pa
 
 def test_a_link_given_with_the_upload_makes_the_download_button_and_direct_file_links_are_refused():
     page = "https://www.overtake.gg/downloads/up-car.2/"
-    r = api.post(f"{V}/content/cars?pack=true&source_url={page}", files={"file": ("up_car.zip", _zip("up_car"), "application/zip")})
+    r = api.post(f"{V}/content/cars?pack=true&source_url={page}&source_official=true", files={"file": ("up_car.zip", _zip("up_car"), "application/zip")})
     assert r.status_code == 201 and _item("up_car")["source_url"] == page
     assert api.get(f"{V}/catalog/downloads?cars=up_car").json()[0]["url"] == page
     assert _up("up_nolink").status_code == 201 and api.get(f"{V}/catalog/downloads?cars=up_nolink").json() == []   # no link, no button
-    assert api.post(f"{V}/content/cars?source_url=https://x.com/a.zip", files={"file": ("a.zip", _zip("up_bad"), "application/zip")}).status_code == 400
-    assert api.put(f"{V}/catalog/{_item('up_car')['hash']}/source", json={"url": "https://x.com/f.rar"}).status_code == 400
+    assert api.post(f"{V}/content/cars?source_url=https://x.com/a.zip&source_official=true", files={"file": ("a.zip", _zip("up_bad"), "application/zip")}).status_code == 400
+    assert api.put(f"{V}/catalog/{_item('up_car')['hash']}/source", json={"url": "https://x.com/f.rar", "official": True}).status_code == 400
+    assert api.post(f"{V}/content/cars?source_url={page}", files={"file": ("n.zip", _zip("up_unconfirmed"), "application/zip")}).status_code == 400   # the link needs the confirmation
+    assert api.put(f"{V}/catalog/{_item('up_car')['hash']}/source", json={"url": page}).status_code == 400
