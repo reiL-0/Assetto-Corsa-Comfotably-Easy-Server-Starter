@@ -58,6 +58,60 @@ class Server(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class ContentBlob(SQLModel, table=True):
+    """A car or track folder known by the SHA-256 of its files (app/catalog.py): stored once, however many holders have it."""
+
+    __tablename__ = "content_blobs"
+
+    hash: str = Field(primary_key=True)
+    kind: str  # car | track
+    name: str  # the folder name AC looks for
+    size: int = 0
+    files: int = 0
+    source_url: str = ""  # the modder's official page, shown to players as «Descargar» (we never serve the files)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ContentHolder(SQLModel, table=True):
+    """Who has a blob enabled and on what basis. A rights claim against one holder revokes only that row; the file stays while another holder is active."""
+
+    __tablename__ = "content_holders"
+
+    id: int | None = Field(default=None, primary_key=True)
+    hash: str = Field(index=True)
+    holder: str = Field(index=True)  # tenant id; "league" for the content of our own league
+    uploaded_by: str = ""
+    attested_at: datetime | None = None  # when they declared they hold the licence (uploading counts)
+    status: str = "active"  # active | revoked | disputed | superseded (the holder uploaded a newer version under the same name)
+    note: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class BlockedHash(SQLModel, table=True):
+    """A file removed for everyone after a rights claim against the file itself; re-uploading it is refused."""
+
+    __tablename__ = "blocked_hashes"
+
+    hash: str = Field(primary_key=True)
+    reason: str = ""
+    blocked_at: datetime = Field(default_factory=_now)
+
+
+class CatalogEvent(SQLModel, table=True):
+    """Audit trail of the catalog: who did what to which file, when and why."""
+
+    __tablename__ = "catalog_events"
+
+    id: int | None = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=_now)
+    actor: str = ""
+    action: str  # upload | scan | source | revoke | dispute | restore | block | unblock | proof | purge
+    hash: str = ""
+    holder: str = ""
+    detail: str = ""
+
+
 class Event(SQLModel, table=True):
     """A saved session ("preset"): the new-session form's contents under a title, ready to run on any server."""
 

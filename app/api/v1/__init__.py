@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app.announcement import router as announcement_router
 from app.auth import guard
 from app.bans import router as bans_router
+from app.catalog import router as catalog_router
 from app.auth import router as auth_router
 from app.championship import router as championship_router
 from app.content import router as content_router
@@ -46,6 +47,7 @@ api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"
 api_router.include_router(announcement_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits the message
 api_router.include_router(requirements_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits
 api_router.include_router(integrity_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin seals
+api_router.include_router(catalog_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits (claims, sources, proofs)
 api_router.include_router(telemetry_router)  # public: the in-game app has no login, it sends its SteamID64
 api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only
 api_router.include_router(content_router, dependencies=[Depends(guard())])
