@@ -237,7 +237,8 @@ def scan_installed(sess: SessionDep, limit: int = 20) -> dict:
     from app import content
     known = {(b.kind, b.name) for b in sess.exec(select(ContentBlob))}
     todo = [("car", c["car"]) for c in content.list_cars()] + [("track", t["track"]) for t in content.list_tracks()]
-    todo = [x for x in todo if x not in known]
+    todo = [x for x in todo if x not in known
+            and any(f.is_file() for f in ((content._cars_dir() if x[0] == "car" else content._tracks_dir()) / x[1]).rglob("*"))]   # an empty folder (Kunos' ks_* stubs) has nothing to hash: all would collide on one digest and never count as done
     for kind, name in todo[:limit]:
         d = (content._cars_dir() if kind == "car" else content._tracks_dir()) / name
         h, size, n = digest_dir(d)

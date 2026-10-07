@@ -139,3 +139,14 @@ def test_a_link_given_with_the_upload_makes_the_download_button_and_direct_file_
     assert api.put(f"{V}/catalog/{_item('up_car')['hash']}/source", json={"url": "https://x.com/f.rar", "official": True}).status_code == 400
     assert api.post(f"{V}/content/cars?source_url={page}", files={"file": ("n.zip", _zip("up_unconfirmed"), "application/zip")}).status_code == 400   # the link needs the confirmation
     assert api.put(f"{V}/catalog/{_item('up_car')['hash']}/source", json={"url": page}).status_code == 400
+
+
+def test_scan_skips_empty_folders_so_it_finishes():
+    (content._cars_dir() / "ks_stub_a").mkdir(parents=True, exist_ok=True)
+    (content._cars_dir() / "ks_stub_b").mkdir(parents=True, exist_ok=True)
+    for _ in range(50):
+        if not api.post(f"{V}/catalog/scan?limit=20").json()["remaining"]:
+            break
+    else:
+        raise AssertionError("scan never finished")
+    assert not any(i["name"].startswith("ks_stub") for i in api.get(f"{V}/catalog").json())
