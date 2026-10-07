@@ -60,3 +60,4 @@ El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACS
 1. Server starts → `connect()` → `hello()` requests positions → `car_update` ~5/s per car → `Driver.pos/spline`.
 2. Site polls `leaderboard.json` → `LastPos` per car; `map.ini` gives the world→pixel transform, `map.png` the image.
 3. Car crosses the line → `lap_completed` → best/last/laps updated → standings change.
+- `tracktime.py`: la hora que muestra un cliente CSP es el `timestamp` del comando leído en la **zona horaria de la pista** (medido en vivo: 12:37 enviado se vio como 23:37 en una pista de Melbourne, UTC+11). `offset_seconds` calcula ese desfase (zona IANA del plan, o los `geotags` de la pista consultados en Open-Meteo con caché; sin dato: 0) y el director envía «hora que se quiere − desfase». El director se crea desde código `async` (los endpoints de plan de clima lo son): crearlo desde un hilo daba «no current event loop» (HTTP 500 y director perdido).
