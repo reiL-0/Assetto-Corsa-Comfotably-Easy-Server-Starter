@@ -17,11 +17,13 @@ Single process, challenges live in memory (like the upload registry in content.p
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -72,11 +74,26 @@ def check_not_blocked(hash_: str) -> None:
             raise HTTPException(403, f"this content was removed after a rights claim ({b.reason or 'no reason given'}) and cannot be uploaded again")
 
 
-def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holder: str = LEAGUE, actor: str = "") -> None:
-    """An install just happened: note the blob and make `holder` an active holder (uploading counts as declaring the licence)."""
+_FILE_EXT = (".zip", ".rar", ".7z", ".tar", ".gz", ".exe", ".msi")
+
+
+def check_source(url: str) -> str:
+    """The modder's page for the «Descargar» button: http(s) and a page, never a direct link to the archive (we point to the author, we do not hand out the file)."""
+    url = url.strip()
+    if url and (not re.fullmatch(r"https?://\S+", url) or len(url) > 500 or urlsplit(url).path.lower().endswith(_FILE_EXT)):
+        raise HTTPException(400, "source_url must be the modder's page (http/https), not a direct link to the file")
+    return url
+
+
+def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holder: str = LEAGUE, actor: str = "", source_url: str = "") -> None:
+    """An install just happened: note the blob and make `holder` an active holder (uploading counts as declaring the licence).
+    `source_url`: the modder's page given with the upload; it only fills a blob that has none (an admin's link is not overwritten)."""
     with Session(engine) as sess:
         if not sess.get(ContentBlob, hash_):
             sess.add(ContentBlob(hash=hash_, kind=kind, name=name, size=size, files=files))
+        blob = sess.get(ContentBlob, hash_)
+        if source_url and not blob.source_url:
+            blob.source_url = source_url
         row = sess.exec(select(ContentHolder).where(ContentHolder.hash == hash_, ContentHolder.holder == holder)).first()
         if row and row.status in ("revoked", "disputed"):
             raise HTTPException(403, f"{name!r} was {row.status} for this account after a rights claim; ask the administrator")
@@ -225,7 +242,7 @@ def scan_installed(sess: SessionDep, limit: int = 20) -> dict:
 
 
 class SourceIn(BaseModel):
-    url: str = Field(default="", max_length=500, pattern=r"^(https?://\S+)?$")
+    url: str = Field(default="", max_length=500)
 
 
 @router.put("/{hash_}/source")
@@ -233,7 +250,7 @@ def set_source(hash_: str, body: SourceIn, sess: SessionDep) -> dict:
     b = sess.get(ContentBlob, hash_)
     if not b:
         raise HTTPException(404, "unknown content")
-    b.source_url = body.url
+    b.source_url = check_source(body.url)
     _log(sess, "admin", "source", hash_, "", body.url)
     sess.commit()
     return _item(sess, b)

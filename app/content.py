@@ -173,10 +173,11 @@ def _zip_response(d: Path, filename: str) -> FileResponse:
     )
 
 
-def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
+def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "") -> str:
     """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
     Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
-    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures."""
+    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures.
+    `source_url`: the modder's page for the «Descargar» button (without it the content has no button)."""
     with archive.open("rb") as fh:
         magic = fh.read(8)
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
@@ -209,7 +210,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
         if cataloged:
             integrity.seal_installed(kind, root)
-            catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload")
+            catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
         return root
     except uploadguard.Rejected as e:
         raise HTTPException(400, str(e)) from e
@@ -217,13 +218,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False) -> str:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False) -> str:
+async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "") -> str:
     """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
         while chunk := await file.read(1 << 20):
             tmp.write(chunk)
     try:
-        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack)
+        return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack, catalog.check_source(source_url))
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -246,8 +247,8 @@ def download_car(car: str) -> FileResponse:
 
 
 @router.post("/cars", status_code=201)
-async def upload_car(file: UploadFile, pack: bool = False) -> dict:
-    return {"car": await _unzip_upload(file, _cars_dir(), pack)}
+async def upload_car(file: UploadFile, pack: bool = False, source_url: str = "") -> dict:
+    return {"car": await _unzip_upload(file, _cars_dir(), pack, source_url)}
 
 
 @router.post("/cars/{car}/skins", status_code=201)
@@ -284,6 +285,7 @@ _uploads: dict[str, dict] = {}
 class UploadIn(BaseModel):
     kind: Literal["track", "car"]
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
+    source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
 
 
 def _upload(uid: str) -> dict:
@@ -298,7 +300,7 @@ def upload_start(body: UploadIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url), "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -324,7 +326,7 @@ def _finish(uid: str) -> None:
     u = _uploads[uid]
     dest = _tracks_dir() if u["kind"] == "track" else _cars_dir()
     try:
-        u["result"] = _extract(u["path"], dest, u.get("pack", False))
+        u["result"] = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""))
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -350,6 +352,7 @@ class LinkIn(BaseModel):
     kind: Literal["track", "car"]
     url: str = Field(min_length=8, max_length=2000)
     pack: bool = False
+    source_url: str = ""
 
 
 def _fetch_then_finish(uid: str, url: str) -> None:
@@ -379,7 +382,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 
@@ -393,6 +396,7 @@ def upload_status(uid: str) -> dict:
 class InboxIn(BaseModel):
     file: str  # a file name inside the inbox dir
     pack: bool = False
+    source_url: str = ""
 
 
 @router.post("/tracks/import", status_code=201)
@@ -401,12 +405,12 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
-    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack)}
+    return {"track": await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url))}
 
 
 @router.post("/tracks", status_code=201)
-async def upload_track(file: UploadFile, pack: bool = False) -> dict:
-    return {"track": await _unzip_upload(file, _tracks_dir(), pack)}
+async def upload_track(file: UploadFile, pack: bool = False, source_url: str = "") -> dict:
+    return {"track": await _unzip_upload(file, _tracks_dir(), pack, source_url)}
 
 
 @router.post("/entry_list")
