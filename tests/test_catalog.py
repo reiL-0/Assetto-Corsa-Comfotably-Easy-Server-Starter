@@ -1,3 +1,4 @@
+import time
 import io
 import shutil
 import zipfile
@@ -26,6 +27,15 @@ def _zip(name: str, data: bytes = b"physics-v1") -> bytes:
 
 def _up(name: str, data: bytes = b"physics-v1", pack: bool = True):
     return api.post(f"{V}/content/cars?pack={'true' if pack else 'false'}", files={"file": (f"{name}.zip", _zip(name, data), "application/zip")})
+
+
+def _scan_done() -> None:
+    for _ in range(100):
+        r = api.post(f"{V}/catalog/scan").json()
+        if not r["remaining"] and not r["running"]:
+            return
+        time.sleep(0.1)
+    raise AssertionError("scan never finished")
 
 
 def _item(name: str) -> dict:
@@ -109,8 +119,8 @@ def test_scan_registers_content_that_was_installed_before_the_catalog():
     (d / "ui").mkdir(parents=True)
     (d / "data.acd").write_bytes(b"old")
     (d / "ui" / "ui_car.json").write_text('{"name": "old"}')
-    r = api.post(f"{V}/catalog/scan?limit=500").json()
-    assert r["remaining"] == 0 and _item("cat_old")["holders"][0]["holder"] == "league"
+    _scan_done()
+    assert _item("cat_old")["holders"][0]["holder"] == "league"
     with Session(engine) as s:
         assert s.exec(select(ContentHolder).where(ContentHolder.holder == "league")).first()
 
@@ -144,9 +154,5 @@ def test_a_link_given_with_the_upload_makes_the_download_button_and_direct_file_
 def test_scan_skips_empty_folders_so_it_finishes():
     (content._cars_dir() / "ks_stub_a").mkdir(parents=True, exist_ok=True)
     (content._cars_dir() / "ks_stub_b").mkdir(parents=True, exist_ok=True)
-    for _ in range(50):
-        if not api.post(f"{V}/catalog/scan?limit=20").json()["remaining"]:
-            break
-    else:
-        raise AssertionError("scan never finished")
+    _scan_done()
     assert not any(i["name"].startswith("ks_stub") for i in api.get(f"{V}/catalog").json())

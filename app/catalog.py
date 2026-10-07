@@ -20,6 +20,7 @@ import hashlib
 import re
 import secrets
 import shutil
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -231,19 +232,38 @@ def events(sess: SessionDep, limit: int = 100) -> list[dict]:
     return [r.model_dump(mode="json") for r in rows]
 
 
-@router.post("/scan")
-def scan_installed(sess: SessionDep, limit: int = 20) -> dict:
-    """Hashes installed cars/tracks the catalog does not know yet and registers them for the league. Reading a folder takes a while: `limit` per call."""
+_scan_lock = threading.Lock()
+_scanned: set[tuple[str, str]] = set()   # hashed since the manager started (a folder identical to another has a known hash under another name and would otherwise stay «pending»)
+
+
+def _scan_todo() -> list[tuple[str, str]]:
     from app import content
-    known = {(b.kind, b.name) for b in sess.exec(select(ContentBlob))}
+    with Session(engine) as sess:
+        known = {(b.kind, b.name) for b in sess.exec(select(ContentBlob))}
     todo = [("car", c["car"]) for c in content.list_cars()] + [("track", t["track"]) for t in content.list_tracks()]
-    todo = [x for x in todo if x not in known
-            and any(f.is_file() for f in ((content._cars_dir() if x[0] == "car" else content._tracks_dir()) / x[1]).rglob("*"))]   # an empty folder (Kunos' ks_* stubs) has nothing to hash: all would collide on one digest and never count as done
-    for kind, name in todo[:limit]:
-        d = (content._cars_dir() if kind == "car" else content._tracks_dir()) / name
-        h, size, n = digest_dir(d)
-        record_upload(kind, name, h, size, n, LEAGUE, "scan")
-    return {"registered": min(limit, len(todo)), "remaining": max(0, len(todo) - limit)}
+    return [x for x in todo if x not in known and x not in _scanned
+            and any(f.is_file() for f in ((content._cars_dir() if x[0] == "car" else content._tracks_dir()) / x[1]).rglob("*"))]   # an empty folder (Kunos' ks_* stubs) has nothing to hash
+
+
+def _scan_run() -> None:
+    from app import content
+    try:
+        for kind, name in _scan_todo():
+            h, size, n = digest_dir((content._cars_dir() if kind == "car" else content._tracks_dir()) / name)
+            record_upload(kind, name, h, size, n, LEAGUE, "scan")
+            _scanned.add((kind, name))
+    finally:
+        _scan_lock.release()
+
+
+@router.post("/scan")
+def scan_installed() -> dict:
+    """Hashes in the background (one car can be 18 GB: far longer than a request may take) every installed car/track the catalog does not know yet and
+    registers it for the league. Poll by calling again: `remaining` counts what is left and `running` says whether the worker is still at it."""
+    left = len(_scan_todo())
+    if left and _scan_lock.acquire(blocking=False):
+        threading.Thread(target=_scan_run, daemon=True).start()
+    return {"running": _scan_lock.locked(), "remaining": left}
 
 
 class SourceIn(BaseModel):
