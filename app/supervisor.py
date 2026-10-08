@@ -223,7 +223,12 @@ class Instance:
 
 # ponytail: in-memory registry, single process. After a manager restart `adopt` rebuilds it from the pid files.
 _instances: dict[int, Instance] = {}
+_locks: dict[int, asyncio.Lock] = {}   # one per server id: start / stop of the same server never overlap (API, scheduler and wake all come through here)
 before_start: list = []   # called with the server id right before an acServer is spawned (app/wake.py frees the ports it holds for it)
+
+
+def _lock(server_id: int) -> asyncio.Lock:
+    return _locks.setdefault(server_id, asyncio.Lock())
 
 
 def limit_prefix(server_id: int, cpu_percent: int | None, mem_mb: int | None) -> list[str]:
@@ -239,7 +244,14 @@ def limit_prefix(server_id: int, cpu_percent: int | None, mem_mb: int | None) ->
     return p
 
 
-async def start(
+async def start(server_id: int, cwd: Path, **kw) -> Instance:
+    """Spawn acServer. Serialised per server: the "already running?" check and the registration of the new instance are
+    separated by awaits, so without the lock two simultaneous starts would both pass the check and spawn two processes."""
+    async with _lock(server_id):
+        return await _start(server_id, cwd, **kw)
+
+
+async def _start(
     server_id: int,
     cwd: Path,
     *,
@@ -310,9 +322,10 @@ async def adopt(
 
 
 async def stop(server_id: int) -> None:
-    inst = _instances.get(server_id)
-    if inst:
-        await inst.stop()
+    async with _lock(server_id):
+        inst = _instances.get(server_id)
+        if inst:
+            await inst.stop()
 
 
 def live() -> list[Instance]:

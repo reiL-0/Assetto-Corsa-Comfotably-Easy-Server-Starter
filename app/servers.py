@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import configparser
 import io
+import threading
 import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime
@@ -134,6 +135,9 @@ def _get(sess: SessionDep, server_id: int) -> Server:
     return s
 
 
+_alloc_lock = threading.Lock()   # ponytail: one manager process (handlers run in threads); a UNIQUE(base_port) migration (plan T1.1) covers several
+
+
 def _alloc_base_port(sess: SessionDep) -> int:
     taken = set(sess.exec(select(Server.base_port)).all())
     for base in range(settings.port_range_start, settings.port_range_end, 4):
@@ -166,14 +170,15 @@ def _write_instance(s: Server) -> Path:
 
 @router.post("", response_model=ServerOut, status_code=201)
 def create(body: ServerIn, sess: SessionDep) -> ServerOut:
-    s = Server(
-        name=body.name,
-        config=body.config,
-        entry_list=body.entry_list,
-        base_port=_alloc_base_port(sess),
-    )
-    sess.add(s)
-    sess.commit()
+    with _alloc_lock:   # choosing the block and committing it are one step: two simultaneous creates must not get the same ports
+        s = Server(
+            name=body.name,
+            config=body.config,
+            entry_list=body.entry_list,
+            base_port=_alloc_base_port(sess),
+        )
+        sess.add(s)
+        sess.commit()
     sess.refresh(s)
     return _out(s)
 

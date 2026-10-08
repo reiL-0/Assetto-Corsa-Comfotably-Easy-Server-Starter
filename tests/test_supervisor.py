@@ -134,3 +134,28 @@ def test_a_busy_plugin_port_does_not_leave_the_server_unowned(tmp_path, monkeypa
             await supervisor.stop(98)
 
     asyncio.run(scenario())
+
+
+def test_simultaneous_starts_spawn_one_process(tmp_path, monkeypatch):
+    script = tmp_path / "fake_acserver.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+
+    async def scenario():
+        res = await asyncio.gather(*(supervisor.start(98, tmp_path) for _ in range(3)), return_exceptions=True)
+        try:
+            assert sum(isinstance(r, supervisor.Instance) for r in res) == 1
+            assert all(isinstance(r, RuntimeError) for r in res if not isinstance(r, supervisor.Instance))
+        finally:
+            await supervisor.stop(98)
+        # a failed start must release the lock: the next valid attempt works
+        monkeypatch.setattr(settings, "acserver_cmd", "/nonexistent/acServer")
+        try:
+            await supervisor.start(98, tmp_path)
+        except OSError:
+            pass
+        monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+        await asyncio.wait_for(supervisor.start(98, tmp_path), 5)
+        await supervisor.stop(98)
+
+    asyncio.run(scenario())
