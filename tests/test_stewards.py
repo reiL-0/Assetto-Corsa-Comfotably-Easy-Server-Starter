@@ -88,8 +88,8 @@ def test_contact_incident_keeps_the_suggested_fault_and_the_evidence():
 def test_at_contact_uses_the_moment_they_touched_not_where_they_are_now():
     from app.stewards.detectors import at_contact
     # a (fast) closes on b (slow) along x; they touch at x~100, then drift 50 m apart before the late report arrives
-    ta = [(t / 5, [20.0 * t, 0, 0], [20.0, 0, 0]) for t in range(0, 12)]
-    tb = [(t / 5, [103.0 + 10.0 * (t - 5), 0, 0.0], [10.0, 0, 0]) for t in range(0, 12)]
+    ta = [(t / 5, [20.0 * t, 0, 0], [20.0, 0, 0]) for t in range(12)]
+    tb = [(t / 5, [103.0 + 10.0 * (t - 5), 0, 0.0], [10.0, 0, 0]) for t in range(12)]
     pa, pb, _ = at_contact(ta, tb, [100.0, 0, 0])
     assert abs(pb["pos"][0] - pa["pos"][0]) < 25 and pa["pos"][0] < pb["pos"][0]   # a still behind b
     assert at_contact([], tb, [0, 0, 0]) is None
@@ -101,3 +101,25 @@ def test_a_real_33_byte_car_update_parses():
     e = acsp.parse(raw)
     assert e["type"] == "car_update" and e["car_id"] == 0 and e["gear"] == 6 and e["rpm"] == 13545
     assert round(e["pos"][0]) == -365 and round(e["velocity"][2]) == -59 and 0.08 < e["spline_pos"] < 0.1
+
+
+def test_a_drivers_track_limit_report_becomes_an_incident_only_in_shadow_mode(monkeypatch):
+    from types import SimpleNamespace
+
+    from app import supervisor
+    sid = api.post(f"{V}/servers", json={"name": "st4"}).json()["id"]
+    c = acsp.ACSPClient(sid)
+    c.cars = {3: {"driver_guid": A, "driver_name": "Ana"}}
+    monkeypatch.setattr(supervisor, "live", lambda: [SimpleNamespace(server_id=sid, acsp=c)])
+    body = {"car_id": 3, "name": "ana", "ms": 1800, "wheels": 4, "speed": 120.5, "lap": 2, "spline": 0.4, "pos": [1.0, 2.0, 3.0]}
+    url = f"{V}/servers/{sid}/stewards/report"
+    assert api.post(url, json=body).status_code == 204
+    assert api.get(f"{V}/servers/{sid}/incidents").json() == []   # off: ignored on purpose
+    api.put(f"{V}/servers/{sid}/stewards", json={"mode": "shadow"})
+    assert api.post(url, json=body).status_code == 204
+    assert api.post(url, json=body).status_code == 204            # same instant: a flood, ignored
+    rows = api.get(f"{V}/servers/{sid}/incidents").json()
+    assert len(rows) == 1 and rows[0]["kind"] == "limits" and rows[0]["value"] == 1800 and rows[0]["driver_guid"] == A
+    assert rows[0]["evidence"]["source"] == "client" and rows[0]["world_pos"] == [1.0, 2.0, 3.0]
+    assert api.post(url, json={**body, "name": "someone else"}).status_code == 409   # that slot is not them
+    assert api.post(url, json={**body, "wheels": 9}).status_code == 422
