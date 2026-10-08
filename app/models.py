@@ -53,6 +53,7 @@ class Server(SQLModel, table=True):
     anchor_at: float | None = None   # ...and when it started (unix s); the session clock runs from here even when the server is off
     cpu_limit: int | None = None  # CPU quota of this server in % of one core (100 = one core); None = unlimited (supervisor.limit_prefix)
     mem_limit_mb: int | None = None  # RAM cap in MB (the kernel kills the server above it); None = unlimited
+    stewards: str = "off"  # off | shadow: the automatic stewards (app/stewards) only record incidents, they never punish (phase 0)
     wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -209,6 +210,30 @@ class Penalty(SQLModel, table=True):
     reason: str
     created_by: str = ""
     created_at: datetime = Field(default_factory=_now)
+
+
+class Incident(SQLModel, table=True):
+    """Something a driver did that the automatic stewards flagged (app/stewards). Append-only record; in shadow mode it is only evidence."""
+
+    __tablename__ = "incidents"
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    ts: float = Field(index=True)  # epoch seconds
+    session_type: int | None = None  # ACSP: 1 practice, 2 qualifying, 3 race
+    session_name: str = ""
+    session_ms: int = 0  # how long the session had run (LiveBoard.elapsed_ms)
+    kind: str  # wall | contact | cuts
+    car_id: int
+    driver_guid: str | None = None
+    driver_name: str = ""
+    other_guid: str | None = None  # contact only
+    other_name: str = ""
+    speed: float = 0.0  # impact speed as acServer reports it (wall, contact)
+    value: int = 0  # cuts: how many in the lap
+    world_pos: list = Field(default_factory=list, sa_type=JSON)
+    fault_guid: str | None = None  # contact only: who the heuristic blames (None = no clear fault); a suggestion for the stewards, never a verdict
+    evidence: dict = Field(default_factory=dict, sa_type=JSON)  # contact only: both cars' last position/velocity and the reason for the suggestion
 
 
 class Activity(SQLModel, table=True):

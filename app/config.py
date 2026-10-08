@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     unpack_mem_mb: int = 1024   # memory cap of that child when limits_scope is on
     port_range_start: int = 9600
     port_range_end: int = 9700
+    resource_log_seconds: int = 30    # how often CPU/RAM/steal are written to <data_dir>/logs/resources-*.jsonl (app/resourcelog.py); 0 = off
+    resource_log_keep_days: int = 30
     log_lines: int = 500  # per-instance stdout ring buffer
     # Extra hosts content may be fetched from by link, besides MediaFire / Google Drive / Dropbox.
     # Env (JSON): ACM_DOWNLOAD_HOSTS='["files.example.com"]'

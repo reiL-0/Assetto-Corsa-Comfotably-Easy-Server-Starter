@@ -13,7 +13,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
-from app.live import acsp, cspcmd
+from app.live import acsp, cspcmd, tracktime
 from app.live.weatherplan import Weather, fetch_live
 
 log = logging.getLogger("acmanager.cspweather")
@@ -39,8 +39,9 @@ class WeatherDirector:
         sun = data.get("sun_angle")   # the plan's own sun angle (set live from Control AC) wins over the server's
         minutes = 780 + float(srv.get("SUN_ANGLE", 0) or 0 if sun is None else sun) * 60 / 16   # the same mapping the Control AC form uses (angle 0 = 13:00)
         self.t0 = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
+        self.track, self.layout, self.tz = str(srv.get("TRACK") or ""), str(srv.get("CONFIG_TRACK") or ""), data.get("timezone")
         self.clock0, self.last = time.monotonic(), ""
-        self.task = asyncio.ensure_future(self.run())
+        self.task = asyncio.get_running_loop().create_task(self.run())   # needs the event loop: build it from async code (see servers._restart_weather)
 
     def stop(self) -> None:
         self.task.cancel()
@@ -49,6 +50,9 @@ class WeatherDirector:
         return int(self.t0.timestamp() + (time.monotonic() - self.clock0) * self.mult)
 
     async def run(self) -> None:
+        from app import content   # lazy: content pulls in the whole upload stack
+        off = await asyncio.to_thread(tracktime.offset_seconds, content._tracks_dir(), self.track, self.layout, self.tz)
+        self.t0 -= timedelta(seconds=off)   # the clients read the timestamp in the track's local time: send the wanted time minus that offset
         delay = min(2.0, self.period)   # first pass soon so a change made in Control AC shows at once
         while self.inst.running:
             await asyncio.sleep(delay)

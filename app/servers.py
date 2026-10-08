@@ -6,6 +6,7 @@ import asyncio
 import configparser
 import io
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -46,6 +47,7 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    stewards: str = "off"
     limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
     integrity_extras: bool = False
@@ -73,6 +75,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        stewards=s.stewards,
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
@@ -530,10 +533,16 @@ class WeatherPlanIn(BaseModel):
     update_s: float = Field(default=30, ge=5, le=120)               # seconds between commands to the clients
     live: LiveWeatherIn | None = None
     driving: Literal["real", "visual"] = "real"                    # visual: the weather is only seen (grip 100 %, no water on the track); real: it changes the grip
+    timezone: str | None = Field(default=None, max_length=60)       # IANA zone of the track (e.g. Australia/Melbourne); None = from its geotags (app/live/tracktime.py)
     sun_angle: int | None = Field(default=None, ge=-80, le=80)      # sun position sent to CSP clients (0 = 13:00, 16 degrees per hour); None = the server's SUN_ANGLE
 
     @model_validator(mode="after")
     def _complete(self) -> WeatherPlanIn:
+        if self.timezone:
+            try:
+                ZoneInfo(self.timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ValueError("timezone: unknown IANA zone") from None
         if self.mode == "entries" and not self.entries:
             raise ValueError("entries: at least one weather")
         if self.mode == "live" and not self.live:
@@ -548,7 +557,7 @@ def _restart_weather(s: Server) -> None:
 
 
 @router.put("/{server_id}/weather_plan", response_model=ServerOut)
-def set_weather_plan(server_id: int, body: WeatherPlanIn, sess: SessionDep) -> ServerOut:
+async def set_weather_plan(server_id: int, body: WeatherPlanIn, sess: SessionDep) -> ServerOut:   # async: the director is a task of the event loop
     """The weather this server plays to CSP clients (hidden chat commands, see app/live/cspweather.py): a list of weathers per session (as in AC Server Manager)
     or the live weather of a place. Starts at once on a running server, otherwise at its next start."""
     s = _get(sess, server_id)
@@ -561,7 +570,7 @@ def set_weather_plan(server_id: int, body: WeatherPlanIn, sess: SessionDep) -> S
 
 
 @router.delete("/{server_id}/weather_plan", status_code=204)
-def clear_weather_plan(server_id: int, sess: SessionDep) -> None:
+async def clear_weather_plan(server_id: int, sess: SessionDep) -> None:
     s = _get(sess, server_id)
     s.weather_plan = None
     sess.add(s)

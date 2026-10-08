@@ -22,6 +22,7 @@ from app.metrics import router as metrics_router
 from app.requirements import router as requirements_router
 from app.penalties import router as penalties_router
 from app.servers import router as servers_router
+from app.stewards.api import router as stewards_router
 from app.servers import steward as steward_router
 from app.telemetry import router as telemetry_router
 
@@ -42,6 +43,7 @@ api_router.include_router(steward_router)
 api_router.include_router(metrics_router)  # steward reads
 api_router.include_router(bans_router)  # stewards kick and ban by Steam ID (its own steward guard)
 api_router.include_router(penalties_router)  # stewards write penalties (its own steward guard)
+api_router.include_router(stewards_router, dependencies=[Depends(guard("steward"))])  # steward reads incidents, admin switches the engine
 api_router.include_router(events_router, dependencies=[Depends(guard("steward"))])  # carries passwords: steward reads, admin writes
 api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin writes
 api_router.include_router(announcement_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin edits the message

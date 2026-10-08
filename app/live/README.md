@@ -7,6 +7,8 @@ no stracker. Everything here belongs to one running acServer instance.
 ## Files
 
 ### `acsp.py` — ACSP protocol + per-instance client
+- **`car_update` is 33 bytes on a real acServer** (gear = 1 byte, rpm = u16, spline = f32); `_read_car_update` also accepts a 34-byte one (gear = u16). Before this fix every real position packet was dropped silently (`struct.error`), so positions stayed at 0.
+- **`ACSPClient.trail`** (`car_id -> deque` of the last `TRAIL`=50 `(time, pos, velocity)` samples): lets a late event (a contact arrives 1.5–2.5 s after it happened) be judged at the moment it happened; read by `app/stewards`.
 - **Parsers** `parse(buf) -> event dict` and `_read_*`: one dict per datagram (`new_session`, `session_info`,
   `new_connection`, `connection_closed`, `car_update`, `car_info`, `lap_completed`, `client_event`, `chat`, …).
   Strings are UTF-32 (`_read_string`: names, chat, server name) or 1 byte/char (`_read_sstring`: track, session, car
@@ -48,7 +50,7 @@ Lo que hace el plugin oficial `plugin-dynamic-conditions` de CSP (leído del có
 El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACSP. acServer imprime su clasificación tras cada vuelta (`SendLapCompletedMessage` + una línea `N) nombre BEST: … TOTAL: … Laps:n SesID:i HasFinished:b` por plaza), quién ocupa cada plaza (`Dispatching TCP message to <auto> (<plaza>) [<nombre> []]`, con el Steam ID en la línea `Looking for available slot … GUID` anterior) y la sesión (`SENDING session name/type/time/laps`, `NextSession`). `feed(línea)` (lo llama `supervisor.Instance._tail` con cada línea nueva) mantiene un `LiveBoard`, la misma estructura que rellena ACSP, así que `acsm.leaderboard` sirve el mismo JSON de cualquiera de las dos fuentes. Sabe menos que ACSP: sin posición en pista, velocidad punta ni última vuelta. Un bloque completo manda sobre quién está conectado.
 
 ## Interactions
-- **Fed by:** `supervisor.start` → `acsp.connect`; `ACSPClient._apply` calls `board.apply` for every event.
+- **Fed by:** `supervisor.start` → `acsp.connect`; `ACSPClient._apply` calls `board.apply` and `app.stewards.engine.on_event` for every event (the latter only records in `Server.stewards == "shadow"`).
 - **Read by:** the league site (`servers.json` `acsmUrl` = `http://127.0.0.1:8080/api/v1/servers/<id>/acsm`, `internal: true`)
   for `/api/leaderboard`, `/api/live-map` (+ `/api/live-map/image` relay) and the telemetry backend's connection check.
 - **Content:** tracks uploaded with `POST /content/tracks` (zip/rar) or `POST /content/tracks/import` (file in the
@@ -60,3 +62,4 @@ El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACS
 1. Server starts → `connect()` → `hello()` requests positions → `car_update` ~5/s per car → `Driver.pos/spline`.
 2. Site polls `leaderboard.json` → `LastPos` per car; `map.ini` gives the world→pixel transform, `map.png` the image.
 3. Car crosses the line → `lap_completed` → best/last/laps updated → standings change.
+- `tracktime.py`: la hora que muestra un cliente CSP es el `timestamp` del comando leído en la **zona horaria de la pista** (medido en vivo: 12:37 enviado se vio como 23:37 en una pista de Melbourne, UTC+11). `offset_seconds` calcula ese desfase (zona IANA del plan, o los `geotags` de la pista consultados en Open-Meteo con caché; sin dato: 0) y el director envía «hora que se quiere − desfase». El director se crea desde código `async` (los endpoints de plan de clima lo son): crearlo desde un hilo daba «no current event loop» (HTTP 500 y director perdido).
