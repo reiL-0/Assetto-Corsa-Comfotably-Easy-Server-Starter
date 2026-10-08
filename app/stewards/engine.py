@@ -9,6 +9,7 @@ from app.models import Incident, Server
 from app.stewards.detectors import at_contact, at_fault, detect
 
 DEDUP_S = 3.0  # acServer reports one contact from both cars (up to ~2 s apart, seen in a real session) and a wall scrape as a burst: one incident per car/pair per 3 s
+LIMITS_MIN_S = 0.5  # a driver's script cannot report more often than this (it is client-side, so it could flood)
 _recent: dict[tuple, float] = {}  # (server_id, kind, car ids) -> when it was last recorded
 
 
@@ -49,3 +50,28 @@ def on_event(client, event: dict, now: float | None = None) -> None:
                        other_guid=other.get("driver_guid"), other_name=other.get("driver_name", ""),
                        speed=d["speed"], value=d["value"], world_pos=d["world_pos"], fault_guid=fault, evidence=evidence))
         s.commit()
+
+
+def record_limits(client, car_id: int, name: str, report: dict, now: float | None = None) -> bool:
+    """A driver's own CSP script (OPR's opr_cuts.lua) says it left the track: `report` = {ms, wheels, speed, lap, spline, pos}. Stored as a `limits`
+    incident when the server is in shadow mode and `car_id` is a car on it whose driver name matches `name`. False = ignored (mode off, unknown car, flood).
+    The client can lie, so this is only ever evidence for a steward, never a sanction by itself."""
+    now = now or time.time()
+    car = client.cars.get(car_id)
+    if not car or (car.get("driver_name") or "").strip().lower() != name.strip().lower():
+        return False
+    key = (client.server_id, "limits", (car_id,))
+    if now - _recent.get(key, 0) < LIMITS_MIN_S:
+        return False
+    with Session(engine) as s:
+        srv = s.get(Server, client.server_id)
+        if not srv or srv.stewards != "shadow":
+            return False
+        _recent[key] = now
+        sess_info = client.session or {}
+        s.add(Incident(server_id=client.server_id, ts=now, session_type=sess_info.get("session_type"), session_name=sess_info.get("name", ""),
+                       session_ms=client.board.elapsed_ms(now), kind="limits", car_id=car_id, driver_guid=car.get("driver_guid"),
+                       driver_name=car.get("driver_name", ""), speed=report["speed"], value=report["ms"], world_pos=report["pos"],
+                       evidence={"source": "client", "wheels": report["wheels"], "lap": report["lap"], "spline": report["spline"]}))
+        s.commit()
+    return True

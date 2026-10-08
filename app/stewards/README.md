@@ -19,12 +19,16 @@
 - `DEDUP_S = 3.0`, `_recent: dict[(server_id, kind, coches)] -> epoch`: acServer reporta un contacto desde los dos autos y un roce como ráfaga; se guarda un incidente por coche/pareja cada 3 s (en una sesión real acServer repitió el mismo contacto desde el otro auto a ~2 s). `cuts` no se deduplica (llega una vez por vuelta). El contacto usa la pareja ordenada, así A→B y B→A son la misma clave.
 - `on_event(client, event, now=None)`: lo llama `ACSPClient._apply` con **cada** evento. Sin detección sale sin tocar la BD. Si hay: lee `Server.stewards`; solo con `"shadow"` escribe un `Incident` (en un contacto calcula además `fault_guid` y `evidence` con `at_fault` sobre el estado de los dos autos **en el momento del choque** (`at_contact`; la evidencia guarda `moment_ago_s`, cuánto antes del aviso fue); piloto y nombre salen de `client.cars`, sesión de `client.session`, reloj de `client.board.elapsed_ms`). Escribe síncrono en SQLite, como `bans.is_banned`.
 
+- `LIMITS_MIN_S = 0.5`: un script de piloto no puede reportar más seguido que esto por auto (es del cliente: podría inundar).
+- `record_limits(client, car_id, name, report, now=None) -> bool`: guarda un incidente `limits` con lo que reporta el script de CSP del piloto (`report` = `{ms, wheels, speed, lap, spline, pos}`; `value` = ms fuera, `speed` = velocidad máxima fuera, `evidence.source = "client"`). Solo en modo sombra y si el auto `car_id` existe y su `driver_name` coincide con `name`; si no, `False`. **Evidencia para el comisario, nunca sanción automática** (el cliente puede mentir).
+
 ### `api.py` (router con prefijo `/servers/{server_id}`; el guard de `api/v1` deja leer al comisario y escribir al admin)
 - `GET /incidents?kind=&limit=` → `Incident` más recientes primero (límite 500).
+- `POST /stewards/report` (`LimitsIn`: `car_id`, `name`, `ms`, `wheels`, `speed`, `lap`, `spline`, `pos`) → 204; 409 si el servidor no corre o ese auto no es ese piloto. Lo llama el **sitio** (`OPR WP/track_limits.py`) con el token del manager; la pide el script `opr_cuts.lua` del piloto.
 - `PUT /stewards` `{mode: off|shadow}` → cambia `Server.stewards` y devuelve el `ServerOut`.
 
 ## Datos
-- Tabla `incidents` (`app/models.py: Incident`): server_id, ts, session_type/name/ms, kind (`wall|contact|cuts`), car_id, driver/other guid y nombre, speed, value, world_pos, `fault_guid` (contacto: a quién señala la heurística, `None` si no hay culpa clara) y `evidence` (contacto: posición y velocidad de los dos autos y el motivo). «Piloto» y «con» de un contacto solo dicen quién reportó primero el evento, **no** quién tuvo la culpa. Solo se añade.
+- Tabla `incidents` (`app/models.py: Incident`): server_id, ts, session_type/name/ms, kind (`wall|contact|cuts|limits`: `limits` = ruedas fuera de pista, reportadas por el juego del piloto), car_id, driver/other guid y nombre, speed, value, world_pos, `fault_guid` (contacto: a quién señala la heurística, `None` si no hay culpa clara) y `evidence` (contacto: posición y velocidad de los dos autos y el motivo). «Piloto» y «con» de un contacto solo dicen quién reportó primero el evento, **no** quién tuvo la culpa. Solo se añade.
 - `Server.stewards`: `off` (por defecto) | `shadow`. Se muestra también en `ServerOut`.
 
 ## Interactions
