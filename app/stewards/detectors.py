@@ -12,6 +12,7 @@ CONTACT_MIN_SPEED = 5.0
 
 BEHIND_DEG = 35.0  # the other car is within this angle of where I am heading: I was driving into it
 SAME_WAY_DEG = 70.0  # and it was going roughly the same way as me (a rear-end hit, not a head-on)
+MAX_AGE_S = 0.5  # never project a position older than this
 MOVING = 3.0  # m/s: a car slower than this is not "driving into" anything
 
 
@@ -21,6 +22,13 @@ def _angle(a: tuple[float, float], b: tuple[float, float]) -> float:
     if not na or not nb:
         return 180.0
     return math.degrees(math.acos(max(-1.0, min(1.0, (a[0] * b[0] + a[1] * b[1]) / (na * nb)))))
+
+
+def project(car: dict, now: float) -> dict:
+    """The car's last `car_update` moved forward to `now` at its own velocity (positions arrive ~5 Hz: at 200 km/h a 0.2 s old one is 11 m behind).
+    Capped at MAX_AGE_S so a car whose updates stopped is not thrown across the map."""
+    dt = max(0.0, min(now - car.get("seen", now), MAX_AGE_S))
+    return {"pos": [p + v * dt for p, v in zip(car["pos"], car["velocity"])], "velocity": car["velocity"]}
 
 
 def at_fault(a: dict, b: dict) -> tuple[int | None, str]:

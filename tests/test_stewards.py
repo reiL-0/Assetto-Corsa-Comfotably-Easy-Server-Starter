@@ -51,7 +51,7 @@ def test_dedup_window_expires():
     c = acsp.ACSPClient(sid)
     engine.on_event(c, _hit(0), now=1000.0)
     engine.on_event(c, _hit(0), now=1000.5)
-    engine.on_event(c, _hit(0), now=1002.0)
+    engine.on_event(c, _hit(0), now=1004.0)
     assert len(api.get(f"{V}/servers/{sid}/incidents").json()) == 2
 
 
@@ -76,3 +76,18 @@ def test_contact_incident_keeps_the_suggested_fault_and_the_evidence():
     c._apply(_hit(1, 0))   # reported by the car in front: it is still A who hit B
     row = api.get(f"{V}/servers/{sid}/incidents").json()[0]
     assert row["fault_guid"] == A and len(row["evidence"]["cars"]) == 2
+
+
+def test_project_moves_a_stale_position_forward_but_not_too_far():
+    from app.stewards.detectors import project
+    car = {"pos": [0.0, 0.0, 0.0], "velocity": [10.0, 0.0, 0.0], "seen": 100.0}
+    assert round(project(car, 100.2)["pos"][0], 6) == 2.0
+    assert project(car, 160.0)["pos"][0] == 5.0   # capped at MAX_AGE_S (0.5 s)
+
+
+def test_a_real_33_byte_car_update_parses():
+    # captured from a real acServer: gear is one byte, so the datagram is 33 bytes
+    raw = bytes.fromhex("3500d2bdb6c339792440aac4de4207291c3f7d1f5f3e9dc16cc206e934c8a8b63d")
+    e = acsp.parse(raw)
+    assert e["type"] == "car_update" and e["car_id"] == 0 and e["gear"] == 6 and e["rpm"] == 13545
+    assert round(e["pos"][0]) == -365 and round(e["velocity"][2]) == -59 and 0.08 < e["spline_pos"] < 0.1

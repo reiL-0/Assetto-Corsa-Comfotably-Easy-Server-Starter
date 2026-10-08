@@ -11,11 +11,13 @@
   - `lap_completed` con `cuts > 0` → `cuts` (`value` = cuántos cortes en esa vuelta).
 
 - `BEHIND_DEG = 35`, `SAME_WAY_DEG = 70`, `MOVING = 3.0` (m/s): umbrales de la sugerencia de culpa (ver `at_fault`).
+- `MAX_AGE_S = 0.5`: tope de antigüedad que `project` extrapola.
+- `project(car, now) -> {pos, velocity}`: la última posición del auto adelantada a `now` con su propia velocidad (las posiciones llegan ~5 Hz: a 200 km/h una de 0,2 s va 11 m atrasada). Usa `car["seen"]` (la pone `ACSPClient._apply` en cada `car_update`).
 - `at_fault(a, b) -> (0 | 1 | None, motivo)`: con el último `car_update` de cada auto (`pos`, `velocity` en el plano x/z) culpa a quien **venía detrás y avanzando hacia el otro** en la misma dirección. Contacto lateral, de frente o con autos parados → `None` («lo decide el comisario»). Es una **sugerencia**: las posiciones son de ~5 Hz.
 
 ### `engine.py`
-- `DEDUP_S = 1.0`, `_recent: dict[(server_id, kind, coches)] -> epoch`: acServer reporta un contacto desde los dos autos y un roce como ráfaga; se guarda un incidente por coche/pareja por segundo. `cuts` no se deduplica (llega una vez por vuelta). El contacto usa la pareja ordenada, así A→B y B→A son la misma clave.
-- `on_event(client, event, now=None)`: lo llama `ACSPClient._apply` con **cada** evento. Sin detección sale sin tocar la BD. Si hay: lee `Server.stewards`; solo con `"shadow"` escribe un `Incident` (en un contacto calcula además `fault_guid` y `evidence` con `at_fault`; piloto y nombre salen de `client.cars`, sesión de `client.session`, reloj de `client.board.elapsed_ms`). Escribe síncrono en SQLite, como `bans.is_banned`.
+- `DEDUP_S = 3.0`, `_recent: dict[(server_id, kind, coches)] -> epoch`: acServer reporta un contacto desde los dos autos y un roce como ráfaga; se guarda un incidente por coche/pareja cada 3 s (en una sesión real acServer repitió el mismo contacto desde el otro auto a ~2 s). `cuts` no se deduplica (llega una vez por vuelta). El contacto usa la pareja ordenada, así A→B y B→A son la misma clave.
+- `on_event(client, event, now=None)`: lo llama `ACSPClient._apply` con **cada** evento. Sin detección sale sin tocar la BD. Si hay: lee `Server.stewards`; solo con `"shadow"` escribe un `Incident` (en un contacto calcula además `fault_guid` y `evidence` con `at_fault` sobre las posiciones ya proyectadas (la evidencia guarda `age_s`, la antigüedad de cada muestra); piloto y nombre salen de `client.cars`, sesión de `client.session`, reloj de `client.board.elapsed_ms`). Escribe síncrono en SQLite, como `bans.is_banned`.
 
 ### `api.py` (router con prefijo `/servers/{server_id}`; el guard de `api/v1` deja leer al comisario y escribir al admin)
 - `GET /incidents?kind=&limit=` → `Incident` más recientes primero (límite 500).

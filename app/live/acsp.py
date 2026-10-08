@@ -147,8 +147,14 @@ def _read_car_update(buf: bytes, pos: int) -> tuple[dict, int]:
     pos += 1
     x, y, z, vx, vy, vz = struct.unpack_from("<6f", buf, pos)
     pos += 24
-    gear, rpm = struct.unpack_from("<2H", buf, pos)
-    pos += 4
+    # acServer 1.x sends gear as ONE byte (33-byte datagram, captured from a real server); a 34-byte one with a 2-byte gear is what this parser
+    # used to demand, which made every real position packet fail and get dropped (the live map and the stewards saw no positions)
+    if len(buf) - pos >= 8:
+        gear, rpm = struct.unpack_from("<2H", buf, pos)
+        pos += 4
+    else:
+        gear, rpm = buf[pos], struct.unpack_from("<H", buf, pos + 1)[0]
+        pos += 3
     (spline_pos,) = struct.unpack_from("<f", buf, pos)
     pos += 4
     return {
@@ -372,7 +378,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.board.apply(joined)
             self.cars[event["car_id"]] = joined
         elif t == "car_update":
-            self.cars.setdefault(event["car_id"], {}).update(event)
+            self.cars.setdefault(event["car_id"], {}).update(event, seen=time.time())   # `seen`: how old the position is (app/stewards projects it)
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)
 
