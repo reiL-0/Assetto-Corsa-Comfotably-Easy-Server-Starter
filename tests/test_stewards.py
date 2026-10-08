@@ -68,21 +68,31 @@ def test_at_fault_blames_only_a_clear_rear_end_hit():
     assert at_fault(_car(0, 0, 0), _car(5, 0, 0))[0] is None    # both stopped
 
 
+def _upd(car, x, z, vx):
+    return {"type": "car_update", "car_id": car, "pos": [x, 0.0, z], "velocity": [vx, 0.0, 0.0], "gear": 3, "rpm": 5000, "spline_pos": 0.1}
+
+
 def test_contact_incident_keeps_the_suggested_fault_and_the_evidence():
     sid = api.post(f"{V}/servers", json={"name": "st3"}).json()["id"]
     api.put(f"{V}/servers/{sid}/stewards", json={"mode": "shadow"})
     c = acsp.ACSPClient(sid)
-    c.cars = {0: {"driver_guid": A, "driver_name": "A", **_car(0, 0, 20)}, 1: {"driver_guid": B, "driver_name": "B", **_car(5, 0, 10)}}
-    c._apply(_hit(1, 0))   # reported by the car in front: it is still A who hit B
+    c.cars = {0: {"driver_guid": A, "driver_name": "A"}, 1: {"driver_guid": B, "driver_name": "B"}}
+    hit = _hit(1, 0); hit["world_pos"] = [100.0, 0.0, 0.0]
+    c._apply(_upd(0, 98.0, 0.0, 20.0)); c._apply(_upd(1, 102.0, 0.0, 10.0))   # A right behind B, a moment before the hit
+    c._apply(_upd(0, 160.0, 0.0, 20.0)); c._apply(_upd(1, 150.0, 0.0, 10.0))  # ...and well past it when the late report arrives
+    c._apply(hit)
     row = api.get(f"{V}/servers/{sid}/incidents").json()[0]
     assert row["fault_guid"] == A and len(row["evidence"]["cars"]) == 2
 
 
-def test_project_moves_a_stale_position_forward_but_not_too_far():
-    from app.stewards.detectors import project
-    car = {"pos": [0.0, 0.0, 0.0], "velocity": [10.0, 0.0, 0.0], "seen": 100.0}
-    assert round(project(car, 100.2)["pos"][0], 6) == 2.0
-    assert project(car, 160.0)["pos"][0] == 5.0   # capped at MAX_AGE_S (0.5 s)
+def test_at_contact_uses_the_moment_they_touched_not_where_they_are_now():
+    from app.stewards.detectors import at_contact
+    # a (fast) closes on b (slow) along x; they touch at x~100, then drift 50 m apart before the late report arrives
+    ta = [(t / 5, [20.0 * t, 0, 0], [20.0, 0, 0]) for t in range(0, 12)]
+    tb = [(t / 5, [103.0 + 10.0 * (t - 5), 0, 0.0], [10.0, 0, 0]) for t in range(0, 12)]
+    pa, pb, _ = at_contact(ta, tb, [100.0, 0, 0])
+    assert abs(pb["pos"][0] - pa["pos"][0]) < 25 and pa["pos"][0] < pb["pos"][0]   # a still behind b
+    assert at_contact([], tb, [0, 0, 0]) is None
 
 
 def test_a_real_33_byte_car_update_parses():

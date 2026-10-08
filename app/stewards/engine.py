@@ -6,7 +6,7 @@ from sqlmodel import Session
 
 from app.db import engine
 from app.models import Incident, Server
-from app.stewards.detectors import at_fault, detect, project
+from app.stewards.detectors import at_contact, at_fault, detect
 
 DEDUP_S = 3.0  # acServer reports one contact from both cars (up to ~2 s apart, seen in a real session) and a wall scrape as a burst: one incident per car/pair per 3 s
 _recent: dict[tuple, float] = {}  # (server_id, kind, car ids) -> when it was last recorded
@@ -33,11 +33,16 @@ def on_event(client, event: dict, now: float | None = None) -> None:
         me, other = client.cars.get(d["car_id"], {}), client.cars.get(d["other_car_id"], {})
         sess_info = client.session or {}
         fault, evidence = None, {}
-        if d["kind"] == "contact" and "pos" in me and "pos" in other:
-            pm, po = project(me, now), project(other, now)
-            who, why = at_fault(pm, po)
-            fault = (me, other)[who].get("driver_guid") if who is not None else None
-            evidence = {"reason": why, "cars": [{"car_id": c, "age_s": round(now - x.get("seen", now), 3), **p} for c, x, p in ((d["car_id"], me, pm), (d["other_car_id"], other, po))]}
+        if d["kind"] == "contact":
+            moment = at_contact(client.trail.get(d["car_id"], ()), client.trail.get(d["other_car_id"], ()), d["world_pos"])
+            if moment:
+                pm, po, t = moment
+                who, why = at_fault(pm, po)
+                fault = (me, other)[who].get("driver_guid") if who is not None else None
+                evidence = {"reason": why, "moment_ago_s": round(now - t, 2),
+                            "cars": [{"car_id": c, **p} for c, p in ((d["car_id"], pm), (d["other_car_id"], po))]}
+            else:
+                evidence = {"reason": "sin posiciones de los dos autos en el momento del choque"}
         s.add(Incident(server_id=client.server_id, ts=now, session_type=sess_info.get("session_type"), session_name=sess_info.get("name", ""),
                        session_ms=client.board.elapsed_ms(now), kind=d["kind"], car_id=d["car_id"],
                        driver_guid=me.get("driver_guid"), driver_name=me.get("driver_name", ""),

@@ -8,6 +8,7 @@ no stracker. Everything here belongs to one running acServer instance.
 
 ### `acsp.py` — ACSP protocol + per-instance client
 - **`car_update` is 33 bytes on a real acServer** (gear = 1 byte, rpm = u16, spline = f32); `_read_car_update` also accepts a 34-byte one (gear = u16). Before this fix every real position packet was dropped silently (`struct.error`), so positions stayed at 0.
+- **`ACSPClient.trail`** (`car_id -> deque` of the last `TRAIL`=50 `(time, pos, velocity)` samples): lets a late event (a contact arrives 1.5–2.5 s after it happened) be judged at the moment it happened; read by `app/stewards`.
 - **Parsers** `parse(buf) -> event dict` and `_read_*`: one dict per datagram (`new_session`, `session_info`,
   `new_connection`, `connection_closed`, `car_update`, `car_info`, `lap_completed`, `client_event`, `chat`, …).
   Strings are UTF-32 (`_read_string`: names, chat, server name) or 1 byte/char (`_read_sstring`: track, session, car
