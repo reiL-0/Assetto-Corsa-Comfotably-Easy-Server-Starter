@@ -6,7 +6,7 @@ from sqlmodel import Session
 
 from app.db import engine
 from app.models import Incident, Server
-from app.stewards.detectors import detect
+from app.stewards.detectors import at_fault, detect
 
 DEDUP_S = 1.0  # acServer reports one contact from both cars, and a wall scrape as a burst: one incident per car/pair per second
 _recent: dict[tuple, float] = {}  # (server_id, kind, car ids) -> when it was last recorded
@@ -32,9 +32,14 @@ def on_event(client, event: dict, now: float | None = None) -> None:
                 del _recent[k]
         me, other = client.cars.get(d["car_id"], {}), client.cars.get(d["other_car_id"], {})
         sess_info = client.session or {}
+        fault, evidence = None, {}
+        if d["kind"] == "contact" and "pos" in me and "pos" in other:
+            who, why = at_fault(me, other)
+            fault = (me, other)[who].get("driver_guid") if who is not None else None
+            evidence = {"reason": why, "cars": [{"car_id": c, "pos": x["pos"], "velocity": x["velocity"]} for c, x in ((d["car_id"], me), (d["other_car_id"], other))]}
         s.add(Incident(server_id=client.server_id, ts=now, session_type=sess_info.get("session_type"), session_name=sess_info.get("name", ""),
                        session_ms=client.board.elapsed_ms(now), kind=d["kind"], car_id=d["car_id"],
                        driver_guid=me.get("driver_guid"), driver_name=me.get("driver_name", ""),
                        other_guid=other.get("driver_guid"), other_name=other.get("driver_name", ""),
-                       speed=d["speed"], value=d["value"], world_pos=d["world_pos"]))
+                       speed=d["speed"], value=d["value"], world_pos=d["world_pos"], fault_guid=fault, evidence=evidence))
         s.commit()

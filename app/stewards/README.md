@@ -10,16 +10,19 @@
   - `client_event` contra el entorno → `wall`; contra otro auto → `contact` (ambos coches avisan, ver dedup); ambos solo si `speed` llega al mínimo.
   - `lap_completed` con `cuts > 0` → `cuts` (`value` = cuántos cortes en esa vuelta).
 
+- `BEHIND_DEG = 35`, `SAME_WAY_DEG = 70`, `MOVING = 3.0` (m/s): umbrales de la sugerencia de culpa (ver `at_fault`).
+- `at_fault(a, b) -> (0 | 1 | None, motivo)`: con el último `car_update` de cada auto (`pos`, `velocity` en el plano x/z) culpa a quien **venía detrás y avanzando hacia el otro** en la misma dirección. Contacto lateral, de frente o con autos parados → `None` («lo decide el comisario»). Es una **sugerencia**: las posiciones son de ~5 Hz.
+
 ### `engine.py`
 - `DEDUP_S = 1.0`, `_recent: dict[(server_id, kind, coches)] -> epoch`: acServer reporta un contacto desde los dos autos y un roce como ráfaga; se guarda un incidente por coche/pareja por segundo. `cuts` no se deduplica (llega una vez por vuelta). El contacto usa la pareja ordenada, así A→B y B→A son la misma clave.
-- `on_event(client, event, now=None)`: lo llama `ACSPClient._apply` con **cada** evento. Sin detección sale sin tocar la BD. Si hay: lee `Server.stewards`; solo con `"shadow"` escribe un `Incident` (piloto y nombre salen de `client.cars`, sesión de `client.session`, reloj de `client.board.elapsed_ms`). Escribe síncrono en SQLite, como `bans.is_banned`.
+- `on_event(client, event, now=None)`: lo llama `ACSPClient._apply` con **cada** evento. Sin detección sale sin tocar la BD. Si hay: lee `Server.stewards`; solo con `"shadow"` escribe un `Incident` (en un contacto calcula además `fault_guid` y `evidence` con `at_fault`; piloto y nombre salen de `client.cars`, sesión de `client.session`, reloj de `client.board.elapsed_ms`). Escribe síncrono en SQLite, como `bans.is_banned`.
 
 ### `api.py` (router con prefijo `/servers/{server_id}`; el guard de `api/v1` deja leer al comisario y escribir al admin)
 - `GET /incidents?kind=&limit=` → `Incident` más recientes primero (límite 500).
 - `PUT /stewards` `{mode: off|shadow}` → cambia `Server.stewards` y devuelve el `ServerOut`.
 
 ## Datos
-- Tabla `incidents` (`app/models.py: Incident`): server_id, ts, session_type/name/ms, kind (`wall|contact|cuts`), car_id, driver/other guid y nombre, speed, value, world_pos. Solo se añade.
+- Tabla `incidents` (`app/models.py: Incident`): server_id, ts, session_type/name/ms, kind (`wall|contact|cuts`), car_id, driver/other guid y nombre, speed, value, world_pos, `fault_guid` (contacto: a quién señala la heurística, `None` si no hay culpa clara) y `evidence` (contacto: posición y velocidad de los dos autos y el motivo). «Piloto» y «con» de un contacto solo dicen quién reportó primero el evento, **no** quién tuvo la culpa. Solo se añade.
 - `Server.stewards`: `off` (por defecto) | `shadow`. Se muestra también en `ServerOut`.
 
 ## Interactions
