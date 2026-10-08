@@ -232,6 +232,8 @@ class Incident(SQLModel, table=True):
     speed: float = 0.0  # impact speed as acServer reports it (wall, contact)
     value: int = 0  # cuts: how many in the lap
     world_pos: list = Field(default_factory=list, sa_type=JSON)
+    fault_guid: str | None = None  # contact only: who the heuristic blames (None = no clear fault); a suggestion for the stewards, never a verdict
+    evidence: dict = Field(default_factory=dict, sa_type=JSON)  # contact only: both cars' last position/velocity and the reason for the suggestion
 
 
 class Activity(SQLModel, table=True):

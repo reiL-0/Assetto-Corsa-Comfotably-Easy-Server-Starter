@@ -53,3 +53,26 @@ def test_dedup_window_expires():
     engine.on_event(c, _hit(0), now=1000.5)
     engine.on_event(c, _hit(0), now=1002.0)
     assert len(api.get(f"{V}/servers/{sid}/incidents").json()) == 2
+
+
+def _car(x, z, vx, vz=0.0):
+    return {"pos": [x, 0.0, z], "velocity": [vx, 0.0, vz]}
+
+
+def test_at_fault_blames_only_a_clear_rear_end_hit():
+    from app.stewards.detectors import at_fault
+    assert at_fault(_car(0, 0, 20), _car(5, 0, 10))[0] == 0     # a drives into b's back
+    assert at_fault(_car(5, 0, 10), _car(0, 0, 20))[0] == 1     # same, roles swapped
+    assert at_fault(_car(0, 0, 20), _car(0, 3, 20))[0] is None  # side by side
+    assert at_fault(_car(0, 0, 20), _car(5, 0, -20))[0] is None # head-on
+    assert at_fault(_car(0, 0, 0), _car(5, 0, 0))[0] is None    # both stopped
+
+
+def test_contact_incident_keeps_the_suggested_fault_and_the_evidence():
+    sid = api.post(f"{V}/servers", json={"name": "st3"}).json()["id"]
+    api.put(f"{V}/servers/{sid}/stewards", json={"mode": "shadow"})
+    c = acsp.ACSPClient(sid)
+    c.cars = {0: {"driver_guid": A, "driver_name": "A", **_car(0, 0, 20)}, 1: {"driver_guid": B, "driver_name": "B", **_car(5, 0, 10)}}
+    c._apply(_hit(1, 0))   # reported by the car in front: it is still A who hit B
+    row = api.get(f"{V}/servers/{sid}/incidents").json()[0]
+    assert row["fault_guid"] == A and len(row["evidence"]["cars"]) == 2
