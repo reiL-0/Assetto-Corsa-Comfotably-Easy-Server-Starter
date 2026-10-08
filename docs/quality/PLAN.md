@@ -64,11 +64,13 @@ Referencias: manager `app/db.py`, `app/models.py`; sitio `db.py` y `telemetry_si
 
 Aceptación:
 
-- [ ] Una base antigua representativa conserva sus filas y obtiene los valores esperados.
-- [ ] Instalación nueva y actualización tienen restricciones e índices equivalentes para lo modificado.
-- [ ] Reejecutar la migración no altera datos ni vuelve a aplicarla.
-- [ ] Una migración fallida no se registra como completada.
-- [ ] El procedimiento de recuperación distingue reversión de código y recuperación de datos.
+- [x] Una base antigua representativa conserva sus filas y obtiene los valores esperados.
+- [x] Instalación nueva y actualización tienen restricciones e índices equivalentes para lo modificado.
+- [x] Reejecutar la migración no altera datos ni vuelve a aplicarla.
+- [x] Una migración fallida no se registra como completada.
+- [x] El procedimiento de recuperación distingue reversión de código y recuperación de datos.
+
+Realizado solo en el manager (SQL versionado, sin Alembic). Pendiente de T1.1: el sitio (`db.py`, `telemetry_site/app.py`).
 
 ### T1.2 — Exclusión del ciclo de vida por servidor
 
