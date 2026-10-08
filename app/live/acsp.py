@@ -373,6 +373,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.cars[event["car_id"]] = joined
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
+        from app.stewards import engine   # (late: the detectors read this module's constants)
+        engine.on_event(self, event)
 
     def _kick_qualy_banned(self, cars: list[dict]) -> None:
         """The league keeps some drivers from qualifying (app/league.py): they are kicked while the server is in qualifying and can come

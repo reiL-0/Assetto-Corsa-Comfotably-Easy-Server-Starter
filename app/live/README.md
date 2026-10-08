@@ -48,7 +48,7 @@ Lo que hace el plugin oficial `plugin-dynamic-conditions` de CSP (leído del có
 El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACSP. acServer imprime su clasificación tras cada vuelta (`SendLapCompletedMessage` + una línea `N) nombre BEST: … TOTAL: … Laps:n SesID:i HasFinished:b` por plaza), quién ocupa cada plaza (`Dispatching TCP message to <auto> (<plaza>) [<nombre> []]`, con el Steam ID en la línea `Looking for available slot … GUID` anterior) y la sesión (`SENDING session name/type/time/laps`, `NextSession`). `feed(línea)` (lo llama `supervisor.Instance._tail` con cada línea nueva) mantiene un `LiveBoard`, la misma estructura que rellena ACSP, así que `acsm.leaderboard` sirve el mismo JSON de cualquiera de las dos fuentes. Sabe menos que ACSP: sin posición en pista, velocidad punta ni última vuelta. Un bloque completo manda sobre quién está conectado.
 
 ## Interactions
-- **Fed by:** `supervisor.start` → `acsp.connect`; `ACSPClient._apply` calls `board.apply` for every event.
+- **Fed by:** `supervisor.start` → `acsp.connect`; `ACSPClient._apply` calls `board.apply` and `app.stewards.engine.on_event` for every event (the latter only records in `Server.stewards == "shadow"`).
 - **Read by:** the league site (`servers.json` `acsmUrl` = `http://127.0.0.1:8080/api/v1/servers/<id>/acsm`, `internal: true`)
   for `/api/leaderboard`, `/api/live-map` (+ `/api/live-map/image` relay) and the telemetry backend's connection check.
 - **Content:** tracks uploaded with `POST /content/tracks` (zip/rar) or `POST /content/tracks/import` (file in the

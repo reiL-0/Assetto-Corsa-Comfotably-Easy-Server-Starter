@@ -46,6 +46,7 @@ class ServerOut(BaseModel):
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
     wake: str = "window"
+    stewards: str = "off"
     limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
     integrity_extras: bool = False
@@ -73,6 +74,7 @@ def _out(s: Server) -> ServerOut:
         config=s.config,
         entry_list=s.entry_list,
         wake=s.wake,
+        stewards=s.stewards,
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
