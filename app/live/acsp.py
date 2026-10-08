@@ -49,6 +49,7 @@ COLLISION_WITH_CAR = 10
 COLLISION_WITH_ENV = 11
 
 
+TRAIL = 50  # position samples kept per car (~10 s at the 5 Hz asked for)
 POS_INTERVAL_MS = 200  # car positions to ask the server for (5 Hz is plenty for a map)
 
 
@@ -326,6 +327,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.events: deque[dict] = deque(maxlen=max_events)
         self.n_events = 0  # total ever appended; the deque forgets old ones, /live needs a cursor
         self.cars: dict[int, dict] = {}
+        self.trail: dict[int, deque] = {}  # car_id -> last TRAIL (time, pos, velocity) samples: a contact is reported 1.5-2.5 s late, app/stewards looks back in here
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
@@ -378,7 +380,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.board.apply(joined)
             self.cars[event["car_id"]] = joined
         elif t == "car_update":
-            self.cars.setdefault(event["car_id"], {}).update(event, seen=time.time())   # `seen`: how old the position is (app/stewards projects it)
+            self.cars.setdefault(event["car_id"], {}).update(event)
+            self.trail.setdefault(event["car_id"], deque(maxlen=TRAIL)).append((time.time(), event["pos"], event["velocity"]))
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)
 
