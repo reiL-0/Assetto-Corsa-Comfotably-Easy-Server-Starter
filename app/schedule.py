@@ -2,7 +2,7 @@
 
 `run_forever` ticks every TICK seconds from the app lifespan. Each tick, for every pending schedule: post the nearest
 reminder that has come due (older missed ones are marked sent, not posted), and at `start_at` load the event onto the
-server and restart it (`servers.apply_to_server`) unless a player already woke it with the event loaded (`loaded`). A start
+server and restart it (`server_service.apply`) unless a player already woke it with the event loaded (`loaded`). A start
 that is more than LATE seconds overdue (the manager was down) is marked `missed` instead of surprising the players.
 Starting restarts the server: whoever is on it is disconnected.
 
@@ -35,7 +35,8 @@ from app.config import settings
 from app.db import SessionDep, engine
 from app.models import Event, Rsvp, Schedule, Server, User
 from app.live import acsp
-from app.servers import apply_to_server, server_lock, start_server, stop_instance
+from app.services import server_service
+from app.services.server_service import ServerError
 
 log = logging.getLogger("acmanager.schedule")
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -162,11 +163,11 @@ async def _load_once(sess: Session, sc: Schedule, ev: Event, srv: Server) -> boo
     """Loads the event on the server unless it already is; True if THIS call applied it. Decision and apply are one step under the server's lock:
     a wake and the tick that are both about to load the same event queue up, and the second one re-reads `loaded` after the first finished
     (so it does not apply again and kick whoever is joining, and if the first failed it tries itself)."""
-    async with server_lock(srv.id):
+    async with server_service.server_lock(srv.id):
         sess.refresh(sc, ["loaded"])
         if sc.loaded:
             return False
-        await apply_to_server(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}), held=True)
+        await server_service.apply(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}), held=True)
         sc.loaded = True
         sess.add(sc)
         sess.commit()
@@ -185,8 +186,8 @@ async def wake(server_id: int, now: float | None = None) -> bool:
         ev, srv = (sess.get(Event, sc.event_id), sess.get(Server, sc.server_id)) if sc else (None, None)
         if sess.get(Server, server_id) and sess.get(Server, server_id).wake == "always" and not sc:   # no event: start it as it was left
             try:
-                await start_server(server_id, sess)
-            except HTTPException as e:
+                await server_service.start(sess, server_id)
+            except ServerError as e:
                 log.warning("wake of server %s failed: %s", server_id, e.detail)
                 return False
             metrics.log(server_id, "wake", name="always")
@@ -195,8 +196,8 @@ async def wake(server_id: int, now: float | None = None) -> bool:
             return False
         try:
             if not await _load_once(sess, sc, ev, srv):   # already loaded (an earlier wake, the tick): just start the server
-                await start_server(server_id, sess)
-        except HTTPException as e:
+                await server_service.start(sess, server_id)
+        except ServerError as e:
             log.warning("wake of server %s failed: %s", server_id, e.detail)
             return False
         metrics.log(server_id, "wake", name=ev.title)
@@ -284,7 +285,7 @@ async def _tick_pending(sess: Session, sc: Schedule, ev: Event, srv: Server, now
         await _load_once(sess, sc, ev, srv)   # (a player may have woken the server early with the event already on it: then nothing is applied again)
         sc.state = "running" if sc.duration_min else "done"
         discord.announce(f"🏁 **{ev.title}** ya está en marcha en {srv.name}" + _extra(sc))
-    except HTTPException as e:
+    except ServerError as e:
         sc.state, sc.result = "failed", str(e.detail)
         discord.announce(f"⚠️ **{ev.title}** no pudo iniciarse en {srv.name}: {e.detail}")
 
@@ -300,7 +301,7 @@ async def _tick_running(sc: Schedule, ev: Event, srv: Server, now: float) -> Non
         if inst and inst.running:
             if inst.acsp and inst.acsp.cars and now < end + END_GRACE:   # a race that overran: let it finish, stop when the last one leaves
                 return
-            await stop_instance(sc.server_id, inst, "event_end")
+            await server_service.stop_instance(sc.server_id, inst, "event_end")
         sc.state = "done"
         discord.announce(f"🔚 **{ev.title}** terminó: servidor {srv.name} detenido")
 

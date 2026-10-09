@@ -2,11 +2,12 @@ import asyncio
 import time
 
 from conftest import ADMIN
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app import discord, schedule
+from app.services import server_service
+from app.services.server_service import ServerError
 from app.db import engine
 from app.main import app
 from app.models import Schedule
@@ -31,7 +32,7 @@ def _tick(now, monkeypatch, applied=None):
         if isinstance(applied, Exception):
             raise applied
         (applied if applied is not None else []).append((srv.id, body.restart))
-    monkeypatch.setattr(schedule, "apply_to_server", fake_apply)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
     asyncio.run(schedule.tick(now))
     return said
 
@@ -78,7 +79,7 @@ def test_late_manager_posts_only_the_nearest_reminder_and_old_starts_are_missed(
 
 def test_failed_start_is_reported(monkeypatch):
     _, sc = _setup(100, reminders=())
-    said = _tick(sc["start_at"] + 1, monkeypatch, HTTPException(409, "track not installed"))
+    said = _tick(sc["start_at"] + 1, monkeypatch, ServerError(409, "track not installed"))
     r = _row(sc["id"])
     assert r.state == "failed" and "track not installed" in r.result and "no pudo iniciarse" in said[-1]
 
@@ -134,10 +135,10 @@ def test_wake_loads_the_event_once_then_just_starts_the_server(monkeypatch):
     async def fake_apply(sess, srv, body, **kw):
         applied.append((srv.id, body.restart))
 
-    async def fake_start(server_id, sess):
+    async def fake_start(sess, server_id):
         started.append(server_id)
-    monkeypatch.setattr(schedule, "apply_to_server", fake_apply)
-    monkeypatch.setattr(schedule, "start_server", fake_start)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
+    monkeypatch.setattr(server_service, "start", fake_start)
     assert asyncio.run(schedule.wake(sid, t0 - 7200)) is False and applied == []          # window not open yet
     assert asyncio.run(schedule.wake(sid, t0 - 600)) is True and applied == [(sid, True)] and _row(sc["id"]).loaded
     assert asyncio.run(schedule.wake(sid, t0 - 300)) is True and started == [sid] and len(applied) == 1   # loaded: no second apply
@@ -281,10 +282,10 @@ def _race(monkeypatch, sid, apply_fail=None):
         if apply_fail:
             raise apply_fail
 
-    async def fake_start(server_id, sess):
+    async def fake_start(sess, server_id):
         started.append(server_id)
-    monkeypatch.setattr(schedule, "apply_to_server", fake_apply)
-    monkeypatch.setattr(schedule, "start_server", fake_start)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
+    monkeypatch.setattr(server_service, "start", fake_start)
     return applied, started
 
 
@@ -305,7 +306,7 @@ def test_a_wake_and_the_tick_load_the_event_only_once(monkeypatch):
 def test_a_failed_apply_gives_the_claim_back_so_the_next_try_loads_the_event(monkeypatch):
     sid, sc = _setup(100, reminders=(), duration=60)
     t0 = sc["start_at"]
-    applied, _ = _race(monkeypatch, sid, apply_fail=HTTPException(409, "track not installed"))
+    applied, _ = _race(monkeypatch, sid, apply_fail=ServerError(409, "track not installed"))
     assert asyncio.run(schedule.wake(sid, t0 + 1)) is False
     assert not _row(sc["id"]).loaded                          # not stuck as "loaded" with nothing on the server
     assert asyncio.run(schedule.wake(sid, t0 + 2)) is False and applied == [sid, sid]   # tried again, it was not skipped

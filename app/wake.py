@@ -2,7 +2,7 @@
 
 Per server (`Server.wake`): `off` = never; `window` = only inside an event window (see schedule.open_window); `always`.
 The HTTP port (game port + 1) is always the manager's, never acServer's (that one listens on `http_internal`, see
-`servers._ports`): while the server runs the manager relays `/INFO` and `/JSON|…` to acServer (swapping its own port number for the
+`server_service.ports`): while the server runs the manager relays `/INFO` and `/JSON|…` to acServer (swapping its own port number for the
 public one) and answers `/api/details`, the Content Manager wrapper's page whose `description` is the server's welcome text; it keeps
 answering through a start. While a server is stopped and its wake mode allows it, the manager also holds the game port instead of acServer:
 - the HTTP port (game port + 1) answers like acServer would with nobody on it: `/INFO` (name, track, cars, slots,
@@ -37,7 +37,7 @@ from app import requirements, schedule, supervisor, timeline
 from app.config import settings
 from app.db import engine
 from app.models import Server
-from app.servers import _ports
+from app.services.server_service import ports as _ports
 
 log = logging.getLogger("acmanager.wake")
 SYNC_EVERY = 5.0  # seconds between looks at which servers should be listened for
