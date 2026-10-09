@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON
+from sqlalchemy import JSON, Index
 from sqlmodel import Field, SQLModel
 
 
@@ -36,6 +36,7 @@ class Token(SQLModel, table=True):
 
 class Server(SQLModel, table=True):
     __tablename__ = "servers"
+    __table_args__ = (Index("uq_servers_base_port", "base_port", unique=True),)   # a port block belongs to one server (db._m002 adds it to old databases)
 
     id: int | None = Field(default=None, primary_key=True)
     name: str
