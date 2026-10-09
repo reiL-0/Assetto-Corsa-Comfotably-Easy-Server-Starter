@@ -18,11 +18,11 @@ function env(routes) {
   ["name", "track", "track_config", "max_clients", "password"].forEach((k) => { form[k] = { value: "" }; });
   const fetch = (url, opts) => {
     opts = opts || {}; const m = opts.method || "GET"; calls.push(m + " " + url);
-    const r = routes.find(([f]) => f(m, url));
+    const r = routes.find(([f]) => f(m, url, opts));
     return r ? r[1](m, url, opts) : Promise.resolve(reply({}));
   };
   const reply = (o, status = 200) => ({ ok: status < 400, status, headers: { get: () => "application/json" }, json: async () => o, text: async () => JSON.stringify(o) });
-  const ctx = { document, fetch, location: { hostname: "h" }, FormData: function (f) { this.get = (k) => f[k].value; }, confirm: () => true, console,
+  const ctx = { document, fetch, AbortSignal, location: { hostname: "h" }, FormData: function (f) { this.get = (k) => f[k].value; }, confirm: () => true, console,
     setTimeout, clearTimeout, setInterval: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, Object, Number, String, Promise, JSON, Array };
   vm.createContext(ctx);
   vm.runInContext(script, ctx);
@@ -47,9 +47,12 @@ const rep = (o, st) => ({ ok: (st || 200) < 400, status: st || 200, headers: { g
     const tick = e.timers.find((t) => t.ms === 4000).fn;
     for (let i = 0; i < 6; i++) { tick(); await settle(3); }
     assert.strictEqual(lists, 1, "six ticks during a slow read made " + lists + " list reads");
+    e.els["btn-reload"].onclick(); e.els["btn-reload"].onclick(); await settle(3);   // the user presses «reload» twice meanwhile: ONE more read is queued
     slow.go(); await settle(60);
-    assert.strictEqual(lists, 2, "the ticks collapse into ONE rerun");
+    assert.strictEqual(lists, 2, "the ticks are skipped; the manual reloads collapse into ONE rerun (reads: " + lists + ")");
     assert.strictEqual(e.els["servers-tbody"].rows.length, 2, "two servers, two rows (no duplicates)");
+    // a slow page does not chain reads back to back: after it finished, the timer's next tick starts the next read, not an immediate one
+    assert.strictEqual(lists, 2);
   }
 
   // 2) a failed status read is «DESCONOCIDO», its toggle is disabled, and it is not counted as stopped
@@ -87,6 +90,18 @@ const rep = (o, st) => ({ ok: (st || 200) < 400, status: st || 200, headers: { g
     slow.go(); await submit; await settle();
     const patches = e.calls.filter((c) => c.startsWith("PATCH"));
     assert.deepStrictEqual(patches, ["PATCH /api/v1/servers/1"], "A's form went to A, not to B: " + patches);
+  }
+
+  // 4) every read carries a timeout signal, so one that never answers frees the page (writes get a longer one)
+  {
+    const seen = [];
+    const e = env([
+      [(m, u, o) => { seen.push([m, u, !!(o && o.signal)]); return false; }, () => null],
+      [(m, u) => u.endsWith("/servers"), () => Promise.resolve(rep([S(1, "A")]))],
+      [(m, u) => /status$/.test(u), () => Promise.resolve(rep({ running: false }))],
+    ]);
+    await settle(40);
+    assert.ok(seen.length >= 2 && seen.every((x) => x[2]), "all requests have a timeout signal: " + JSON.stringify(seen));
   }
 
   console.log("servers page ok");
