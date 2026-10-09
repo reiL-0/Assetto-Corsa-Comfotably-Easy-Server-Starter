@@ -167,7 +167,9 @@ async def _load_once(sess: Session, sc: Schedule, ev: Event, srv: Server) -> boo
         sess.refresh(sc, ["loaded"])
         if sc.loaded:
             return False
-        await server_service.apply(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}), held=True)
+        result = await server_service.apply(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}), held=True)
+        if result.start_error:   # the config is on the server but it did not start: not "loaded" (a wake / the next tick tries again), the reason is kept
+            raise result.start_error
         sc.loaded = True
         sess.add(sc)
         sess.commit()

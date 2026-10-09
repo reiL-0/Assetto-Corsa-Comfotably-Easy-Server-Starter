@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,16 @@ class ServerError(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
         self.status, self.detail = status, detail
+
+
+@dataclass
+class ApplyResult:
+    """What `apply` did. A refusal BEFORE anything is saved (bad session, content missing) is a raised ServerError; once the configuration is
+    committed the outcome is this: `restarted` (it was (re)started with the new config) or `start_error` (config saved, start failed: the
+    server keeps the new config and a later start / retry uses it)."""
+
+    restarted: bool = False
+    start_error: ServerError | None = None
 
 
 def ports(base: int) -> dict[str, int]:
@@ -156,7 +167,7 @@ def write_instance(s: Server) -> Path:
     return d
 
 
-async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -> bool:
+async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -> ApplyResult:
     """`held`: the caller already holds server_lock(s.id) (schedule does, to decide on `loaded` and apply as one step); the lock is not reentrant."""
     server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
@@ -212,13 +223,16 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     sess.add(s)
     sess.commit()
     sess.refresh(s)
-    restarted = False
+    result = ApplyResult()
     if body.restart:
-        async with (nullcontext() if held else server_lock(server_id)):   # stop + start as ONE step: a wake / API start / event end cannot slip in between
-            await supervisor.stop(server_id)
-            await start_unlocked(server_id, sess)
-        restarted = True
-    return restarted
+        try:
+            async with (nullcontext() if held else server_lock(server_id)):   # stop + start as ONE step: a wake / API start / event end cannot slip in between
+                await supervisor.stop(server_id)
+                await start_unlocked(server_id, sess)
+            result.restarted = True
+        except ServerError as e:
+            result.start_error = e   # saved, but not running: reported, not hidden behind a bare refusal
+    return result
 
 
 async def start(sess: Session, server_id: int, held: bool = False) -> dict:

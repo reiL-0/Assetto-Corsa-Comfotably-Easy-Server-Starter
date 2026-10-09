@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from app import discord, schedule
 from app.services import server_service
-from app.services.server_service import ServerError
+from app.services.server_service import ApplyResult, ServerError
 from app.db import engine
 from app.main import app
 from app.models import Schedule
@@ -32,6 +32,7 @@ def _tick(now, monkeypatch, applied=None):
         if isinstance(applied, Exception):
             raise applied
         (applied if applied is not None else []).append((srv.id, body.restart))
+        return ApplyResult(restarted=True)
     monkeypatch.setattr(server_service, "apply", fake_apply)
     asyncio.run(schedule.tick(now))
     return said
@@ -84,6 +85,19 @@ def test_failed_start_is_reported(monkeypatch):
     assert r.state == "failed" and "track not installed" in r.result and "no pudo iniciarse" in said[-1]
 
 
+def test_config_saved_but_start_failed_is_a_failed_start_and_the_event_is_not_marked_loaded(monkeypatch):
+    _, sc = _setup(100, reminders=())
+    said = []
+    monkeypatch.setattr(discord, "announce", said.append)
+
+    async def saved_not_started(sess, srv, body, **kw):
+        return ApplyResult(start_error=ServerError(409, "cannot spawn"))
+    monkeypatch.setattr(server_service, "apply", saved_not_started)
+    asyncio.run(schedule.tick(sc["start_at"] + 1))
+    r = _row(sc["id"])
+    assert r.state == "failed" and "cannot spawn" in r.result and not r.loaded and "no pudo iniciarse" in said[-1]
+
+
 class _FakeAcsp:
     def __init__(self):
         self.sent = []
@@ -134,6 +148,7 @@ def test_wake_loads_the_event_once_then_just_starts_the_server(monkeypatch):
 
     async def fake_apply(sess, srv, body, **kw):
         applied.append((srv.id, body.restart))
+        return ApplyResult(restarted=True)
 
     async def fake_start(sess, server_id):
         started.append(server_id)
@@ -281,6 +296,7 @@ def _race(monkeypatch, sid, apply_fail=None):
         await asyncio.sleep(0.05)
         if apply_fail:
             raise apply_fail
+        return ApplyResult(restarted=True)
 
     async def fake_start(sess, server_id):
         started.append(server_id)

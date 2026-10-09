@@ -158,9 +158,9 @@ Referencias: `app/servers.py`, `app/schedule.py`, `app/league.py`, `app/wake.py`
 
 Aceptación:
 
-- [ ] Scheduler y wake dejan de llamar handlers HTTP para las operaciones extraídas.
-- [ ] Las reglas compartidas tienen una sola implementación.
-- [ ] Se mantienen rutas, autorización, configuración resultante y comportamiento documentado.
+- [x] Scheduler y wake dejan de llamar handlers HTTP para las operaciones extraídas.
+- [x] Las reglas compartidas tienen una sola implementación.
+- [x] Se mantienen rutas, autorización, configuración resultante y comportamiento documentado.
 
 ### T4.2 — Límites de la telemetría del sitio
 

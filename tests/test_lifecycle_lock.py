@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app import content, servers, supervisor
+from app.services import server_service
 from app.config import settings
 from app.db import engine
 from app.main import app
@@ -78,10 +79,15 @@ def test_a_failed_start_inside_apply_releases_the_lock(tmp_path, monkeypatch):
 
     async def scenario():
         with Session(engine) as s:
+            res = await server_service.apply(s, s.get(Server, sid), servers.SessionIn(**BODY))
+            assert res.restarted is False and res.start_error.status == 409      # saved, start failed: a result, not a bare refusal
+            assert s.get(Server, sid).session["track"] == "lockspa"              # the config really is on the server
             try:
                 await servers.apply_to_server(s, s.get(Server, sid), servers.SessionIn(**BODY))
-            except Exception as e:  # 409 from the failed start; the config was saved before
-                assert getattr(e, "status_code", None) == 409
+            except Exception as e:  # the route says so: same 409, and that the configuration was saved
+                assert getattr(e, "status_code", None) == 409 and str(e.detail).startswith("configuración guardada, arranque fallido")
+            else:
+                raise AssertionError("the failed start must reach the caller")
             assert not servers.server_lock(sid).locked()       # released: a new attempt is possible
     asyncio.run(scenario())
 

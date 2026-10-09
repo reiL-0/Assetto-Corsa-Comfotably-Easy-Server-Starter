@@ -422,8 +422,10 @@ def _http():
 
 async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn, held: bool = False) -> AppliedOut:
     with _http():
-        restarted = await server_service.apply(sess, s, body, held)
-    return AppliedOut(**_out(s).model_dump(), restarted=restarted)
+        result = await server_service.apply(sess, s, body, held)
+    if result.start_error:   # same status as ever; the message now says the configuration WAS saved
+        raise HTTPException(result.start_error.status, "configuración guardada, arranque fallido: " + result.start_error.detail)
+    return AppliedOut(**_out(s).model_dump(), restarted=result.restarted)
 
 
 @router.post("/{server_id}/apply", response_model=AppliedOut)
