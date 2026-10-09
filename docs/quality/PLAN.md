@@ -48,8 +48,8 @@ Aceptación:
 
 Aceptación:
 
-- [ ] Existe una lista breve de invariantes por tarea.
-- [ ] Los fallos preexistentes, si los hay, están diferenciados de los introducidos.
+- [x] Existe una lista breve de invariantes por tarea.
+- [x] Los fallos preexistentes, si los hay, están diferenciados de los introducidos.
 
 ## Fase 1 — Proteger datos y operaciones concurrentes
 

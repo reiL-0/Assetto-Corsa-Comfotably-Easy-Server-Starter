@@ -33,3 +33,8 @@ def test_the_python_33_filter_refuses_what_33_cannot_take(tmp_path):
 def test_the_python_33_filter_selftest_covers_every_refusal():
     r = run("ops/check_py33.py", "--selftest")
     assert r.returncode == 0 and "selftest ok" in r.stdout, r.stdout + r.stderr
+
+
+def test_baseline_document_matches_the_code():
+    r = run("ops/check_baseline.py")
+    assert r.returncode == 0, r.stdout + r.stderr
