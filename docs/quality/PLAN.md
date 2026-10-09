@@ -210,9 +210,9 @@ Aceptación:
 
 Aceptación:
 
-- [ ] Cada riesgo corregido tiene una prueba de regresión relevante.
-- [ ] La skill y las instrucciones de agentes siguen presentes en cada checkout.
-- [ ] Documentación, versiones y comandos coinciden con la implementación.
+- [x] Cada riesgo corregido tiene una prueba de regresión relevante.
+- [x] La skill y las instrucciones de agentes siguen presentes en cada checkout.
+- [x] Documentación, versiones y comandos coinciden con la implementación.
 
 ## Criterio de cierre de cada cambio
 
