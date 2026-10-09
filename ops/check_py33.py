@@ -25,9 +25,13 @@ def problems(path, src=None):
     except SyntaxError as e:
         return [f"{path}:{e.lineno}: does not parse here: {e.msg}"]
     out = []
+    lines = src.splitlines()
 
     def bad(node, why):
-        out.append(f"{path}:{getattr(node, 'lineno', '?')}: {why}")
+        n = getattr(node, "lineno", None)
+        if n and "py33-ok" in lines[n - 1]:   # the author states this line is fine on 3.3 (e.g. a method of our own that happens to be called .hex())
+            return
+        out.append(f"{path}:{n or '?'}: {why}")
 
     # names the code gives to modules and to things imported from them, so `import subprocess as sp; sp.run` and `from subprocess import run` count too
     modules, imported = {}, {}
@@ -62,10 +66,13 @@ def problems(path, src=None):
                 bad(n, "several *args, or a positional argument after *args, in one call (3.5)")
             if sum(1 for k in n.keywords if k.arg is None) > 1:
                 bad(n, "several **kwargs in one call (3.5)")
+            doubles = [i for i, k in enumerate(n.keywords) if k.arg is None]
+            if doubles and any(k.arg is not None for k in n.keywords[doubles[0] + 1:]):
+                bad(n, "a keyword argument after **kwargs (3.5)")
             if isinstance(n.func, ast.Attribute) and n.func.attr == "hex" and not n.args:
                 bad(n, "`.hex()` (bytes/bytearray/memoryview.hex is 3.5; use binascii.hexlify)")
-            if isinstance(n.func, ast.Name) and imported.get(n.func.id) in NEW_ATTRS:
-                bad(n, f"`{imported[n.func.id][0]}.{imported[n.func.id][1]}` is newer than Python 3.3")
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and imported.get(n.id) in NEW_ATTRS:
+            bad(n, f"`{imported[n.id][0]}.{imported[n.id][1]}` is newer than Python 3.3 (imported by name)")
         elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mod) and isinstance(n.left, ast.Constant) and isinstance(n.left.value, bytes):
             bad(n, "bytes % formatting (3.5)")
         elif isinstance(n, ast.arguments) and n.posonlyargs:
@@ -94,10 +101,12 @@ BAD = {
     "positional-only": "def g(a, /, b): pass", "match": "match x:\n    case 1: pass", "underscore in a number": "n = 1_000",
     "module `typing`": "import typing", "module `asyncio`": "import asyncio", "module `enum`": "from enum import Enum", "module `pathlib`": "import pathlib",
     "subprocess.run": "import subprocess\nsubprocess.run([])", "alias of subprocess.run": "import subprocess as sp\nsp.run([])",
-    "from-import of subprocess.run": "from subprocess import run\nrun([])", "os.scandir": "import os\nos.scandir('.')", "math.inf": "import math\nmath.inf",
+    "from-import of subprocess.run": "from subprocess import run\nrun([])", "from-import used as a value": "from math import inf\nx = inf",
+    "from-import in an except": "from json import JSONDecodeError\ntry:\n    pass\nexcept JSONDecodeError:\n    pass", "keyword after **kwargs": "f(**a, x=1)", "os.scandir": "import os\nos.scandir('.')", "math.inf": "import math\nmath.inf",
     "json.JSONDecodeError": "import json\njson.JSONDecodeError",
 }
-GOOD = ('import os, json, socket, struct, time, binascii\nfrom urllib.parse import urlsplit\n'
+GOOD = ('class W(object):\n    def hex(self):\n        return 1\nW().hex()  # py33-ok: our own method\n'
+        'import os, json, socket, struct, time, binascii\nfrom urllib.parse import urlsplit\n'
         'class A(object):\n    def f(self, a, b=1, *args, **kw):\n        return "%s %d" % (a, b) + "{0}".format(a) + u"x"\n'
         'try:\n    x = int("1")\nexcept (ValueError, TypeError) as e:\n    raise\n'
         'def g():\n    yield from range(3)\nprint("a", end="", file=None)\nos.makedirs("d", exist_ok=True)\nbinascii.hexlify(b"x")\n'

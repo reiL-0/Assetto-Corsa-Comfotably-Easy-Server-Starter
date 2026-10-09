@@ -15,6 +15,9 @@ server and track. Laps logged before `cuts` was recorded have none and do not co
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import time
 from datetime import timezone
 from pathlib import Path
@@ -34,6 +37,8 @@ from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueM
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn
 
+log = logging.getLogger("acmanager.league")
+
 router = APIRouter(prefix="/championships/{championship_id}/members", tags=["leagues"])
 
 
@@ -51,8 +56,14 @@ class MemberOut(MemberIn):
     eligible: bool
 
 
+async def settle_metrics() -> None:
+    """Before an async caller decides eligibility from the lap log: the laps received through the UDP writer thread (app/metrics.py) are written first.
+    Runs the wait in a thread (the event loop never blocks) and says so if the writer could not catch up (the counts may then miss the newest laps)."""
+    if not await asyncio.to_thread(metrics.flush, 2):
+        log.warning("eligibility decided with %s metric event(s) still unwritten", metrics.stats()["queued"])
+
+
 def valid_laps(sess: Session, guid: str, since: float, until: float) -> int:
-    metrics.flush(2)   # laps reach the log through the UDP writer thread (app/metrics.py): wait for the ones already received
     return sess.exec(select(func.count()).select_from(Activity).where(
         Activity.kind == "lap", Activity.guid == guid, Activity.cuts == 0, Activity.ts >= since, Activity.ts <= until)).one()
 

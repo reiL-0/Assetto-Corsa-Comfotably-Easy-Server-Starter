@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import select
 
 from app.db import SessionDep
-from app.league import session_for
+from app.league import session_for, settle_metrics
 from app.models import Championship, Event
 from app.servers import AppliedOut, SessionIn, _get, apply_to_server
 
@@ -142,5 +142,6 @@ def duplicate_event(event_id: int, sess: SessionDep) -> EventOut:
 @router.post("/{event_id}/run", response_model=AppliedOut)
 async def run_event(event_id: int, body: RunIn, sess: SessionDep) -> AppliedOut:
     """Load the event onto a server (checked against the content installed right now) and, by default, restart it."""
+    await settle_metrics()
     session = session_for(sess, _get_event(sess, event_id), time.time()).model_copy(update={"restart": body.restart})
     return await apply_to_server(sess, _get(sess, body.server_id), session)

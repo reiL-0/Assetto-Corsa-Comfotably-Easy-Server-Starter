@@ -243,18 +243,20 @@ def test_udp_callback_does_not_wait_for_a_busy_database():
 
 
 def test_full_queue_drops_and_counts_never_silently(monkeypatch):
-    import queue
+    from collections import deque
 
     class _Alive:   # a writer that never drains: the queue stays full
         def is_alive(self):
             return True
-    monkeypatch.setattr(metrics, "_Q", queue.Queue(maxsize=2))
+    monkeypatch.setattr(metrics, "_buf", deque())
+    monkeypatch.setattr(metrics, "MAX_QUEUED", 2)
     monkeypatch.setattr(metrics, "_writer", _Alive())
-    monkeypatch.setattr(metrics, "_pending", 0)   # (the two accepted events are never written here: put the counter back afterwards)
     before = metrics.stats()["dropped"]
-    for i in range(5):
-        metrics.enqueue(905, "join", guid="G%d" % i)
-    assert metrics.stats()["dropped"] - before == 3 and metrics.stats()["queued"] == 2
+    with metrics._cv:   # (re-entrant) the real writer thread of the other tests cannot take events while this test fills the queue
+        for i in range(5):
+            metrics.enqueue(905, "join", guid="G%d" % i)
+        assert metrics.stats()["dropped"] - before == 3 and metrics.stats()["queued"] == 2
+        metrics._buf.clear()
 
 
 def test_enqueued_event_keeps_the_time_it_happened(monkeypatch):
@@ -295,4 +297,21 @@ def test_practice_requirement_sees_laps_still_in_the_writer_queue():
     with Session(engine) as s:
         before = league.valid_laps(s, "G908", 0, time.time() + 10)
         metrics.enqueue(908, "lap", guid="G908", value=91000, cuts=0)
+        asyncio.run(league.settle_metrics())   # what the async callers (run_event, the scheduler) do before deciding, off the event loop
         assert league.valid_laps(s, "G908", 0, time.time() + 10) == before + 1, "the lap was received but not yet written when the league counted"
+
+
+def test_flush_never_reports_done_while_an_event_is_being_written(monkeypatch):
+    """The event the writer is writing is neither in the queue nor written yet: flush() must still wait for it (the old counter could show 0 early)."""
+    started, release = threading.Event(), threading.Event()
+    real = metrics.log
+
+    def slow(*a, **k):
+        started.set(); release.wait(5)
+        return real(*a, **k)
+    monkeypatch.setattr(metrics, "log", slow)
+    metrics.enqueue(909, "lap", guid="G909", value=1, cuts=0)
+    assert started.wait(5)
+    assert metrics.flush(0.2) is False and metrics.stats()["queued"] == 1, "the event in the writer's hands still counts as pending"
+    release.set()
+    assert metrics.flush(5) and metrics.stats()["queued"] == 0

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
@@ -45,21 +44,20 @@ def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None
 # log() writes in the caller's thread. From a UDP datagram (app/live/acsp.py), that thread is the event loop: one write is ~0.2 ms, but when another
 # writer holds SQLite's write lock the call waits up to busy_timeout (5 s; 1.3 s measured) and every server's packets, the wake relays and the HTTP
 # answers wait with it. enqueue() hands the event to ONE writer thread through a bounded queue and returns at once.
-_Q: "queue.Queue" = queue.Queue(maxsize=5000)
+MAX_QUEUED = 5000
+_cv = threading.Condition()   # ALL the writer's state is guarded by this one lock: the queue, the event being written, the counters
+_buf: "deque" = deque()       # accepted by enqueue() and not yet taken by the writer
+_current = None               # the event the writer is writing right now
 _writer: threading.Thread | None = None
-_guard = threading.Lock()
-_cv = threading.Condition()   # guards _pending and the counters; flush() waits on it (no thread per call)
-_pending = 0                  # events accepted by enqueue() and not yet written (or failed)
 _stats = {"dropped": 0, "written": 0, "failed": 0}
-_STOP = object()
 
 
 def _drain() -> None:
-    global _pending
+    global _current
     while True:
-        item = _Q.get()
-        if item is _STOP:
-            return
+        with _cv:
+            _cv.wait_for(lambda: _buf)
+            item = _current = _buf.popleft()   # taken and marked in ONE step: flush() never sees it as neither queued nor being written
         args, kw = item
         try:
             ok = log(*args, **kw)   # never raises: a failed write is logged there and returned as False
@@ -68,43 +66,43 @@ def _drain() -> None:
             ok = False
         with _cv:
             _stats["written" if ok else "failed"] += 1
-            _pending -= 1
+            _current = None
             _cv.notify_all()
 
 
 def enqueue(server_id: int, kind: str, **kw) -> None:
     """Like log(), for callers that must never wait (the event loop): the event is written by a background thread, in order, with the time it
-    HAPPENED (taken here, not when the writer gets to it). A full queue (the writer far behind: 5000 events) drops the event and COUNTS it
-    (stats()["dropped"]); nothing is dropped silently. Readers that decide from the log (app/league.py: the practice requirement) call flush() first."""
-    global _writer, _pending
+    HAPPENED (taken here, not when the writer gets to it). A full queue (the writer far behind: MAX_QUEUED events) drops the event and COUNTS it
+    (stats()["dropped"]); nothing is dropped silently. Code that decides from the log right after (the league's practice requirement) calls flush()
+    first, from a thread (asyncio.to_thread), never on the event loop."""
+    global _writer
     kw.setdefault("ts", time.time())
-    with _guard:
+    with _cv:
         if _writer is None or not _writer.is_alive():
             _writer = threading.Thread(target=_drain, name="metrics-writer", daemon=True)
             _writer.start()
-    try:
-        _Q.put_nowait(((server_id, kind), kw))
-    except queue.Full:
-        with _cv:
+        if len(_buf) >= MAX_QUEUED:
             _stats["dropped"] += 1
             n = _stats["dropped"]
-        if n in (1, 10, 100) or n % 1000 == 0:
-            log_.error("metrics queue full: %d event(s) dropped so far", n)
-        return
-    with _cv:
-        _pending += 1
+        else:
+            _buf.append(((server_id, kind), kw))
+            _cv.notify_all()
+            return
+    if n in (1, 10, 100) or n % 1000 == 0:
+        log_.error("metrics queue full: %d event(s) dropped so far", n)
 
 
 def flush(timeout: float = 5.0) -> bool:
     """Wait until everything enqueued so far is written (a reader that needs the log up to date, shutdown, tests). False if it did not finish in
-    `timeout`. Free when nothing is pending."""
+    `timeout`. Free when nothing is pending. Blocks the calling thread: not for the event loop."""
     with _cv:
-        return _cv.wait_for(lambda: _pending == 0, timeout)
+        return _cv.wait_for(lambda: not _buf and _current is None, timeout)
 
 
 def stats() -> dict:
     with _cv:
-        return {"queued": _pending, "written": _stats["written"], "failed": _stats["failed"], "dropped": _stats["dropped"]}
+        return {"queued": len(_buf) + (1 if _current is not None else 0), "written": _stats["written"], "failed": _stats["failed"],
+                "dropped": _stats["dropped"]}
 
 
 def purge(now: float | None = None) -> int:

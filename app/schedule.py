@@ -30,7 +30,7 @@ from sqlmodel import Session, select
 from app import announcement, discord, metrics, supervisor
 from app import league
 from app import league
-from app.league import session_for
+from app.league import session_for, settle_metrics
 from app.config import settings
 from app.db import SessionDep, engine
 from app.models import Event, Rsvp, Schedule, Server, User
@@ -163,6 +163,7 @@ async def _load_once(sess: Session, sc: Schedule, ev: Event, srv: Server) -> boo
     """Loads the event on the server unless it already is; True if THIS call applied it. Decision and apply are one step under the server's lock:
     a wake and the tick that are both about to load the same event queue up, and the second one re-reads `loaded` after the first finished
     (so it does not apply again and kick whoever is joining, and if the first failed it tries itself)."""
+    await settle_metrics()   # (before the lock: a wait for the writer must not hold the server)
     async with server_service.server_lock(srv.id):
         sess.refresh(sc, ["loaded"])
         if sc.loaded:
