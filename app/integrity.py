@@ -16,7 +16,7 @@ This module keeps the reference honest:
 - **Seal** (`ContentSeal`): an admin approves the current files (MD5, the same ones acServer logs). `check` compares the files on disk
   with the seal: `ok`, `changed`, `missing` or `unsealed`. Optional **extras** (any file or folder under the server directory, e.g.
   a server-side plugin) can be sealed too and are included when the server's `integrity_extras` is on.
-- **Gate** (`gate`, called by `servers.start_server`): per server `integrity` = `off`; `warn` (default: a changed or missing file is
+- **Gate** (`gate`, called by `server_service.start`): per server `integrity` = `off`; `warn` (default: a changed or missing file is
   reported to Discord, the server starts); `require` (the server does not start unless everything is sealed and unchanged).
 - **Watch** (`on_log_line`, fed by the supervisor with every server log line): a checksum failure reported by acServer is recorded
   (`checksum_fail`) and announced on the status channel.
