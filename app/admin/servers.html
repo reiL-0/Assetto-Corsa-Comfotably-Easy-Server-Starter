@@ -176,10 +176,28 @@ tailwind.config = { darkMode: "class", theme: { extend: {
 <script>
 const API = '/api/v1';
 
+// A signal that aborts after `ms` (AbortSignal.timeout where it exists, a timer where it does not).
+function timeoutSignal(ms) {
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
 async function api(path, opts) {
   opts = opts || {};
-  // a request that never answers must not hold the page: reads give up after 8 s, writes (a start can take a while) after 60 s
-  const res = await fetch(API + path, { signal: AbortSignal.timeout((opts.method || 'GET') === 'GET' ? 8000 : 60000), ...opts });
+  const write = (opts.method || 'GET') !== 'GET';
+  // a request that never answers must not hold the page: reads give up after 8 s, writes (a start can take a while) after 60 s.
+  // The signal comes AFTER opts so a caller cannot drop the limit.
+  let res;
+  try {
+    res = await fetch(API + path, { ...opts, signal: timeoutSignal(write ? 60000 : 8000) });
+  } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error(write ? 'sin respuesta tras 60 s: el cambio PUEDE haberse aplicado, revisa la lista antes de reintentar' : 'sin respuesta tras 8 s');
+    }
+    throw err;
+  }
   if (res.status === 401) {
     const d = document.getElementById('login');
     if (!d.open) d.showModal();
@@ -381,7 +399,7 @@ async function loadServersOnce() {
 async function checkBackend() {
   const el = document.getElementById('backend-status');
   try {
-    await fetch('/healthz', { signal: AbortSignal.timeout(5000) }).then(r => { if (!r.ok) throw new Error(); });
+    await fetch('/healthz', { signal: timeoutSignal(5000) }).then(r => { if (!r.ok) throw new Error(); });
     el.innerHTML = '<span class="w-2 h-2 rounded-full bg-tertiary inline-block"></span>Backend OK';
   } catch (_) {
     el.innerHTML = '<span class="w-2 h-2 rounded-full bg-error inline-block"></span>Backend inaccesible';
