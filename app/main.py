@@ -42,8 +42,8 @@ async def lifespan(_app: FastAPI):
     ticker.cancel()
     waking.cancel()
     sampling.cancel()
-    if not metrics.flush(3):   # the events queued from the UDP callbacks get a moment to reach the database
-        log.warning("shutting down with %s metric events still queued", metrics.stats()["queued"])
+    if not metrics.flush(8):   # (a write can wait 5 s for SQLite's lock)   # the events queued from the UDP callbacks get a moment to reach the database
+        log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
 
 
 app = FastAPI(

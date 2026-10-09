@@ -250,7 +250,49 @@ def test_full_queue_drops_and_counts_never_silently(monkeypatch):
             return True
     monkeypatch.setattr(metrics, "_Q", queue.Queue(maxsize=2))
     monkeypatch.setattr(metrics, "_writer", _Alive())
+    monkeypatch.setattr(metrics, "_pending", 0)   # (the two accepted events are never written here: put the counter back afterwards)
     before = metrics.stats()["dropped"]
     for i in range(5):
         metrics.enqueue(905, "join", guid="G%d" % i)
     assert metrics.stats()["dropped"] - before == 3 and metrics.stats()["queued"] == 2
+
+
+def test_enqueued_event_keeps_the_time_it_happened(monkeypatch):
+    """The writer may get to it later (even after a synchronous log() of a later event): the row carries the time of the EVENT."""
+    t0 = time.time() - 50
+    monkeypatch.setattr(time, "time", lambda: t0)
+    metrics.enqueue(906, "lap", guid="G906", name="x", value=90000, cuts=0)
+    monkeypatch.undo()
+    time.sleep(0.05)
+    assert metrics.flush(5)
+    r = rows(906, "lap")[0]
+    assert abs(r.ts - t0) < 1, "the row has the writer's time, not the event's"
+
+
+def test_failed_write_is_counted_not_written(monkeypatch):
+    before = metrics.stats()
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(metrics, "Session", boom)
+    metrics.enqueue(907, "lap", guid="G907")
+    assert metrics.flush(5)
+    after = metrics.stats()
+    assert after["failed"] == before["failed"] + 1 and after["written"] == before["written"], "a write that failed is not counted as written"
+    assert after["queued"] == 0
+
+
+def test_flush_is_free_when_idle_and_starts_no_thread():
+    assert metrics.flush(0.1)
+    n = threading.active_count()
+    for _ in range(50):
+        assert metrics.flush(0.1)
+    assert threading.active_count() == n
+
+
+def test_practice_requirement_sees_laps_still_in_the_writer_queue():
+    from app import league
+    with Session(engine) as s:
+        before = league.valid_laps(s, "G908", 0, time.time() + 10)
+        metrics.enqueue(908, "lap", guid="G908", value=91000, cuts=0)
+        assert league.valid_laps(s, "G908", 0, time.time() + 10) == before + 1, "the lap was received but not yet written when the league counted"

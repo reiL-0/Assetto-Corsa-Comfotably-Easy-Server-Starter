@@ -23,19 +23,22 @@ KEEP_DAYS = 120
 INCIDENTS = ("server_start", "server_stop", "server_crash", "import_ok", "import_error", "http_5xx")
 
 
-def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None, value=None, cuts: int | None = None, ts: float | None = None) -> None:
+def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None, value=None, cuts: int | None = None, ts: float | None = None) -> bool:
     """Record one event. Never raises: metrics must not be able to break a lap, a start or a request."""
+    stored = True
     try:
         with Session(engine) as s:
             s.add(Activity(ts=ts if ts is not None else time.time(), server_id=server_id, kind=kind, guid=guid, name=name,
                            car=car, track=track, value=value, cuts=cuts))
             s.commit()
     except Exception:
+        stored = False
         log_.exception("could not record %s", kind)
     try:
         discord.on_event(server_id, kind, name, value)
     except Exception:
         log_.exception("discord hook failed for %s", kind)
+    return stored   # (callers ignore it; the writer thread counts failures)
 
 
 # --- the event loop must not wait for SQLite (plan T5.2) --------------------------------------------------------------------------------------
@@ -45,27 +48,36 @@ def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None
 _Q: "queue.Queue" = queue.Queue(maxsize=5000)
 _writer: threading.Thread | None = None
 _guard = threading.Lock()
-_stats = {"dropped": 0, "written": 0}
+_cv = threading.Condition()   # guards _pending and the counters; flush() waits on it (no thread per call)
+_pending = 0                  # events accepted by enqueue() and not yet written (or failed)
+_stats = {"dropped": 0, "written": 0, "failed": 0}
 _STOP = object()
 
 
 def _drain() -> None:
+    global _pending
     while True:
         item = _Q.get()
+        if item is _STOP:
+            return
+        args, kw = item
         try:
-            if item is _STOP:
-                return
-            args, kw = item
-            log(*args, **kw)   # never raises: a failed write is logged there
-            _stats["written"] += 1
-        finally:
-            _Q.task_done()
+            ok = log(*args, **kw)   # never raises: a failed write is logged there and returned as False
+        except Exception:   # a bug in a hook must not kill the only writer
+            log_.exception("metrics writer: unexpected error")
+            ok = False
+        with _cv:
+            _stats["written" if ok else "failed"] += 1
+            _pending -= 1
+            _cv.notify_all()
 
 
 def enqueue(server_id: int, kind: str, **kw) -> None:
-    """Like log(), for callers that must never wait (the event loop): the event is written by a background thread, in order. A full queue (the
-    writer far behind: 5000 events) drops the event and COUNTS it (stats()["dropped"]); nothing is dropped silently."""
-    global _writer
+    """Like log(), for callers that must never wait (the event loop): the event is written by a background thread, in order, with the time it
+    HAPPENED (taken here, not when the writer gets to it). A full queue (the writer far behind: 5000 events) drops the event and COUNTS it
+    (stats()["dropped"]); nothing is dropped silently. Readers that decide from the log (app/league.py: the practice requirement) call flush() first."""
+    global _writer, _pending
+    kw.setdefault("ts", time.time())
     with _guard:
         if _writer is None or not _writer.is_alive():
             _writer = threading.Thread(target=_drain, name="metrics-writer", daemon=True)
@@ -73,20 +85,26 @@ def enqueue(server_id: int, kind: str, **kw) -> None:
     try:
         _Q.put_nowait(((server_id, kind), kw))
     except queue.Full:
-        _stats["dropped"] += 1
-        if _stats["dropped"] in (1, 10, 100) or _stats["dropped"] % 1000 == 0:
-            log_.error("metrics queue full: %d event(s) dropped so far", _stats["dropped"])
+        with _cv:
+            _stats["dropped"] += 1
+            n = _stats["dropped"]
+        if n in (1, 10, 100) or n % 1000 == 0:
+            log_.error("metrics queue full: %d event(s) dropped so far", n)
+        return
+    with _cv:
+        _pending += 1
 
 
 def flush(timeout: float = 5.0) -> bool:
-    """Wait until everything enqueued so far is written (shutdown, tests). False if it did not finish in `timeout`."""
-    done = threading.Event()
-    threading.Thread(target=lambda: (_Q.join(), done.set()), daemon=True).start()
-    return done.wait(timeout)
+    """Wait until everything enqueued so far is written (a reader that needs the log up to date, shutdown, tests). False if it did not finish in
+    `timeout`. Free when nothing is pending."""
+    with _cv:
+        return _cv.wait_for(lambda: _pending == 0, timeout)
 
 
 def stats() -> dict:
-    return {"queued": _Q.qsize(), "written": _stats["written"], "dropped": _stats["dropped"]}
+    with _cv:
+        return {"queued": _pending, "written": _stats["written"], "failed": _stats["failed"], "dropped": _stats["dropped"]}
 
 
 def purge(now: float | None = None) -> int:

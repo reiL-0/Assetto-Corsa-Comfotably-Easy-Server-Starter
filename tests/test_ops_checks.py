@@ -28,3 +28,8 @@ def test_the_python_33_filter_refuses_what_33_cannot_take(tmp_path):
         assert what in r.stderr + r.stdout, what
     (tmp_path / "bad.py").write_text("x = 1\n")
     assert run("ops/check_py33.py", tmp_path).returncode == 0
+
+
+def test_the_python_33_filter_selftest_covers_every_refusal():
+    r = run("ops/check_py33.py", "--selftest")
+    assert r.returncode == 0 and "selftest ok" in r.stdout, r.stdout + r.stderr

@@ -25,7 +25,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session, func, select
 
-from app import discord
+from app import discord, metrics
 from app.db import SessionDep
 from app.config import settings
 from app.auth import CurrentUser
@@ -52,6 +52,7 @@ class MemberOut(MemberIn):
 
 
 def valid_laps(sess: Session, guid: str, since: float, until: float) -> int:
+    metrics.flush(2)   # laps reach the log through the UDP writer thread (app/metrics.py): wait for the ones already received
     return sess.exec(select(func.count()).select_from(Activity).where(
         Activity.kind == "lap", Activity.guid == guid, Activity.cuts == 0, Activity.ts >= since, Activity.ts <= until)).one()
 
