@@ -245,15 +245,16 @@ form.addEventListener('submit', async (e) => {
   if (maxClients) serverSection.MAX_CLIENTS = Number(maxClients);
   serverSection.PASSWORD = password; // empty string clears it -> public server
 
+  const target = editingId;   // the server this form was opened for: clicking «edit» on another row while it saves must not redirect the PATCH
   try {
-    if (editingId) {
-      const current = await api(`/servers/${editingId}`);
+    if (target) {
+      const current = await api(`/servers/${target}`);
       const body = {
         name,
         config: { ...current.config, SERVER: { ...current.config.SERVER, ...serverSection } },
         entry_list: current.entry_list,
       };
-      await api(`/servers/${editingId}`, {
+      await api(`/servers/${target}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       toast('Servidor actualizado.');
@@ -303,7 +304,10 @@ function renderRow(s, status, players) {
   const track = s.config?.SERVER?.TRACK || '—';
   const trackConfig = s.config?.SERVER?.CONFIG_TRACK || '';
   const maxClients = s.config?.SERVER?.MAX_CLIENTS ?? '—';
-  const statusBadge = status.running
+  const unknown = status === null;   // the status read FAILED: that is not «stopped»
+  const statusBadge = unknown
+    ? `<span class="bg-surface-container-highest text-error px-2 py-0.5 text-[10px] uppercase flex items-center gap-1 w-fit" title="No se pudo consultar el estado"><span class="w-1.5 h-1.5 rounded-full bg-error"></span>DESCONOCIDO</span>`
+    : status.running
     ? `<span class="bg-surface-container text-tertiary px-2 py-0.5 text-[10px] uppercase flex items-center gap-1 w-fit"><span class="w-1.5 h-1.5 rounded-full bg-tertiary animate-pulse"></span>EN LÍNEA</span>`
     : `<span class="bg-surface-container-highest text-secondary px-2 py-0.5 text-[10px] uppercase flex items-center gap-1 w-fit"><span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>DETENIDO</span>`;
 
@@ -326,18 +330,25 @@ function renderRow(s, status, players) {
     <td class="py-3 px-3 text-right">
       <div class="flex items-center justify-end gap-1.5">
         <button data-action="edit" class="bg-surface-container px-2 py-1 hover:bg-surface-bright text-on-surface transition-colors" title="Modificar Parámetros"><span class="material-symbols-outlined text-[14px]">edit</span></button>
-        <button data-action="toggle" class="bg-surface-container px-2 py-1 hover:bg-surface-bright text-tertiary transition-colors" title="${status.running ? 'Detener Servidor' : 'Iniciar Servidor'}"><span class="material-symbols-outlined text-[14px]">${status.running ? 'stop' : 'play_arrow'}</span></button>
+        <button data-action="toggle" class="bg-surface-container px-2 py-1 hover:bg-surface-bright text-tertiary transition-colors" title="${unknown ? 'Estado desconocido: espera a la siguiente lectura' : status.running ? 'Detener Servidor' : 'Iniciar Servidor'}" ${unknown ? 'disabled' : ''}><span class="material-symbols-outlined text-[14px]">${unknown ? 'help' : status.running ? 'stop' : 'play_arrow'}</span></button>
         <button data-action="delete" class="bg-surface-container px-2 py-1 hover:bg-error-container text-error transition-colors" title="Eliminar Servidor"><span class="material-symbols-outlined text-[14px]">delete</span></button>
       </div>
     </td>`;
 
   tr.querySelector('[data-action="edit"]').onclick = () => loadIntoForm(s);
-  tr.querySelector('[data-action="toggle"]').onclick = () => toggleServer(s.id, status.running);
+  if (!unknown) tr.querySelector('[data-action="toggle"]').onclick = () => toggleServer(s.id, status.running);
   tr.querySelector('[data-action="delete"]').onclick = () => deleteServer(s.id, s.name);
   return tr;
 }
 
-async function loadServers() {
+let loading = false, rerun = false;
+async function loadServers() {   // never two at once: the 4 s timer, the buttons and the end of an action all come through here
+  if (loading) { rerun = true; return; }   // a slow read in flight: ONE more is queued, not one per tick
+  loading = true;
+  try { await loadServersOnce(); } finally { loading = false; if (rerun) { rerun = false; loadServers(); } }
+}
+
+async function loadServersOnce() {
   let list;
   try {
     list = await api('/servers');
@@ -345,24 +356,24 @@ async function loadServers() {
     toast('No se pudo cargar la lista de servidores: ' + err.message, true);
     return;
   }
-  const tbody = document.getElementById('servers-tbody');
-  tbody.innerHTML = '';
   document.getElementById('empty-state').classList.toggle('hidden', list.length > 0);
 
-  let online = 0;
+  let online = 0, unknown = 0;
+  const rows = document.createDocumentFragment();   // built apart and swapped at the end: no half-empty table, and no duplicated rows
   for (const s of list) {
-    let status = { running: false };
-    try { status = await api(`/servers/${s.id}/status`); } catch (_) { /* server row still shown */ }
-    if (status.running) online++;
+    let status = null;
+    try { status = await api(`/servers/${s.id}/status`); } catch (_) { unknown++; }   // null = unknown, never «stopped»
+    if (status && status.running) online++;
 
     let players = '—';
-    if (status.running) {
+    if (status && status.running) {
       try { players = Object.keys(await api(`/servers/${s.id}/cars`)).length; } catch (_) { /* ACSP not connected yet */ }
     }
-    tbody.appendChild(renderRow(s, status, players));
+    rows.appendChild(renderRow(s, status, players));
   }
+  document.getElementById('servers-tbody').replaceChildren(rows);
   document.getElementById('online-count').innerHTML =
-    `<span class="w-2 h-2 rounded-full bg-primary-container ${online ? 'animate-pulse' : ''} inline-block"></span>${online}/${list.length} EN LÍNEA`;
+    `<span class="w-2 h-2 rounded-full bg-primary-container ${online ? 'animate-pulse' : ''} inline-block"></span>${online}/${list.length} EN LÍNEA${unknown ? ` · ${unknown} SIN DATO` : ''}`;
 }
 
 async function checkBackend() {

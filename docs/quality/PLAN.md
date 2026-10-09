@@ -195,10 +195,10 @@ Referencias: sitio `admin/js/control.js`; manager `app/admin/servers.html`.
 
 Aceptación:
 
-- [ ] Una respuesta de A que llega después de seleccionar B no modifica la pantalla de B.
-- [ ] Una lectura lenta no genera consultas concurrentes ilimitadas ni filas duplicadas.
-- [ ] Un fallo HTTP se diferencia de un servidor realmente detenido.
-- [ ] Una mutación enviada a A no se redirige a B por cambiar la selección.
+- [x] Una respuesta de A que llega después de seleccionar B no modifica la pantalla de B.
+- [x] Una lectura lenta no genera consultas concurrentes ilimitadas ni filas duplicadas.
+- [x] Un fallo HTTP se diferencia de un servidor realmente detenido.
+- [x] Una mutación enviada a A no se redirige a B por cambiar la selección.
 
 ### T5.2 — Prevención permanente
 
