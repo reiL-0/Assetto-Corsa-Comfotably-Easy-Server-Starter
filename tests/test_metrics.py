@@ -1,5 +1,7 @@
 import asyncio
 import secrets
+import threading
+import time
 from datetime import UTC, datetime
 from itertools import pairwise
 
@@ -75,6 +77,7 @@ def test_acsp_events_are_recorded():
     c._apply({"type": "new_connection", "car_id": 0, "driver_name": "Ana", "driver_guid": "G1", "car_model": "bmw", "car_skin": "red"})
     c._apply({"type": "lap_completed", "car_id": 0, "laptime_ms": 91000, "cuts": 0, "grip_level": 1.0, "leaderboard": []})
     c._apply({"type": "connection_closed", "car_id": 0, "driver_name": "Ana", "driver_guid": "G1", "car_model": "bmw", "car_skin": "red"})
+    assert metrics.flush()   # the UDP callbacks hand the events to the writer thread: wait for it
     assert [r.kind for r in rows(903)] == ["session", "join", "lap", "leave"]
     lap = rows(903, "lap")[0]
     assert (lap.guid, lap.name, lap.car, lap.track, lap.value) == ("G1", "Ana", "bmw", "spa", 91000)
@@ -213,3 +216,41 @@ def test_lifecycle_events_are_posted_to_discord_and_the_rest_are_not(monkeypatch
     assert sent == ["🟢 **Servidor #98765** iniciado", "🔴 **Servidor #98765** detenido por inactividad (sin pilotos) · estuvo 1 h 2 min en marcha",
                     "💥 **Servidor #98765** se cayó (código 139, up 90s)"]
 
+
+
+def test_udp_callback_does_not_wait_for_a_busy_database():
+    """A datagram is handled on the event loop: another writer holding SQLite's write lock must not stall it (measured 1.3 s before)."""
+    import threading
+    from sqlalchemy import text
+    release, locked = threading.Event(), threading.Event()
+
+    def hold():
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO activity(ts, server_id, kind) VALUES (0, 0, 'hold')"))
+            locked.set()
+            release.wait(5)
+    t = threading.Thread(target=hold); t.start(); assert locked.wait(5)
+    try:
+        c = acsp.ACSPClient(904)
+        t0 = time.perf_counter()
+        for i in range(20):
+            c._apply({"type": "new_connection", "car_id": i, "driver_name": "P%d" % i, "driver_guid": "G%d" % i, "car_model": "bmw", "car_skin": "red"})
+        assert time.perf_counter() - t0 < 0.5, "the callbacks waited for the locked database"
+    finally:
+        release.set(); t.join()
+    assert metrics.flush(10)
+    assert [r.guid for r in rows(904, "join")] == ["G%d" % i for i in range(20)], "all written, in order"
+
+
+def test_full_queue_drops_and_counts_never_silently(monkeypatch):
+    import queue
+
+    class _Alive:   # a writer that never drains: the queue stays full
+        def is_alive(self):
+            return True
+    monkeypatch.setattr(metrics, "_Q", queue.Queue(maxsize=2))
+    monkeypatch.setattr(metrics, "_writer", _Alive())
+    before = metrics.stats()["dropped"]
+    for i in range(5):
+        metrics.enqueue(905, "join", guid="G%d" % i)
+    assert metrics.stats()["dropped"] - before == 3 and metrics.stats()["queued"] == 2

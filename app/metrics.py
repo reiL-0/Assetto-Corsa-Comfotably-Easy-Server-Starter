@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections import Counter, defaultdict
 
@@ -34,6 +36,57 @@ def log(server_id: int, kind: str, *, guid=None, name=None, car=None, track=None
         discord.on_event(server_id, kind, name, value)
     except Exception:
         log_.exception("discord hook failed for %s", kind)
+
+
+# --- the event loop must not wait for SQLite (plan T5.2) --------------------------------------------------------------------------------------
+# log() writes in the caller's thread. From a UDP datagram (app/live/acsp.py), that thread is the event loop: one write is ~0.2 ms, but when another
+# writer holds SQLite's write lock the call waits up to busy_timeout (5 s; 1.3 s measured) and every server's packets, the wake relays and the HTTP
+# answers wait with it. enqueue() hands the event to ONE writer thread through a bounded queue and returns at once.
+_Q: "queue.Queue" = queue.Queue(maxsize=5000)
+_writer: threading.Thread | None = None
+_guard = threading.Lock()
+_stats = {"dropped": 0, "written": 0}
+_STOP = object()
+
+
+def _drain() -> None:
+    while True:
+        item = _Q.get()
+        try:
+            if item is _STOP:
+                return
+            args, kw = item
+            log(*args, **kw)   # never raises: a failed write is logged there
+            _stats["written"] += 1
+        finally:
+            _Q.task_done()
+
+
+def enqueue(server_id: int, kind: str, **kw) -> None:
+    """Like log(), for callers that must never wait (the event loop): the event is written by a background thread, in order. A full queue (the
+    writer far behind: 5000 events) drops the event and COUNTS it (stats()["dropped"]); nothing is dropped silently."""
+    global _writer
+    with _guard:
+        if _writer is None or not _writer.is_alive():
+            _writer = threading.Thread(target=_drain, name="metrics-writer", daemon=True)
+            _writer.start()
+    try:
+        _Q.put_nowait(((server_id, kind), kw))
+    except queue.Full:
+        _stats["dropped"] += 1
+        if _stats["dropped"] in (1, 10, 100) or _stats["dropped"] % 1000 == 0:
+            log_.error("metrics queue full: %d event(s) dropped so far", _stats["dropped"])
+
+
+def flush(timeout: float = 5.0) -> bool:
+    """Wait until everything enqueued so far is written (shutdown, tests). False if it did not finish in `timeout`."""
+    done = threading.Event()
+    threading.Thread(target=lambda: (_Q.join(), done.set()), daemon=True).start()
+    return done.wait(timeout)
+
+
+def stats() -> dict:
+    return {"queued": _Q.qsize(), "written": _stats["written"], "dropped": _stats["dropped"]}
 
 
 def purge(now: float | None = None) -> int:
@@ -105,6 +158,7 @@ def summary(days: int = 14, tz_offset_min: int = 0, now: float | None = None, ho
     return {
         "daily": [{"day": d, **{k: (len(v) if k == "drivers" else v) for k, v in daily[d].items()}} for d in sorted(daily)],
         "online": online,
+        "writer": stats(),   # events handed over from the UDP callbacks: queued / written / dropped (a full queue drops AND counts)
         "top_tracks": [{"track": t, "sessions": n} for t, n in tracks.most_common(5)],
         "top_cars": [{"car": c, "laps": n} for c, n in cars.most_common(5)],
         "top_drivers": [{"guid": g, "name": names.get(g, g), "laps": n} for g, n in drivers.most_common(5)],

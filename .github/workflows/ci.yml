@@ -1,0 +1,22 @@
+# What gates a deploy (./deploy.sh runs the tests first) also runs on every pull request and every push to main.
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v4   # tests/test_admin_js.py runs the admin pages' JavaScript checks with node
+        with:
+          node-version: "20"
+      - run: pip install -e ".[dev]"
+      - run: pytest

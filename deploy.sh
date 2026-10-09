@@ -16,7 +16,7 @@ if ! git diff --quiet HEAD || [ -n "$(git ls-files --others --exclude-standard)"
   fi
   IDX=$(mktemp -u); GIT_INDEX_FILE=$IDX git add -A; TREE=$(GIT_INDEX_FILE=$IDX git write-tree); rm -f "$IDX"; REV="$REV-dirty"
 fi
-echo "0/5 tests locales"
+echo "0/5 tests locales (los mismos que corre la CI: .github/workflows/ci.yml)"
 .venv/bin/python -m pytest -q -p no:warnings
 echo "Desplegando $REV a $HOST"
 git archive $TREE app pyproject.toml | ssh "$HOST" 'rm -rf /tmp/stage-acm && mkdir /tmp/stage-acm && tar -x -C /tmp/stage-acm'

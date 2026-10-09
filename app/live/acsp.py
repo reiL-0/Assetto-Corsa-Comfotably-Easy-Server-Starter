@@ -367,7 +367,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             from app import bans   # (late, like timeline above)
             if bans.is_banned(event["driver_guid"]):
                 self.send(encode_kick_user(event["car_id"]))
-                metrics.log(self.server_id, "ban_kick", guid=event["driver_guid"], name=event["driver_name"])
+                metrics.enqueue(self.server_id, "ban_kick", guid=event["driver_guid"], name=event["driver_name"])
             elif (self.session or {}).get("session_type") == 2:
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
@@ -392,22 +392,22 @@ class ACSPClient(asyncio.DatagramProtocol):
         for car in cars:
             if car.get("driver_guid") and league.qualy_banned(self.server_id, car["driver_guid"]):
                 self.send(encode_kick_user(car["car_id"]))
-                metrics.log(self.server_id, "qualy_ban_kick", guid=car["driver_guid"], name=car.get("driver_name"))
+                metrics.enqueue(self.server_id, "qualy_ban_kick", guid=car["driver_guid"], name=car.get("driver_name"))
 
     def _record(self, e: dict) -> None:
         """Feed the metrics log with the events worth counting."""
         t, sid = e["type"], self.server_id
         track = self.board.session.get("track")
         if t == "new_connection":
-            metrics.log(sid, "join", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
+            metrics.enqueue(sid, "join", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
         elif t == "connection_closed":
-            metrics.log(sid, "leave", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
+            metrics.enqueue(sid, "leave", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
         elif t == "lap_completed":
             d = self.board._by_car(e["car_id"])
-            metrics.log(sid, "lap", guid=d.guid if d else None, name=d.name if d else None, car=d.model if d else None,
+            metrics.enqueue(sid, "lap", guid=d.guid if d else None, name=d.name if d else None, car=d.model if d else None,
                         track=track, value=e["laptime_ms"], cuts=e["cuts"])
         elif t == "new_session":
-            metrics.log(sid, "session", name=e["name"], track=track, value=e["session_type"])
+            metrics.enqueue(sid, "session", name=e["name"], track=track, value=e["session_type"])
 
     def add_telemetry(self, car_id: int, sample: dict) -> bool:
         """Store an in-game-app sample and stream it. False if it came too soon (rate limit)."""
