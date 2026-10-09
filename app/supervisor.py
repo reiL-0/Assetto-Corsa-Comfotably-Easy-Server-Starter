@@ -155,7 +155,8 @@ class Instance:
             if not self.acsp or self.acsp.cars:
                 last_active = time.time()
             elif time.time() - last_active > settings.idle_stop_seconds:
-                await self.stop(reason="idle")
+                await stop(self.server_id, reason="idle", only=self)   # through the per-server lock, and only while this is still the registered instance
+                return
 
     @property
     def running(self) -> bool:
@@ -321,11 +322,13 @@ async def adopt(
     return inst
 
 
-async def stop(server_id: int) -> None:
+async def stop(server_id: int, reason: str = "manual", only: Instance | None = None) -> None:
+    """`only`: stop the server only if that exact instance is still the registered one, checked once the lock is ours (a restart may
+    have registered a new instance while we waited: an automatic stop aimed at the old one must not hit it)."""
     async with _lock(server_id):
         inst = _instances.get(server_id)
-        if inst:
-            await inst.stop()
+        if inst and (only is None or inst is only):
+            await inst.stop(reason=reason)
 
 
 def live() -> list[Instance]:

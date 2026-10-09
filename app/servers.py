@@ -6,6 +6,7 @@ import asyncio
 import configparser
 import io
 import threading
+from contextlib import nullcontext
 import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime
@@ -417,7 +418,8 @@ def _clock_key(cfg: dict) -> tuple:
             g("SERVER", "CONFIG_TRACK"), g("SERVER", "LOOP_MODE"))
 
 
-async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> AppliedOut:
+async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn, held: bool = False) -> AppliedOut:
+    """`held`: the caller already holds server_lock(s.id) (schedule does, to decide on `loaded` and apply as one step); the lock is not reentrant."""
     server_id = s.id
     if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
         raise HTTPException(400, "enable at least one session (practice, qualify or race)")
@@ -474,14 +476,36 @@ async def apply_to_server(sess: SessionDep, s: Server, body: SessionIn) -> Appli
     sess.refresh(s)
     restarted = False
     if body.restart:
-        await supervisor.stop(server_id)
-        await start_server(server_id, sess)
+        async with (nullcontext() if held else server_lock(server_id)):   # stop + start as ONE step: a wake / API start / event end cannot slip in between
+            await supervisor.stop(server_id)
+            await _start_unlocked(server_id, sess)
         restarted = True
     return AppliedOut(**_out(s).model_dump(), restarted=restarted)
 
 
+# One lock per server for the COMPOSITE operations (apply = stop + start, start with its INI files, stop). supervisor has its own per-server
+# lock inside start/stop; the order is always servers -> supervisor, so there is no deadlock (nothing in supervisor takes this one).
+# ponytail: in-process (asyncio), like the supervisor registry: one manager process; a second process would need a file/DB lock.
+server_locks: dict[int, asyncio.Lock] = {}
+
+
+def server_lock(server_id: int) -> asyncio.Lock:
+    return server_locks.setdefault(server_id, asyncio.Lock())
+
+
 @router.post("/{server_id}/start")
 async def start_server(server_id: int, sess: SessionDep) -> dict:
+    async with server_lock(server_id):   # the INI files are written under it too: two starts never rewrite them while acServer reads them
+        return await _start_unlocked(server_id, sess)
+
+
+async def stop_instance(server_id: int, inst: supervisor.Instance, reason: str) -> None:
+    """Automatic stops (end of an event): same exclusion as the others, and only if `inst` is still the registered one (an apply may have replaced it)."""
+    async with server_lock(server_id):
+        await supervisor.stop(server_id, reason=reason, only=inst)
+
+
+async def _start_unlocked(server_id: int, sess: Session) -> dict:
     s = _get(sess, server_id)
     if not settings.acserver_cmd:
         raise HTTPException(400, "ACM_ACSERVER_CMD is not configured")
@@ -665,7 +689,8 @@ async def adopt_running(sess: Session) -> int:
 @router.post("/{server_id}/stop")
 async def stop_server(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
-    await supervisor.stop(server_id)
+    async with server_lock(server_id):
+        await supervisor.stop(server_id)
     return {"running": False}
 
 
