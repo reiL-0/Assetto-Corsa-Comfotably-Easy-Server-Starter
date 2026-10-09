@@ -155,7 +155,8 @@ class Instance:
             if not self.acsp or self.acsp.cars:
                 last_active = time.time()
             elif time.time() - last_active > settings.idle_stop_seconds:
-                await self.stop(reason="idle")
+                await stop(self.server_id, reason="idle", only=self)   # through the per-server lock, and only while this is still the registered instance
+                return
 
     @property
     def running(self) -> bool:
@@ -223,7 +224,12 @@ class Instance:
 
 # ponytail: in-memory registry, single process. After a manager restart `adopt` rebuilds it from the pid files.
 _instances: dict[int, Instance] = {}
+_locks: dict[int, asyncio.Lock] = {}   # one per server id: start / stop of the same server never overlap (API, scheduler and wake all come through here)
 before_start: list = []   # called with the server id right before an acServer is spawned (app/wake.py frees the ports it holds for it)
+
+
+def _lock(server_id: int) -> asyncio.Lock:
+    return _locks.setdefault(server_id, asyncio.Lock())
 
 
 def limit_prefix(server_id: int, cpu_percent: int | None, mem_mb: int | None) -> list[str]:
@@ -239,7 +245,14 @@ def limit_prefix(server_id: int, cpu_percent: int | None, mem_mb: int | None) ->
     return p
 
 
-async def start(
+async def start(server_id: int, cwd: Path, **kw) -> Instance:
+    """Spawn acServer. Serialised per server: the "already running?" check and the registration of the new instance are
+    separated by awaits, so without the lock two simultaneous starts would both pass the check and spawn two processes."""
+    async with _lock(server_id):
+        return await _start(server_id, cwd, **kw)
+
+
+async def _start(
     server_id: int,
     cwd: Path,
     *,
@@ -309,10 +322,13 @@ async def adopt(
     return inst
 
 
-async def stop(server_id: int) -> None:
-    inst = _instances.get(server_id)
-    if inst:
-        await inst.stop()
+async def stop(server_id: int, reason: str = "manual", only: Instance | None = None) -> None:
+    """`only`: stop the server only if that exact instance is still the registered one, checked once the lock is ours (a restart may
+    have registered a new instance while we waited: an automatic stop aimed at the old one must not hit it)."""
+    async with _lock(server_id):
+        inst = _instances.get(server_id)
+        if inst and (only is None or inst is only):
+            await inst.stop(reason=reason)
 
 
 def live() -> list[Instance]:

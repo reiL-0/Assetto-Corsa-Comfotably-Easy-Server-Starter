@@ -8,7 +8,7 @@ A stopped server that the manager shows in the lobby (app/wake.py) must not free
   qualify, race, in that order, as acServer plays them), looping when `LOOP_MODE` is on; it says which session it is and how long is left
   (None: never ran, or the cycle ended with no loop).
 - The lobby (`wake.facade_info`) shows that position.
-- On a start (`resume`, after `servers.start_server`, which reads the clock before spawning acServer) the real acServer is moved to that position through ACSP: the target session is
+- On a start (`resume`, after `server_service.start`, which reads the clock before spawning acServer) the real acServer is moved to that position through ACSP: the target session is
   redefined to the minutes that are left (`SET_SESSION_INFO`; its unit is minutes, and the running session's time left is that
   length minus what has elapsed) and `NEXT_SESSION` is sent until it is the current one. The original definition is put back
   as soon as the next session starts. Granularity: a minute.

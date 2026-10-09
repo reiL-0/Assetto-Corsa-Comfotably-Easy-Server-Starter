@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app import schedule, wake
+from app.services import server_service
 from app.db import engine
 from app.main import app
 from app.models import Server
@@ -208,11 +209,11 @@ def test_cooldown_and_limits_and_wake_modes(monkeypatch):
 
     started = []
 
-    async def fake_start(server_id, sess):
+    async def fake_start(sess, server_id):
         started.append(server_id)
-    monkeypatch.setattr(schedule, "start_server", fake_start)
+    monkeypatch.setattr(server_service, "start", fake_start)
     monkeypatch.undo()
-    monkeypatch.setattr(schedule, "start_server", fake_start)
+    monkeypatch.setattr(server_service, "start", fake_start)
     monkeypatch.setattr(schedule.supervisor, "get", lambda _id: None)
     assert asyncio.run(schedule.wake(alw)) is True and started == [alw]      # "always" with no event: started as it was left
     assert asyncio.run(schedule.wake(win)) is False and asyncio.run(schedule.wake(off)) is False

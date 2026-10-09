@@ -2,11 +2,12 @@ import asyncio
 import time
 
 from conftest import ADMIN
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app import discord, schedule
+from app.services import server_service
+from app.services.server_service import ApplyResult, ServerError
 from app.db import engine
 from app.main import app
 from app.models import Schedule
@@ -27,11 +28,12 @@ def _tick(now, monkeypatch, applied=None):
     said = []
     monkeypatch.setattr(discord, "announce", said.append)
 
-    async def fake_apply(sess, srv, body):
+    async def fake_apply(sess, srv, body, **kw):
         if isinstance(applied, Exception):
             raise applied
         (applied if applied is not None else []).append((srv.id, body.restart))
-    monkeypatch.setattr(schedule, "apply_to_server", fake_apply)
+        return ApplyResult(restarted=True)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
     asyncio.run(schedule.tick(now))
     return said
 
@@ -78,9 +80,22 @@ def test_late_manager_posts_only_the_nearest_reminder_and_old_starts_are_missed(
 
 def test_failed_start_is_reported(monkeypatch):
     _, sc = _setup(100, reminders=())
-    said = _tick(sc["start_at"] + 1, monkeypatch, HTTPException(409, "track not installed"))
+    said = _tick(sc["start_at"] + 1, monkeypatch, ServerError(409, "track not installed"))
     r = _row(sc["id"])
     assert r.state == "failed" and "track not installed" in r.result and "no pudo iniciarse" in said[-1]
+
+
+def test_config_saved_but_start_failed_is_a_failed_start_and_the_event_is_not_marked_loaded(monkeypatch):
+    _, sc = _setup(100, reminders=())
+    said = []
+    monkeypatch.setattr(discord, "announce", said.append)
+
+    async def saved_not_started(sess, srv, body, **kw):
+        return ApplyResult(start_error=ServerError(409, "cannot spawn"))
+    monkeypatch.setattr(server_service, "apply", saved_not_started)
+    asyncio.run(schedule.tick(sc["start_at"] + 1))
+    r = _row(sc["id"])
+    assert r.state == "failed" and "cannot spawn" in r.result and not r.loaded and "no pudo iniciarse" in said[-1]
 
 
 class _FakeAcsp:
@@ -103,7 +118,7 @@ class _FakeInstance:
 def test_a_scheduled_event_with_a_duration_runs_then_stops_the_server(monkeypatch):
     sid, sc = _setup(100, reminders=(), duration=60)
     t0, inst = sc["start_at"], _FakeInstance()
-    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: inst)
+    monkeypatch.setitem(schedule.supervisor._instances, sid, inst)   # the real registry: the stop goes through supervisor.stop
     started = []
     said = _tick(t0 + 1, monkeypatch, started)
     assert started == [(sid, True)] and _row(sc["id"]).state == "running" and "en marcha" in said[-1]
@@ -131,13 +146,14 @@ def test_wake_loads_the_event_once_then_just_starts_the_server(monkeypatch):
     t0, applied, started = sc["start_at"], [], []
     monkeypatch.setattr(schedule.supervisor, "get", lambda _id: None)
 
-    async def fake_apply(sess, srv, body):
+    async def fake_apply(sess, srv, body, **kw):
         applied.append((srv.id, body.restart))
+        return ApplyResult(restarted=True)
 
-    async def fake_start(server_id, sess):
+    async def fake_start(sess, server_id):
         started.append(server_id)
-    monkeypatch.setattr(schedule, "apply_to_server", fake_apply)
-    monkeypatch.setattr(schedule, "start_server", fake_start)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
+    monkeypatch.setattr(server_service, "start", fake_start)
     assert asyncio.run(schedule.wake(sid, t0 - 7200)) is False and applied == []          # window not open yet
     assert asyncio.run(schedule.wake(sid, t0 - 600)) is True and applied == [(sid, True)] and _row(sc["id"]).loaded
     assert asyncio.run(schedule.wake(sid, t0 - 300)) is True and started == [sid] and len(applied) == 1   # loaded: no second apply
@@ -176,7 +192,7 @@ def test_the_end_of_the_event_waits_for_whoever_is_still_racing(monkeypatch):
     sid, sc = _setup(100, reminders=(), duration=30)
     t0, inst = sc["start_at"], _FakeInstance()
     inst.acsp.cars = {0: {"car_id": 0}}
-    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: inst)
+    monkeypatch.setitem(schedule.supervisor._instances, sid, inst)
     _tick(t0 + 1, monkeypatch, [])
     _tick(t0 + 1800 + 5, monkeypatch, [])                         # the event is over but a car is still on track
     assert inst.running and _row(sc["id"]).state == "running"
@@ -186,7 +202,7 @@ def test_the_end_of_the_event_waits_for_whoever_is_still_racing(monkeypatch):
     sid, sc = _setup(100, reminders=(), duration=30)              # ...and it never waits forever
     inst2 = _FakeInstance()
     inst2.acsp.cars = {0: {"car_id": 0}}
-    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: inst2)
+    monkeypatch.setitem(schedule.supervisor._instances, sid, inst2)
     _tick(sc["start_at"] + 1, monkeypatch, [])
     _tick(sc["start_at"] + 1800 + schedule.END_GRACE + 1, monkeypatch, [])
     assert not inst2.running
@@ -267,3 +283,46 @@ def test_announcement_template_is_editable_and_validated():
     assert client.get(url).json()["template"] == {"content": "hola {title}"}
     assert client.delete(url).status_code == 204
     assert client.get(url).json()["template"]["content"].startswith("🏁")
+
+
+def _race(monkeypatch, sid, apply_fail=None):
+    """wake() and the tick both about to load the same event; apply yields (like the real stop/start awaits) so they can interleave."""
+    applied, started = [], []
+    monkeypatch.setattr(discord, "announce", lambda *_a, **_k: None)
+    monkeypatch.setattr(schedule.supervisor, "get", lambda _id: None)
+
+    async def fake_apply(sess, srv, body, **kw):
+        applied.append(srv.id)
+        await asyncio.sleep(0.05)
+        if apply_fail:
+            raise apply_fail
+        return ApplyResult(restarted=True)
+
+    async def fake_start(sess, server_id):
+        started.append(server_id)
+    monkeypatch.setattr(server_service, "apply", fake_apply)
+    monkeypatch.setattr(server_service, "start", fake_start)
+    return applied, started
+
+
+def test_a_wake_and_the_tick_load_the_event_only_once(monkeypatch):
+    """Without the atomic claim both saw loaded=False and applied twice: the second restart kicks the players who were already joining."""
+    sid, sc = _setup(100, reminders=(), duration=60)
+    t0 = sc["start_at"]
+    applied, started = _race(monkeypatch, sid)
+
+    async def both():
+        return await asyncio.gather(schedule.wake(sid, t0 + 1), schedule.tick(t0 + 1))
+    woke, _ = asyncio.run(both())
+    assert applied == [sid]                                   # one apply, whoever got there first
+    assert _row(sc["id"]).loaded and _row(sc["id"]).state == "running"
+    assert woke is True
+
+
+def test_a_failed_apply_gives_the_claim_back_so_the_next_try_loads_the_event(monkeypatch):
+    sid, sc = _setup(100, reminders=(), duration=60)
+    t0 = sc["start_at"]
+    applied, _ = _race(monkeypatch, sid, apply_fail=ServerError(409, "track not installed"))
+    assert asyncio.run(schedule.wake(sid, t0 + 1)) is False
+    assert not _row(sc["id"]).loaded                          # not stuck as "loaded" with nothing on the server
+    assert asyncio.run(schedule.wake(sid, t0 + 2)) is False and applied == [sid, sid]   # tried again, it was not skipped

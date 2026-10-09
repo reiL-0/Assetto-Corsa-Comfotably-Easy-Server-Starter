@@ -82,10 +82,10 @@ Referencias: manager `app/supervisor.py`, `app/servers.py`, `app/schedule.py`, `
 
 Aceptación:
 
-- [ ] Dos arranques simultáneos del mismo servidor crean como máximo una instancia controlada.
-- [ ] Un fallo libera la exclusión y permite un nuevo intento válido.
-- [ ] La prueba usa procesos o dobles locales, nunca un acServer de producción.
-- [ ] La asignación simultánea no entrega el mismo bloque de puertos a dos servidores.
+- [x] Dos arranques simultáneos del mismo servidor crean como máximo una instancia controlada.
+- [x] Un fallo libera la exclusión y permite un nuevo intento válido.
+- [x] La prueba usa procesos o dobles locales, nunca un acServer de producción.
+- [x] La asignación simultánea no entrega el mismo bloque de puertos a dos servidores (candado en proceso; el UNIQUE queda para T1.1).
 
 ### T1.3 — Vinculación atómica de tokens
 
@@ -160,9 +160,9 @@ Referencias: `app/servers.py`, `app/schedule.py`, `app/league.py`, `app/wake.py`
 
 Aceptación:
 
-- [ ] Scheduler y wake dejan de llamar handlers HTTP para las operaciones extraídas.
-- [ ] Las reglas compartidas tienen una sola implementación.
-- [ ] Se mantienen rutas, autorización, configuración resultante y comportamiento documentado.
+- [x] Scheduler y wake dejan de llamar handlers HTTP para las operaciones extraídas.
+- [x] Las reglas compartidas tienen una sola implementación.
+- [x] Se mantienen rutas, autorización, configuración resultante y comportamiento documentado.
 
 ### T4.2 — Límites de la telemetría del sitio
 

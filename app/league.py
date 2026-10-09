@@ -32,7 +32,7 @@ from app.auth import CurrentUser
 from app.db import engine
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
 from app.results import parse_result_file
-from app.servers import EntryIn, SessionIn
+from app.schemas.servers import EntryIn, SessionIn
 
 router = APIRouter(prefix="/championships/{championship_id}/members", tags=["leagues"])
 

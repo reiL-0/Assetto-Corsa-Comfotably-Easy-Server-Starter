@@ -70,3 +70,13 @@ def test_upload_raw_ini_and_list_results():
 
     assert client.get(f"/api/v1/servers/{sid}/results").json() == []
     assert client.get(f"/api/v1/servers/{sid}/results/nope.json").status_code == 404
+
+
+def test_simultaneous_creates_get_distinct_port_blocks():
+    from concurrent.futures import ThreadPoolExecutor
+    body = {"name": "race-ports", "config": {}, "entry_list": []}
+    with ThreadPoolExecutor(8) as ex:
+        rs = list(ex.map(lambda _: client.post("/api/v1/servers", json=body), range(8)))
+    assert all(r.status_code == 201 for r in rs)
+    ports = [r.json()["ports"]["tcp"] for r in rs]
+    assert len(set(ports)) == len(ports)

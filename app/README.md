@@ -55,6 +55,6 @@ no hay endpoints «solo para la UI». Subcarpetas: `live/` (ACSP, tiempos en viv
 
 ## Flow — «Iniciar sesión» desde el panel
 1. `POST /servers/{id}/apply` con `SessionIn` → `servers.apply_session` valida contenido (`_check_content`), escribe los INI y, si `restart`, detiene y arranca.
-2. `start_server` → `integrity.gate` → `wake.before_start` (libera puertos) → `timeline.resume` (lee la posición) → `supervisor.start`.
+2. `server_service.start` → `integrity.gate` → `wake.before_start` (libera puertos) → `timeline.resume` (lee la posición) → `supervisor.start`.
 3. `supervisor` crea el proceso, el cliente ACSP se conecta y `timeline` coloca la sesión donde toca.
 4. Los resultados llegan a `results/` y se leen con `results.parse_result_file` + `penalties`.

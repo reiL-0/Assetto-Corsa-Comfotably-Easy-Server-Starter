@@ -134,3 +134,49 @@ def test_a_busy_plugin_port_does_not_leave_the_server_unowned(tmp_path, monkeypa
             await supervisor.stop(98)
 
     asyncio.run(scenario())
+
+
+def test_simultaneous_starts_spawn_one_process(tmp_path, monkeypatch):
+    script = tmp_path / "fake_acserver.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+
+    async def scenario():
+        res = await asyncio.gather(*(supervisor.start(98, tmp_path) for _ in range(3)), return_exceptions=True)
+        try:
+            assert sum(isinstance(r, supervisor.Instance) for r in res) == 1
+            assert all(isinstance(r, RuntimeError) for r in res if not isinstance(r, supervisor.Instance))
+        finally:
+            await supervisor.stop(98)
+        # a failed start must release the lock: the next valid attempt works
+        monkeypatch.setattr(settings, "acserver_cmd", "/nonexistent/acServer")
+        try:
+            await supervisor.start(98, tmp_path)
+        except OSError:
+            pass
+        monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+        await asyncio.wait_for(supervisor.start(98, tmp_path), 5)
+        await supervisor.stop(98)
+
+    asyncio.run(scenario())
+
+
+def test_an_idle_watch_never_stops_an_instance_that_is_no_longer_the_registered_one(tmp_path, monkeypatch):
+    """An apply/restart replaces the instance; the old one's idle watch must not touch the server (it stops through the per-server lock, and only if still registered)."""
+    script = tmp_path / "fake_acserver.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(settings, "acserver_cmd", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    monkeypatch.setattr(settings, "idle_stop_seconds", 1)
+    monkeypatch.setattr(supervisor, "IDLE_POLL", 0.1)
+
+    async def scenario():
+        old = await supervisor.start(96, tmp_path)
+        old.acsp = acsp.ACSPClient(0)           # connected, nobody on track: it counts as idle
+        del supervisor._instances[96]           # ...but a restart already took its place in the registry
+        try:
+            await asyncio.sleep(1.6)
+            assert old.running                  # its idle watch gave up instead of stopping a server it no longer owns
+        finally:
+            await old.stop()
+
+    asyncio.run(scenario())
