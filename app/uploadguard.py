@@ -69,9 +69,9 @@ def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_T
 def detect_kind(top: Path) -> str | None:
     """«car» or «track» from what the unpacked folder holds, or None when it is not clear (then the kind the uploader chose stands).
     A car has `ui/ui_car.json` or `data.acd` (or an unpacked `data/` with `car.ini`); a track has `models*.ini` or a `data/surfaces.ini` (also inside a layout folder)."""
-    names = {p.name.lower() for p in top.iterdir()}
+    names = {p.name.lower() for p in top.iterdir() if p.is_file()}
     car = (top / "ui" / "ui_car.json").is_file() or "data.acd" in names or (top / "data" / "car.ini").is_file()
-    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or any(top.glob("**/data/surfaces.ini")) or any(top.glob("ui/**/ui_track.json"))
+    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or any(p.is_file() for p in top.glob("**/data/surfaces.ini")) or any(p.is_file() for p in top.glob("ui/**/ui_track.json"))
     return "car" if car and not track else "track" if track and not car else None
 
 

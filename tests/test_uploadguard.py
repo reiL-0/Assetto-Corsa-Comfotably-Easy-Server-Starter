@@ -89,3 +89,99 @@ def test_detect_kind_says_nothing_when_it_is_not_clear(tmp_path):
     (both / "ui" / "ui_car.json").write_text("{}")
     (both / "models.ini").write_text("[M]")
     assert uploadguard.detect_kind(both) is None                                                           # car and track markers: the uploader's choice stands
+
+
+@pytest.mark.parametrize("marker", ["data.acd", "MODELS.ini", "data/surfaces.ini", "ui/gp/ui_track.json"])
+def test_directories_are_not_kind_markers(tmp_path, marker):
+    (tmp_path / marker).mkdir(parents=True)
+    assert uploadguard.detect_kind(tmp_path) is None
+
+
+@pytest.mark.parametrize("marker,kind", [("DATA.ACD", "car"), ("MODELS_gp.INI", "track")])
+def test_top_level_file_markers_ignore_case(tmp_path, marker, kind):
+    (tmp_path / marker).write_bytes(b"x")
+    assert uploadguard.detect_kind(tmp_path) == kind
+
+
+@pytest.fixture
+def isolated_uploads(tmp_path, monkeypatch):
+    monkeypatch.setattr(content.settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(content, "_uploads", {})
+    # Execute workers synchronously so assertions observe completion without polling races.
+    monkeypatch.setattr(content.threading, "Thread", lambda target, args, daemon: type(
+        "Worker", (), {"start": lambda self: target(*args)})())
+    logs = []
+    monkeypatch.setattr(content.metrics, "log", lambda *args, **kwargs: logs.append((args, kwargs)))
+    return logs
+
+
+@pytest.mark.parametrize("via", ["chunks", "link"])
+@pytest.mark.parametrize("effective", ["car", "track"])
+@pytest.mark.parametrize("pack", [False, True])
+def test_background_upload_reports_effective_kind_and_prunes_correctly(isolated_uploads, monkeypatch, via, effective, pack):
+    asked = "track" if effective == "car" else "car"
+    name = "redirected"
+    files = {f"{name}/data/physics.ini": b"physics", f"{name}/model.kn5": b"model"}
+    if effective == "car":
+        files.update({f"{name}/data.acd": b"car", f"{name}/ui/ui_car.json": b"{}", f"{name}/skins/red/body.dds": b"texture"})
+        marker = "data.acd"
+    else:
+        files.update({f"{name}/models_gp.ini": b"models", f"{name}/gp/data/surfaces.ini": b"surfaces", f"{name}/ui/gp/ui_track.json": b"{}"})
+        marker = "models_gp.ini"
+    archive = _zip(files)
+    body = {"kind": asked, "pack": pack}
+    if via == "chunks":
+        r = client.post("/api/v1/content/uploads", json=body)
+        assert r.status_code == 201, r.text
+        uid = r.json()["id"]
+        split = len(archive) // 2
+        for offset, part in [(0, archive[:split]), (split, archive[split:])]:
+            assert client.put(f"/api/v1/content/uploads/{uid}?offset={offset}", content=part).status_code == 200
+        assert client.post(f"/api/v1/content/uploads/{uid}/complete").status_code == 202
+    else:
+        monkeypatch.setattr(content.download, "check_url", lambda url: None)
+        monkeypatch.setattr(content.download, "opener", lambda: None)
+        monkeypatch.setattr(content.download, "resolve", lambda url, opener: url)
+        def fetch(url, path, limit, progress):
+            path.write_bytes(archive)
+            progress(len(archive), len(archive))
+        monkeypatch.setattr(content.download, "fetch", fetch)
+        r = client.post("/api/v1/content/uploads/from-link", json=body | {"url": "https://example.test/mod.zip"})
+        assert r.status_code == 202, r.text
+        uid = r.json()["id"]
+    status = client.get(f"/api/v1/content/uploads/{uid}").json()
+    assert status["state"] == "done", status
+    assert status["kind"] == effective and status["requested_kind"] == asked
+    assert status["result"] == name and f"installed as a {effective}" in status["note"]
+    dest = content._content_dir() / f"{effective}s" / name
+    assert (dest / marker).is_file()
+    assert not (content._content_dir() / f"{asked}s" / name).exists()
+    assert (dest / "model.kn5").exists() is (not pack)
+    assert (dest / "data/physics.ini").is_file()
+    if effective == "car":
+        assert (dest / "ui/ui_car.json").is_file()
+        assert (dest / "skins/red").is_dir()
+        assert (dest / "skins/red/body.dds").exists() is (not pack)
+    else:
+        assert (dest / "gp/data/surfaces.ini").is_file()
+        assert (dest / "ui/gp/ui_track.json").is_file()
+    assert isolated_uploads[-1] == ((0, "import_ok"), {"name": name, "track": effective})
+
+
+@pytest.mark.parametrize("asked", ["car", "track"])
+def test_ambiguous_upload_respects_requested_destination(isolated_uploads, asked):
+    archive = _zip({"both/data.acd": b"car", "both/models.ini": b"track"})
+    r = client.post(f"/api/v1/content/{asked}s", files={"file": ("both.zip", archive, "application/zip")})
+    assert r.status_code == 201, r.text
+    assert r.json() == {asked: "both"}
+    assert (content._content_dir() / f"{asked}s/both/data.acd").is_file()
+    assert (content._content_dir() / f"{asked}s/both/models.ini").is_file()
+
+
+def test_inbox_reports_redirected_destination(isolated_uploads):
+    (content.inbox_dir() / "car.zip").write_bytes(_zip({"inbox_car/data.acd": b"car"}))
+    r = client.post("/api/v1/content/tracks/import", json={"file": "car.zip"})
+    assert r.status_code == 201, r.text
+    assert r.json()["car"] == "inbox_car" and "installed as a car" in r.json()["note"]
+    assert (content._cars_dir() / "inbox_car/data.acd").is_file()
+    assert not (content._tracks_dir() / "inbox_car").exists()

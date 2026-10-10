@@ -324,7 +324,7 @@ def upload_start(body: UploadIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -348,10 +348,11 @@ async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
 def _finish(uid: str) -> None:
     """Runs in its own thread: it must outlive the request that started it."""
     u = _uploads[uid]
-    dest = _tracks_dir() if u["kind"] == "track" else _cars_dir()
+    dest = _tracks_dir() if u["requested_kind"] == "track" else _cars_dir()
     try:
         res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""))
         u["result"], u["note"] = str(res), getattr(res, "note", "")
+        u["kind"] = getattr(res, "kind", "") or u["requested_kind"]
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -408,7 +409,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind, "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 
@@ -416,7 +417,7 @@ def upload_from_link(body: LinkIn) -> dict:
 @router.get("/uploads/{uid}")
 def upload_status(uid: str) -> dict:
     u = _upload(uid)
-    return {k: u.get(k) for k in ("kind", "size", "total", "state", "result", "note", "error")}
+    return {k: u.get(k) for k in ("kind", "requested_kind", "size", "total", "state", "result", "note", "error")}
 
 
 class InboxIn(BaseModel):
