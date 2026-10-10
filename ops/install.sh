@@ -15,11 +15,18 @@ set -euo pipefail
 
 ACM_USER=${ACM_USER:-acm}; APP_DIR=${APP_DIR:-/opt/acm/app}; DATA_DIR=${DATA_DIR:-/opt/acm/data}
 ACSERVER_DIR=${ACSERVER_DIR:-/opt/acserver}; PORT=${PORT:-8080}; CPU_AFFINITY=${CPU_AFFINITY:-}; LIMITS_SCOPE=${LIMITS_SCOPE:-user}
-HOME_DIR=$(dirname "$APP_DIR"); SRC=$(cd "$(dirname "$0")/.." && pwd)
-UFW=0; DB=""; START=1
+HOME_DIR=${HOME_DIR:-$(dirname "$APP_DIR")}; SRC=$(cd "$(dirname "$0")/.." && pwd)
+UFW=${UFW:-0}; DB=""; START=1
 while [ $# -gt 0 ]; do case $1 in
   --ufw) UFW=1;; --no-start) START=0;; --db) DB=${2:?--db needs a file}; shift;;
   *) echo "unknown option $1" >&2; exit 2;; esac; shift; done
+
+# Values interpolated into systemd directives must not introduce whitespace or syntax.
+for variable in ACM_USER APP_DIR DATA_DIR HOME_DIR ACSERVER_DIR PORT LIMITS_SCOPE; do
+  value=${!variable}
+  [[ "$value" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "$variable contains unsupported characters (allowed: A-Za-z0-9_./-)" >&2; exit 1; }
+done
+[[ "$CPU_AFFINITY" =~ ^[0-9[:space:]]*$ ]] && [[ "$CPU_AFFINITY" != *$'\n'* ]] && [[ "$CPU_AFFINITY" != *$'\r'* ]] || { echo "CPU_AFFINITY must contain only CPU numbers separated by spaces" >&2; exit 1; }
 
 run() { if [ "${DRY:-}" = 1 ]; then echo "+ $*"; else "$@"; fi; }
 say() { echo "== $*"; }
@@ -87,7 +94,9 @@ UNIT
 )
 if [ "${DRY:-}" = 1 ]; then echo "+ write /etc/systemd/system/acm.service"; else echo "$UNIT" > /etc/systemd/system/acm.service; fi
 run install -m 755 "$SRC/ops/watchdog.py" "$HOME_DIR/watchdog.py"
-run install -m 644 "$SRC/ops/acm-watchdog.service" "$SRC/ops/acm-watchdog.timer" /etc/systemd/system/
+WATCHDOG_UNIT=$(sed "s|/opt/acm/watchdog.py|$HOME_DIR/watchdog.py|" "$SRC/ops/acm-watchdog.service")
+if [ "${DRY:-}" = 1 ]; then echo "+ write /etc/systemd/system/acm-watchdog.service: $HOME_DIR/watchdog.py"; else echo "$WATCHDOG_UNIT" > /etc/systemd/system/acm-watchdog.service; fi
+run install -m 644 "$SRC/ops/acm-watchdog.timer" /etc/systemd/system/
 
 say "6/7 restored database (optional)"
 if [ -n "$DB" ]; then
@@ -99,7 +108,14 @@ fi
 if [ "$UFW" = 1 ]; then
   say "firewall"
   run apt-get install -y -qq ufw
-  run ufw allow 22/tcp
+  SSH_PORTS=$( { sshd -T 2>/dev/null || true; } | awk '/^port [0-9]+$/{print $2}')
+  if [ -z "$SSH_PORTS" ]; then
+    SSH_PORTS=$( { ss -ltnp 2>/dev/null || true; } | awk '/sshd/ {n=split($4, address, ":"); if (address[n] ~ /^[0-9]+$/) print address[n]}')
+  fi
+  SSH_PORTS=${SSH_PORTS:-22}
+  while IFS= read -r ssh_port; do
+    run ufw allow "$ssh_port/tcp"
+  done <<< "$SSH_PORTS"
   run ufw allow 9600:9699/tcp
   run ufw allow 9600:9699/udp
   run ufw --force enable

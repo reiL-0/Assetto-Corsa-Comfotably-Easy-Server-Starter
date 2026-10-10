@@ -11,11 +11,11 @@
 | `install.sh` | Instalador idempotente para una máquina limpia (Debian 13 / Ubuntu 24.04): paquetes, usuario `acm` con linger (los límites de CPU/RAM por servidor corren en su systemd de usuario), carpetas, `app/` + venv, `/etc/acm.env` (se crea vacío, **nunca se sobrescribe**), `acm.service` (con `KillMode=process` para que los acServer sobrevivan a un reinicio, `Nice=-5` y, si se pide, `CPUAffinity`), el vigilante y su temporizador; opcional `--ufw` (ssh + 9600-9699 tcp/udp, sin 80/443 porque la web va por túnel), `--db` (restaura la base del respaldo, se niega a pisar una existente) y `--no-start`. `DRY=1` solo imprime. Espera `/healthz` al final. **No trae** el binario `acServer` ni `content/` (los pones tú) ni los secretos. |
 
 ## Máquina nueva (migración, reconstrucción)
-1. `git clone` del manager y `sudo ops/install.sh --ufw` (antes, `DRY=1` para ver qué hará).
+1. `git clone` del manager y `sudo ops/install.sh --ufw --no-start` (antes, `DRY=1` para ver qué hará).
 2. Llenar `/etc/acm.env` con los secretos de tu gestor de contraseñas (no van en el respaldo).
 3. Poner `acServer` y `content/` en `/opt/acserver` (los mods salen del catálogo: nombre + enlace oficial).
-4. Restaurar los datos: `restore.py` del respaldo cifrado (ver `OPR WP/ops`) y `--db .../db/manager.db`, y copiar los `results/` de cada instancia.
-5. `systemctl restart acm`. Las ligas, eventos, tokens y sanciones vuelven con la base.
+4. Restaurar los datos: `restore.py` del respaldo cifrado (ver `OPR WP/ops`) y ejecutar `sudo ops/install.sh --no-start --db .../db/manager.db` antes del primer arranque; copiar los `results/` de cada instancia.
+5. `sudo systemctl restart acm.service acm-watchdog.timer`. Las ligas, eventos, tokens y sanciones vuelven con la base.
 - Lo que **no** automatiza: la web y su base, `cloudflared`/WireGuard y el DNS (van con la migración de CDMX).
 
 ## Variables del vigilante (todas opcionales)
@@ -28,4 +28,4 @@
 
 ## Interactions
 - **Lee:** `/healthz` del manager, `status.json` del respaldo (`OPR WP/ops/backup.py`), el disco. **Escribe:** su estado y un POST al webhook de estado de Discord.
-- Si el POST a Discord falla no guarda que avisó: reintenta en la siguiente corrida.
+- Los avisos pendientes se guardan atómicamente antes del POST. Si Discord falla, conserva las marcas anteriores y reintenta el aviso en la siguiente corrida. Un estado antiguo `{}` sigue siendo válido; un estado corrupto se reinicia. Si Discord acepta el POST pero falla el guardado posterior, el aviso puede repetirse (no hay transacción entre disco y Discord).
