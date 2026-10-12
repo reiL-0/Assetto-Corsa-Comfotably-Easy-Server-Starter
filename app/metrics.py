@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
 from collections import Counter, defaultdict, deque
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app import discord
@@ -105,14 +108,41 @@ def stats() -> dict:
                 "dropped": _stats["dropped"]}
 
 
-def purge(now: float | None = None) -> int:
-    cutoff = (now or time.time()) - KEEP_DAYS * 86400
-    with Session(engine) as s:
-        old = s.exec(select(Activity).where(Activity.ts < cutoff)).all()
-        for a in old:
-            s.delete(a)
-        s.commit()
-    return len(old)
+def purge(now: float | None = None, batch_size: int = 5000) -> int:
+    """Short SQL transactions; no ORM materialization, no unexpired/permanent tokens."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    now = time.time() if now is None else now
+    total = 0
+    for table, predicate, cutoff in (
+        ("activity", "ts < :cutoff", now - KEEP_DAYS * 86400),
+        ("tokens", "expires_at IS NOT NULL AND expires_at < :cutoff",
+         datetime.fromtimestamp(now, UTC).replace(tzinfo=None)),
+    ):
+        while True:
+            with Session(engine) as s:
+                n = s.execute(text(
+                    f"DELETE FROM {table} WHERE id IN "
+                    f"(SELECT id FROM {table} WHERE {predicate} LIMIT :batch)"
+                ), {"cutoff": cutoff, "batch": batch_size}).rowcount
+                s.commit()
+            total += n
+            if n < batch_size:
+                break
+    return total
+
+
+async def purge_forever(stop: asyncio.Event, interval: float = 86400) -> None:
+    """Stop between runs; shutdown waits for any in-flight purge thread."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(purge)
+        except Exception:
+            log_.exception("periodic retention failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
 
 
 def _day(ts: float, off: int) -> int:

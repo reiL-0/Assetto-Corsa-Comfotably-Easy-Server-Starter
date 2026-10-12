@@ -193,7 +193,7 @@ async def wake(server_id: int, now: float | None = None) -> bool:
             except ServerError as e:
                 log.warning("wake of server %s failed: %s", server_id, e.detail)
                 return False
-            metrics.log(server_id, "wake", name="always")
+            metrics.enqueue(server_id, "wake", name="always")
             return True
         if not sc or not ev or not srv:
             return False
@@ -203,7 +203,7 @@ async def wake(server_id: int, now: float | None = None) -> bool:
         except ServerError as e:
             log.warning("wake of server %s failed: %s", server_id, e.detail)
             return False
-        metrics.log(server_id, "wake", name=ev.title)
+        metrics.enqueue(server_id, "wake", name=ev.title)
     return True
 
 

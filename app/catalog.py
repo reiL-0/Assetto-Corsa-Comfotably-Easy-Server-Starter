@@ -36,6 +36,7 @@ from app.models import BlockedHash, CatalogEvent, ContentBlob, ContentHolder
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
 LEAGUE = "league"
+mutation_lock = threading.RLock()  # one manager process: scan and installation share this lock
 CHALLENGE_TTL = 600
 RANGES, RANGE_LEN = 16, 4096
 _challenges: dict[str, dict] = {}   # nonce -> {hash, ranges, expires}; one use each
@@ -92,25 +93,36 @@ def check_source(url: str, official: bool = False) -> str:
 def record_upload(kind: str, name: str, hash_: str, size: int, files: int, holder: str = LEAGUE, actor: str = "", source_url: str = "") -> None:
     """An install just happened: note the blob and make `holder` an active holder (uploading counts as declaring the licence).
     `source_url`: the modder's page given with the upload; it only fills a blob that has none (an admin's link is not overwritten)."""
-    with Session(engine) as sess:
+    with mutation_lock, Session(engine) as sess:
+        check_not_blocked(hash_)
+        changed = False
         if not sess.get(ContentBlob, hash_):
+            changed = True
             sess.add(ContentBlob(hash=hash_, kind=kind, name=name, size=size, files=files))
         blob = sess.get(ContentBlob, hash_)
         if source_url and not blob.source_url:
+            changed = True
             blob.source_url = source_url
             _log(sess, actor, "source", hash_, holder, f"{source_url} (confirmed as the official download page by the uploader)")
         row = sess.exec(select(ContentHolder).where(ContentHolder.hash == hash_, ContentHolder.holder == holder)).first()
         if row and row.status in ("revoked", "disputed"):
             raise HTTPException(403, f"{name!r} was {row.status} for this account after a rights claim; ask the administrator")
         if not row:
+            changed = True
             row = ContentHolder(hash=hash_, holder=holder, uploaded_by=actor)
             sess.add(row)
-        row.status, row.attested_at, row.updated_at = "active", _now(), _now()
+        if row.status != "active":
+            changed = True
+        if changed:
+            row.status, row.attested_at, row.updated_at = "active", _now(), _now()
         for old in sess.exec(select(ContentHolder).where(ContentHolder.holder == holder, ContentHolder.hash != hash_, ContentHolder.status == "active")):
             ob = sess.get(ContentBlob, old.hash)
-            if ob and ob.kind == kind and ob.name == name:
+            if ob and ob.kind == kind and ob.name == name:   # also on a repeat: a restore can leave a replaced version active
+                changed = True
                 old.status, old.updated_at = "superseded", _now()
-        _log(sess, actor, "upload", hash_, holder, f"{kind} {name} ({files} files, {size} bytes)")
+        if not changed:
+            return
+        _log(sess, actor, "scan" if actor == "scan" else "upload", hash_, holder, f"{kind} {name} ({files} files, {size} bytes)")
         sess.commit()
 
 
@@ -249,9 +261,10 @@ def _scan_run() -> None:
     from app import content
     try:
         for kind, name in _scan_todo():
-            h, size, n = digest_dir((content._cars_dir() if kind == "car" else content._tracks_dir()) / name)
-            record_upload(kind, name, h, size, n, LEAGUE, "scan")
-            _scanned.add((kind, name))
+            with mutation_lock:
+                h, size, n = digest_dir((content._cars_dir() if kind == "car" else content._tracks_dir()) / name)
+                record_upload(kind, name, h, size, n, LEAGUE, "scan")
+                _scanned.add((kind, name))
     finally:
         _scan_lock.release()
 
