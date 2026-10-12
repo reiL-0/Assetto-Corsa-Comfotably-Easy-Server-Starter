@@ -57,7 +57,7 @@ def test_old_servers_keep_rows_and_get_the_domain_values(tmp_path, monkeypatch):
     db.init_db()
     rows = _q(path, "SELECT id, name, base_port, wake, integrity, stewards FROM servers ORDER BY id")
     assert rows == [(1, "a", 9600, "window", "warn", "off"), (2, "b", 9610, "off", "warn", "off"), (3, "c", 9620, "always", "warn", "off")]
-    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,)]
+    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,)]
 
 
 def test_upgraded_and_fresh_databases_have_the_same_indexes(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_fresh_database_is_not_backed_up(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{tmp_path / 'new.db'}"))
     db.init_db()
     assert not (tmp_path / "backups").exists()
-    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,)]
+    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,)]
 
 
 def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path, monkeypatch):
@@ -107,3 +107,115 @@ def test_an_index_with_the_same_name_but_another_definition_is_refused(tmp_path,
     con.close()
     with pytest.raises(RuntimeError, match="another definition"):
         db.init_db()
+
+
+# --- review A6/M5: migration 003 (catalog dedupe, UNIQUE holders, indexes) ------------------------------------------------
+
+def _db_at_version_2(tmp_path, monkeypatch):
+    """A real database as it is deployed today: migrations 001 and 002 applied, 003 not yet."""
+    path = tmp_path / "v2.db"
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:2])
+    db.init_db()
+    monkeypatch.undo()   # the engine goes back; the caller sets it again
+    return path
+
+
+def _event(con, at, actor, action, hash_, detail, holder="league"):
+    con.execute("INSERT INTO catalog_events (at, actor, action, hash, holder, detail) VALUES (?, ?, ?, ?, ?, ?)", (at, actor, action, hash_, holder, detail))
+
+
+def _holder(con, hash_, holder="league"):
+    con.execute("INSERT INTO content_holders (hash, holder, uploaded_by, status, note, created_at, updated_at) VALUES (?, ?, '', 'active', '', '2026-10-01', '2026-10-01')", (hash_, holder))
+
+
+def test_migration_003_removes_only_the_old_scan_repeats_and_adds_the_indexes(tmp_path, monkeypatch):
+    path = _db_at_version_2(tmp_path, monkeypatch)
+    con = sqlite3.connect(path)
+    for i in range(300):   # the old loop: the same folder, again and again
+        _event(con, f"2026-10-07 05:{i % 60:02d}:00.{i:06d}", "scan", "upload", "h1", "car a (3 files, 9 bytes)")
+        _event(con, f"2026-10-07 06:{i % 60:02d}:00.{i:06d}", "scan", "upload", "h2", "car b (1 files, 2 bytes)")
+    _event(con, "2026-10-07 07:00:00.000000", "scan", "upload", "h1", "car a with another detail")      # different detail: kept
+    _event(con, "2026-10-12 01:00:00.000000", "scan", "upload", "h1", "car a (3 files, 9 bytes)")        # after the fix date: kept
+    _event(con, "2026-10-07 05:30:00.000000", "upload", "upload", "h1", "car a (3 files, 9 bytes)")      # another actor: kept
+    _event(con, "2026-10-07 05:31:00.000000", "scan", "scan", "h1", "car a (3 files, 9 bytes)")          # another action: kept
+    _event(con, "2026-10-07 05:32:00.000000", "admin", "source", "h1", "https://example.test")
+    _holder(con, "h1")
+    con.commit()
+    first = {r[0]: r[1] for r in con.execute("SELECT hash, MIN(id) FROM catalog_events WHERE actor='scan' AND action='upload' GROUP BY hash")}
+    con.close()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    db.init_db()
+    rows = _q(path, "SELECT id, hash, detail, actor, action, at FROM catalog_events ORDER BY id")
+    scan_upload = [r for r in rows if r[3] == "scan" and r[4] == "upload"]
+    assert len(rows) == 2 + 1 + 1 + 1 + 1 + 1 and len(scan_upload) == 4   # h1+h2 once each, the other detail, the post-fix repeat
+    assert {r[1]: r[0] for r in scan_upload if r[2] in ("car a (3 files, 9 bytes)", "car b (1 files, 2 bytes)") and r[5] < "2026-10-08"} == first   # the FIRST of each survives
+    assert {(r[3], r[4]) for r in rows} == {("scan", "upload"), ("upload", "upload"), ("scan", "scan"), ("admin", "source")}
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
+    names = {r[0] for r in _q(path, "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"ux_content_holders_hash_holder", "ix_catalog_events_hash_id", "ix_activity_server_ts", "ix_incidents_server_ts"} <= names
+    plan = " ".join(str(r) for r in _q(path, "EXPLAIN QUERY PLAN SELECT * FROM catalog_events WHERE hash = 'h1' ORDER BY id DESC LIMIT 5"))
+    assert "ix_catalog_events_hash_id" in plan
+    with pytest.raises(sqlite3.IntegrityError):   # the new rule is really enforced
+        con = sqlite3.connect(path)
+        _holder(con, "h1")
+    before = _q(path, "SELECT * FROM catalog_events")
+    db.init_db()   # rerun: nothing changes
+    assert _q(path, "SELECT * FROM catalog_events") == before
+
+
+def test_migration_003_stops_on_duplicate_holders_and_changes_nothing(tmp_path, monkeypatch):
+    path = _db_at_version_2(tmp_path, monkeypatch)
+    con = sqlite3.connect(path)
+    for i in range(5):
+        _event(con, f"2026-10-07 05:00:0{i}.000000", "scan", "upload", "h1", "car a (3 files, 9 bytes)")
+    _holder(con, "h1")
+    _holder(con, "h1")   # two rows for the same (hash, holder)
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    with pytest.raises(RuntimeError, match=r"UNIQUE\(content_holders.hash, holder\).*1 pair"):
+        db.init_db()
+    assert len(_q(path, "SELECT id FROM catalog_events")) == 5   # the dedupe is not applied either
+    assert 3 not in {r[0] for r in _q(path, "SELECT version FROM schema_migrations")}
+    assert "ix_catalog_events_hash_id" not in {r[0] for r in _q(path, "SELECT name FROM sqlite_master WHERE type = 'index'")}
+
+
+def test_migration_003_refuses_an_index_that_has_its_name_but_another_definition(tmp_path, monkeypatch):
+    path = _db_at_version_2(tmp_path, monkeypatch)
+    con = sqlite3.connect(path)
+    con.execute("CREATE INDEX ix_activity_server_ts ON activity (kind)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    with pytest.raises(RuntimeError, match="another definition"):
+        db.init_db()
+    assert 3 not in {r[0] for r in _q(path, "SELECT version FROM schema_migrations")}
+
+
+def test_a_fresh_database_gets_the_same_indexes_as_an_upgraded_one(tmp_path, monkeypatch):
+    old = _db_at_version_2(tmp_path, monkeypatch)
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{old}"))
+    db.init_db()
+    fresh = tmp_path / "fresh3.db"
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{fresh}"))
+    db.init_db()
+    names = lambda p: {(r[0], r[1]) for r in _q(p, "SELECT tbl_name, name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
+    assert names(old) == names(fresh)
+
+
+@pytest.mark.parametrize("ddl", [
+    "CREATE UNIQUE INDEX ux_content_holders_hash_holder ON content_holders (hash, holder) WHERE status = 'active'",   # unique, but only for some rows
+    "CREATE INDEX ux_content_holders_hash_holder ON content_holders (hash, holder)",                                  # right columns, not unique
+    "CREATE INDEX ix_catalog_events_hash_id ON content_holders (hash, id)",                                         # right name and columns, another table
+])
+def test_migration_003_refuses_look_alike_indexes(tmp_path, monkeypatch, ddl):
+    path = _db_at_version_2(tmp_path, monkeypatch)
+    con = sqlite3.connect(path)
+    con.execute(ddl)
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    with pytest.raises(RuntimeError, match="another definition"):
+        db.init_db()
+    assert 3 not in {r[0] for r in _q(path, "SELECT version FROM schema_migrations")}
