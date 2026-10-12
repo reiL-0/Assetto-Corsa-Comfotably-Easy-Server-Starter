@@ -129,10 +129,21 @@ def _m003_catalog_dedupe_and_indexes(con: sqlite3.Connection) -> None:
     _ensure_index(con, "ix_incidents_server_ts", "incidents", ("server_id", "ts"))
 
 
+def _m004_championship_archive(con: sqlite3.Connection) -> None:
+    """A league can be archived (app/archive.py): two columns on `championships` (NULL / '' = a running league, which every existing row is). The snapshot table
+    `championship_archive` is a whole new table: create_all made it just before the migrations ran."""
+    have = {row[1] for row in con.execute('PRAGMA table_info("championships")')}
+    if "archived_at" not in have:
+        con.execute('ALTER TABLE "championships" ADD COLUMN "archived_at" DATETIME')
+    if "archived_by" not in have:
+        con.execute('ALTER TABLE "championships" ADD COLUMN "archived_by" VARCHAR NOT NULL DEFAULT \'\'')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
     (3, _m003_catalog_dedupe_and_indexes),
+    (4, _m004_championship_archive),
 ]
 
 

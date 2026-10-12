@@ -5,6 +5,7 @@ this router. Nothing the UI can do is missing here.
 from fastapi import APIRouter, Depends
 
 from app.announcement import router as announcement_router
+from app.archive import router as archive_router
 from app.auth import guard
 from app.bans import router as bans_router
 from app.catalog import router as catalog_router
@@ -54,5 +55,6 @@ api_router.include_router(telemetry_router)  # public: the in-game app has no lo
 api_router.include_router(acsm_router)  # public reads for the league site (ACSM-compatible), localhost only
 api_router.include_router(content_router, dependencies=[Depends(guard())])
 api_router.include_router(championship_router, dependencies=[Depends(guard())])
+api_router.include_router(archive_router, dependencies=[Depends(guard())])  # archive a finished league: any logged-in user previews, admin archives
 api_router.include_router(league_router, dependencies=[Depends(guard())])
 api_router.include_router(susp_router, dependencies=[Depends(guard())])  # roster: any logged-in user reads, admin edits

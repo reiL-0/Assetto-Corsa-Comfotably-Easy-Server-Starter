@@ -11,6 +11,7 @@ from sqlmodel import select
 
 from app.db import SessionDep
 from app.league import session_for, settle_metrics
+from app.leaguelock import serialized
 from app.models import Championship, Event
 from app.servers import AppliedOut, SessionIn, _get, apply_to_server
 
@@ -63,8 +64,13 @@ def _out(e: Event) -> EventOut:
 
 
 def _check_league(sess: SessionDep, league_id: int | None) -> None:
-    if league_id is not None and not sess.get(Championship, league_id):
+    if league_id is None:
+        return
+    c = sess.get(Championship, league_id)
+    if not c:
         raise HTTPException(404, "league not found")
+    if c.archived_at:
+        raise HTTPException(409, "league archived: no event can be tied to it")
 
 
 def _get_event(sess: SessionDep, event_id: int) -> Event:
@@ -80,6 +86,7 @@ def list_events(sess: SessionDep) -> list[EventOut]:
 
 
 @router.post("", response_model=EventOut, status_code=201)
+@serialized
 def create_event(body: EventIn, sess: SessionDep) -> EventOut:
     _check_league(sess, body.league_id)
     e = Event(title=body.title, notes=body.notes, data=body.session.model_dump(), derived=body.derived, league_id=body.league_id)
@@ -95,6 +102,7 @@ def get_event(event_id: int, sess: SessionDep) -> EventOut:
 
 
 @router.put("/{event_id}", response_model=EventOut)
+@serialized
 def update_event(event_id: int, body: EventIn, sess: SessionDep) -> EventOut:
     e = _get_event(sess, event_id)
     _check_league(sess, body.league_id)
@@ -130,9 +138,11 @@ def delete_event(event_id: int, sess: SessionDep) -> None:
 
 
 @router.post("/{event_id}/duplicate", response_model=EventOut, status_code=201)
+@serialized
 def duplicate_event(event_id: int, sess: SessionDep) -> EventOut:
     src = _get_event(sess, event_id)
-    e = Event(title=f"{src.title} (copia)"[:80], notes=src.notes, data=dict(src.data), league_id=src.league_id)
+    league = sess.get(Championship, src.league_id) if src.league_id else None
+    e = Event(title=f"{src.title} (copia)"[:80], notes=src.notes, data=dict(src.data), league_id=None if league is None or league.archived_at else league.id)   # (a copy never joins an archived league)
     sess.add(e)
     sess.commit()
     sess.refresh(e)

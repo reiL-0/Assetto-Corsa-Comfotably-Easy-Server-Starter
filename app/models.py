@@ -270,6 +270,20 @@ class Championship(SQLModel, table=True):
     practice_days: int = 7
     penalties: list | None = Field(default=None, sa_type=JSON)  # the league's catalogue: [{name, seconds, dsq}]; the steward picks from it (app/penalties.py)
     created_at: datetime = Field(default_factory=_now)
+    archived_at: datetime | None = None  # set ONCE by app/archive.py when the league ends: its results are summarised into ChampionshipArchive and the fine detail is deleted; None = running
+    archived_by: str = ""
+
+
+class ChampionshipArchive(SQLModel, table=True):
+    """What is kept of a league once it is archived (app/archive.py): the final standings and, per counted result, the classification, points, best laps and the
+    penalties with their reason. `data` is versioned JSON; no laps, no cuts, no incidents. The standings of an archived league are read from here."""
+
+    __tablename__ = "championship_archive"
+
+    championship_id: int = Field(primary_key=True, foreign_key="championships.id")
+    archived_at: datetime = Field(default_factory=_now)
+    archived_by: str = ""
+    data: dict = Field(default_factory=dict, sa_type=JSON)
 
 
 class LeagueMember(SQLModel, table=True):
