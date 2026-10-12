@@ -156,7 +156,7 @@ def test_background_upload_reports_effective_kind_and_prunes_correctly(isolated_
     dest = content._content_dir() / f"{effective}s" / name
     assert (dest / marker).is_file()
     assert not (content._content_dir() / f"{asked}s" / name).exists()
-    assert (dest / "model.kn5").exists() is (not pack)
+    assert (dest / "model.kn5").exists() is (not (pack or effective == "track"))   # tracks are always cut down
     assert (dest / "data/physics.ini").is_file()
     if effective == "car":
         assert (dest / "ui/ui_car.json").is_file()
@@ -174,8 +174,9 @@ def test_ambiguous_upload_respects_requested_destination(isolated_uploads, asked
     r = client.post(f"/api/v1/content/{asked}s", files={"file": ("both.zip", archive, "application/zip")})
     assert r.status_code == 201, r.text
     assert r.json() == {asked: "both"}
-    assert (content._content_dir() / f"{asked}s/both/data.acd").is_file()
-    assert (content._content_dir() / f"{asked}s/both/models.ini").is_file()
+    folder = content._content_dir() / f"{asked}s/both"
+    assert (folder / "data.acd").is_file() is (asked == "car")   # a track pack keeps data/ and models*.ini, not a loose data.acd
+    assert (folder / "models.ini").is_file()
 
 
 def test_inbox_reports_redirected_destination(isolated_uploads):
@@ -185,3 +186,52 @@ def test_inbox_reports_redirected_destination(isolated_uploads):
     assert r.json()["car"] == "inbox_car" and "installed as a car" in r.json()["note"]
     assert (content._cars_dir() / "inbox_car/data.acd").is_file()
     assert not (content._tracks_dir() / "inbox_car").exists()
+
+
+def test_track_upload_without_pack_keeps_only_server_files_and_the_live_map(isolated_uploads):
+    files = {"live_t/models.ini": b"[MODEL_0]", "live_t/data/surfaces.ini": b"[S]", "live_t/data/map.ini": b"[PARAMETERS]",
+             "live_t/map.png": b"P", "live_t/ui/ui_track.json": b'{"name": "t"}', "live_t/live_t.kn5": b"K" * 5000,
+             "live_t/texture/asphalt.dds": b"T" * 3000, "live_t/ai/fast_lane.ai": b"A" * 100}
+    r = client.post("/api/v1/content/tracks", files={"file": ("t.zip", _zip(files), "application/zip")})   # no ?pack
+    assert r.status_code == 201, r.text
+    d = content._tracks_dir() / "live_t"
+    assert sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file()) == [
+        "data/map.ini", "data/surfaces.ini", "map.png", "models.ini", "ui/ui_track.json"]
+
+
+def test_a_blocked_full_track_is_refused_even_though_it_is_cut_down_before_install(tmp_path):
+    from sqlmodel import Session
+
+    from app import catalog
+    from app.models import BlockedHash
+    files = {"bl_t/models.ini": b"[MODEL_0]", "bl_t/data/surfaces.ini": b"[S]", "bl_t/bl_t.kn5": b"K" * 500}
+    for name, data in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(data)
+    full = catalog.digest_dir(tmp_path / "bl_t")[0]
+    with Session(catalog.engine) as sess:   # a rights claim blocked the hash of the FULL track
+        sess.add(BlockedHash(hash=full, reason="claim"))
+        sess.commit()
+    r = client.post("/api/v1/content/tracks", files={"file": ("bl.zip", _zip(files), "application/zip")})
+    assert r.status_code == 403 and "rights claim" in r.text
+    assert not (content._tracks_dir() / "bl_t").exists()
+
+
+def test_a_claim_that_lands_while_the_track_is_being_cut_down_still_stops_the_install(monkeypatch):
+    from sqlmodel import Session
+
+    from app import catalog
+    from app.models import BlockedHash
+    files = {"race_t/models.ini": b"[MODEL_0]", "race_t/data/surfaces.ini": b"[S]", "race_t/race_t.kn5": b"K" * 500}
+    real_prune = uploadguard.prune
+    def prune_then_claim(root, kind):
+        full = catalog.digest_dir(root)[0]   # what the upload hashed before the cut
+        out = real_prune(root, kind)
+        with Session(catalog.engine) as sess:
+            sess.add(BlockedHash(hash=full, reason="late claim"))
+            sess.commit()
+        return out
+    monkeypatch.setattr(uploadguard, "prune", prune_then_claim)
+    r = client.post("/api/v1/content/tracks", files={"file": ("rt.zip", _zip(files), "application/zip")})
+    assert r.status_code == 403 and "rights claim" in r.text
+    assert not (content._tracks_dir() / "race_t").exists()
