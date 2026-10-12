@@ -56,7 +56,7 @@ def test_pack_upload_drops_models_and_textures_but_keeps_skin_names():
     assert not (d / "pk_car.kn5").exists() and not (d / "sfx").exists() and not any(d.rglob("*.dds"))
     assert (d / "skins" / "red").is_dir()                                                   # the skin name survives (the entry list needs it)
     full = client.post("/api/v1/content/cars", files={"file": ("pk2.zip", _zip({k.replace("pk_car", "pk_full"): v for k, v in files.items()}), "application/zip")})
-    assert full.status_code == 201 and (content._cars_dir() / "pk_full" / "pk_full.kn5").is_file()   # without pack nothing changes
+    assert full.status_code == 201 and not (content._cars_dir() / "pk_full" / "pk_full.kn5").exists()   # without ?pack it is cut down all the same
 
 
 def test_unsafe_or_bomb_archives_are_refused_with_a_sentence():
@@ -156,12 +156,12 @@ def test_background_upload_reports_effective_kind_and_prunes_correctly(isolated_
     dest = content._content_dir() / f"{effective}s" / name
     assert (dest / marker).is_file()
     assert not (content._content_dir() / f"{asked}s" / name).exists()
-    assert (dest / "model.kn5").exists() is (not (pack or effective == "track"))   # tracks are always cut down
+    assert not (dest / "model.kn5").exists()   # cars and tracks are always cut down, whatever `pack` says
     assert (dest / "data/physics.ini").is_file()
     if effective == "car":
         assert (dest / "ui/ui_car.json").is_file()
         assert (dest / "skins/red").is_dir()
-        assert (dest / "skins/red/body.dds").exists() is (not pack)
+        assert not (dest / "skins/red/body.dds").exists()
     else:
         assert (dest / "gp/data/surfaces.ini").is_file()
         assert (dest / "ui/gp/ui_track.json").is_file()
@@ -176,7 +176,7 @@ def test_ambiguous_upload_respects_requested_destination(isolated_uploads, asked
     assert r.json() == {asked: "both"}
     folder = content._content_dir() / f"{asked}s/both"
     assert (folder / "data.acd").is_file() is (asked == "car")   # a track pack keeps data/ and models*.ini, not a loose data.acd
-    assert (folder / "models.ini").is_file()
+    assert (folder / "models.ini").is_file() is (asked == "track")   # and a car pack keeps data.acd, not a loose models.ini
 
 
 def test_inbox_reports_redirected_destination(isolated_uploads):
