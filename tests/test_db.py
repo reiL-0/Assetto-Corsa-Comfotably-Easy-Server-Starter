@@ -57,7 +57,7 @@ def test_old_servers_keep_rows_and_get_the_domain_values(tmp_path, monkeypatch):
     db.init_db()
     rows = _q(path, "SELECT id, name, base_port, wake, integrity, stewards FROM servers ORDER BY id")
     assert rows == [(1, "a", 9600, "window", "warn", "off"), (2, "b", 9610, "off", "warn", "off"), (3, "c", 9620, "always", "warn", "off")]
-    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,)]
+    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,)]
 
 
 def test_upgraded_and_fresh_databases_have_the_same_indexes(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_fresh_database_is_not_backed_up(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{tmp_path / 'new.db'}"))
     db.init_db()
     assert not (tmp_path / "backups").exists()
-    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,)]
+    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,)]
 
 
 def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path, monkeypatch):
@@ -151,7 +151,7 @@ def test_migration_003_removes_only_the_old_scan_repeats_and_adds_the_indexes(tm
     assert len(rows) == 2 + 1 + 1 + 1 + 1 + 1 and len(scan_upload) == 4   # h1+h2 once each, the other detail, the post-fix repeat
     assert {r[1]: r[0] for r in scan_upload if r[2] in ("car a (3 files, 9 bytes)", "car b (1 files, 2 bytes)") and r[5] < "2026-10-08"} == first   # the FIRST of each survives
     assert {(r[3], r[4]) for r in rows} == {("scan", "upload"), ("upload", "upload"), ("scan", "scan"), ("admin", "source")}
-    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3]
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4]
     names = {r[0] for r in _q(path, "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert {"ux_content_holders_hash_holder", "ix_catalog_events_hash_id", "ix_activity_server_ts", "ix_incidents_server_ts"} <= names
     plan = " ".join(str(r) for r in _q(path, "EXPLAIN QUERY PLAN SELECT * FROM catalog_events WHERE hash = 'h1' ORDER BY id DESC LIMIT 5"))
@@ -219,3 +219,28 @@ def test_migration_003_refuses_look_alike_indexes(tmp_path, monkeypatch, ddl):
     with pytest.raises(RuntimeError, match="another definition"):
         db.init_db()
     assert 3 not in {r[0] for r in _q(path, "SELECT version FROM schema_migrations")}
+
+
+# --- migration 004: archiving a league ------------------------------------------------------------------------------------
+
+def test_migration_004_adds_the_archive_columns_and_keeps_every_running_league_running(tmp_path, monkeypatch):
+    path = tmp_path / "v3.db"
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:3])
+    db.init_db()
+    con = sqlite3.connect(path)   # a deployed database before 004: a league without the archive columns
+    con.execute("ALTER TABLE championships DROP COLUMN archived_at")
+    con.execute("ALTER TABLE championships DROP COLUMN archived_by")
+    con.execute("DROP TABLE championship_archive")
+    con.execute("INSERT INTO championships (id, name, points_system, practice_required, practice_laps, practice_days, created_at) VALUES (1, 'Vieja', '[25, 18]', 0, 5, 7, '2026-01-01')")
+    con.commit()
+    con.close()
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    db.init_db()
+    assert _q(path, "SELECT id, name, archived_at, archived_by FROM championships") == [(1, "Vieja", None, "")], "an existing league must stay running"
+    assert _q(path, "SELECT name FROM sqlite_master WHERE name = 'championship_archive'") == [("championship_archive",)]
+    stamp = _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version")
+    assert [r[0] for r in stamp] == [1, 2, 3, 4]
+    db.init_db()   # rerun
+    assert _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version") == stamp

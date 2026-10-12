@@ -33,6 +33,7 @@ from app.db import SessionDep
 from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
+from app.leaguelock import lock as league_lock, serialized
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn
@@ -72,10 +73,12 @@ def is_eligible(c: Championship, m: LeagueMember, laps: int) -> bool:
     return not c.practice_required or m.exempt or m.non_racing or laps >= c.practice_laps
 
 
-def _league(sess: Session, championship_id: int) -> Championship:
+def _league(sess: Session, championship_id: int, writing: bool = False) -> Championship:
     c = sess.get(Championship, championship_id)
     if not c:
         raise HTTPException(404, "championship not found")
+    if writing and c.archived_at:
+        raise HTTPException(409, "league archived: it no longer takes changes")
     return c
 
 
@@ -93,16 +96,19 @@ def list_members(championship_id: int, sess: SessionDep) -> list[MemberOut]:
 
 
 @router.post("", response_model=MemberOut)
+@serialized
 def add_member(championship_id: int, body: MemberIn, sess: SessionDep) -> MemberOut:
     """Add a driver or update the one with that Steam ID."""
-    c = _league(sess, championship_id)
+    c = _league(sess, championship_id, writing=True)
     m = sess.merge(LeagueMember(championship_id=championship_id, **body.model_dump()))
     sess.commit()
     return _status(sess, c, m, time.time())
 
 
 @router.delete("/{guid}", status_code=204)
+@serialized
 def remove_member(championship_id: int, guid: str, sess: SessionDep) -> None:
+    _league(sess, championship_id, writing=True)
     m = sess.get(LeagueMember, (championship_id, guid))
     if not m:
         raise HTTPException(404, "driver not on the roster")
@@ -117,6 +123,8 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     c = sess.get(Championship, ev.league_id) if ev.league_id else None
     if not c:
         return s
+    if c.archived_at:
+        raise HTTPException(409, f"league {c.name!r} is archived: its events can no longer run")
     ok, out, suspended = [], [], []
     out_of_races = {x.guid: x for x in active_suspensions(sess, c.id, ("ban", "time", "races"), at)}
     for m in sess.exec(select(LeagueMember).where(LeagueMember.championship_id == c.id).order_by(LeagueMember.name)).all():
@@ -189,8 +197,18 @@ def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
     between the schedule's start and `until`. Idempotent; returns how many Race results were added. A calendar event is thus a counted
     race of its league (draft or published) without anyone picking files. A Race scores (app/championship.py) and uses up the
     suspensions measured in races; a Qualify result feeds the grid suspensions; practice results are skipped."""
-    if not ev.league_id or not (c := sess.get(Championship, ev.league_id)):
+    if not ev.league_id or not (c := sess.get(Championship, ev.league_id)) or c.archived_at:   # an archived league counts no more results
         return 0
+    if not league_lock.acquire(blocking=False):   # a league is being archived or edited right now: this runs on the event loop, so it does not wait; the next tick counts (idempotent)
+        return 0
+    try:
+        sess.refresh(c)   # (archived while this waited for the lock?)
+        return 0 if c.archived_at else _count_results(sess, sc, ev, c, until)
+    finally:
+        league_lock.release()
+
+
+def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, until: float) -> int:
     d, added = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         if not sc.start_at <= f.stat().st_mtime <= until:
@@ -250,8 +268,9 @@ def list_suspensions(championship_id: int, sess: SessionDep) -> list[dict]:
 
 
 @susp_router.post("", status_code=201)
+@serialized
 def add_suspension(championship_id: int, body: SuspensionIn, sess: SessionDep, user: CurrentUser) -> dict:
-    c = _league(sess, championship_id)
+    c = _league(sess, championship_id, writing=True)
     m = sess.get(LeagueMember, (championship_id, body.guid))
     if not m:
         raise HTTPException(404, "driver not on the roster")
@@ -268,7 +287,9 @@ def add_suspension(championship_id: int, body: SuspensionIn, sess: SessionDep, u
 
 
 @susp_router.delete("/{suspension_id}", status_code=204)
+@serialized
 def lift_suspension(championship_id: int, suspension_id: int, sess: SessionDep) -> None:
+    _league(sess, championship_id, writing=True)
     x = sess.get(LeagueSuspension, suspension_id)
     if not x or x.championship_id != championship_id:
         raise HTTPException(404, "suspension not found")
