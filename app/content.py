@@ -183,7 +183,7 @@ class Installed(str):
 def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "") -> str:
     """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
     Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
-    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures. Tracks are cut down always, whatever `pack` says.
+    `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures. Cars and tracks are cut down always: `pack` is kept only so older clients that send it still work.
     `source_url`: the modder's page for the «Descargar» button (without it the content has no button)."""
     with archive.open("rb") as fh:
         magic = fh.read(8)
@@ -214,7 +214,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 dest_parent = _cars_dir() if found == "car" else _tracks_dir()
                 note = f"looked like a {found}, not a {asked}: installed as a {found}"
         full_digest = ""
-        if dest_parent == _tracks_dir() or (pack and dest_parent == _cars_dir()):   # a track is ALWAYS cut down to the server pack (its map.png/map.ini stay for the live map); a car only when asked
+        if dest_parent in (_cars_dir(), _tracks_dir()):   # cars and tracks are ALWAYS cut down to the server pack (a track keeps its map.png/map.ini for the live map)
             full_digest = catalog.digest_dir(tops[0])[0]   # hash of the WHOLE upload: a rights claim blocked that one, and cutting the pack down must not let it back in
             catalog.check_not_blocked(full_digest)
             uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
