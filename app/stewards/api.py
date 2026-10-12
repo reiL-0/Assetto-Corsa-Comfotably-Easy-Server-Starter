@@ -1,6 +1,7 @@
 """Incident list, the on/off switch of the automatic stewards and the intake of track-limit reports from the drivers' own game (steward reads,
 admin writes: the router guard in api/v1)."""
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -53,10 +54,11 @@ class LimitsIn(BaseModel):
 
 
 @router.post("/stewards/report", status_code=204)
-def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> None:
+async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> None:
     """Track-limit evidence from the driver's own game (sent through the website, which checks nothing but the shape: this route does the rest).
-    204 recorded or ignored on purpose (mode off, flood) · 409 the server is not running or that slot is not that driver."""
-    _get(sess, server_id)
+    204 queued or ignored on purpose (mode off, flood) · 409 the server is not running or that slot is not that driver.
+    `async` so the live state (cars, session) is read on the event loop, where ACSPClient changes it; the database lookup goes to a thread."""
+    await asyncio.to_thread(_get, sess, server_id)
     inst = next((i for i in supervisor.live() if i.server_id == server_id), None)
     if not inst or not inst.acsp:
         raise HTTPException(409, "server not running")

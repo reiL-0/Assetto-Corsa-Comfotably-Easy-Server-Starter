@@ -12,6 +12,7 @@ from app import integrity, metrics, resourcelog, schedule, servers, wake
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
+from app.stewards import engine as steward_incidents
 from app.web import mount_spa
 
 ADMIN_SERVERS_HTML = Path(__file__).parent / "admin" / "servers.html"
@@ -26,6 +27,7 @@ log = logging.getLogger("acmanager")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    steward_incidents.accept(True)
     if n_sealed := integrity.seal_new():
         log.info("sealed %d installed item(s) that had no seal", n_sealed)
     with Session(engine) as sess:
@@ -50,6 +52,9 @@ async def lifespan(_app: FastAPI):
         await retention
         if not await asyncio.to_thread(metrics.flush, 8):
             log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
+        steward_incidents.accept(False)   # the UDP sockets live on until the process ends: nothing may be admitted after this last flush
+        if not await asyncio.to_thread(steward_incidents.flush, 8):
+            log.warning("shutting down with %s steward incident(s) still queued: they are lost", steward_incidents.stats()["queued"])
 
 
 app = FastAPI(
