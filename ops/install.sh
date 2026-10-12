@@ -77,6 +77,7 @@ Description=AC Server Manager
 After=network.target
 
 [Service]
+UMask=0077
 User=$ACM_USER
 WorkingDirectory=$APP_DIR
 Environment=ACM_HOST=127.0.0.1 ACM_PORT=$PORT ACM_DATA_DIR=$DATA_DIR ACM_SERVE_UI=false ACM_IDLE_STOP_SECONDS=600 ACM_ACSERVER_CMD=$ACSERVER_DIR/acServer

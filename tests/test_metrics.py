@@ -95,6 +95,7 @@ def test_supervisor_records_start_stop_crash_and_online_samples(tmp_path, monkey
         monkeypatch.setattr(settings, "acserver_cmd", str(_fake(tmp_path, "exit 3")))
         await supervisor.start(904, tmp_path)
         await asyncio.sleep(0.5)
+        assert await asyncio.to_thread(metrics.flush)
         crash = rows(904, "server_crash")
         assert len(crash) == 1 and crash[0].value == 3  # it died by itself: a crash
 
@@ -106,9 +107,11 @@ def test_supervisor_records_start_stop_crash_and_online_samples(tmp_path, monkey
             inst.acsp.board.apply({"type": "new_connection", "car_id": car, "driver_name": name, "driver_guid": f"G{car}",
                                    "car_model": "bmw", "car_skin": ""})
         await asyncio.sleep(0.3)
+        assert await asyncio.to_thread(metrics.flush)
         assert {r.value for r in rows(905, "online")} == {2}
         await supervisor.stop(905)
         await asyncio.sleep(0.2)
+        assert await asyncio.to_thread(metrics.flush)
         assert [r.name for r in rows(905, "server_stop")] == ["manual"]
         assert not rows(905, "server_crash")  # a requested stop is not a crash
         assert len(rows(905, "server_start")) == 1
@@ -124,6 +127,7 @@ def test_idle_stop_is_recorded_with_its_reason(tmp_path, monkeypatch):
         inst = await supervisor.start(906, tmp_path)
         inst.acsp = acsp.ACSPClient(906)
         await asyncio.sleep(1.6)
+        assert await asyncio.to_thread(metrics.flush)
         assert not inst.running and [r.name for r in rows(906, "server_stop")] == ["idle"]
 
     asyncio.run(scenario())
@@ -146,6 +150,7 @@ def test_server_errors_are_counted():
     client = TestClient(app, raise_server_exceptions=False)
     assert client.get("/_boom").status_code == 500 and client.get("/_unavailable").status_code == 503
     client.get("/_nothing_here")  # a 404 is not a server error
+    assert metrics.flush()
     new = rows(0, "http_5xx")[before:]
     assert sorted((r.name, r.value) for r in new) == [("/_boom", 500), ("/_unavailable", 503)]
 

@@ -130,7 +130,7 @@ class Instance:
         if self.proc:
             self.exit_code = self.proc.returncode
         if not self._stopping and self.exit_code not in (0, -15):  # ended on its own and not by a stop/terminate
-            metrics.log(self.server_id, "server_crash", value=self.exit_code, name=f"up {int(self.uptime)}s")
+            metrics.enqueue(self.server_id, "server_crash", value=self.exit_code, name=f"up {int(self.uptime)}s")
         self.pid_path.unlink(missing_ok=True)
         if self.director:
             self.director.stop()
@@ -144,7 +144,7 @@ class Instance:
         while self.running:
             await asyncio.sleep(SAMPLE_EVERY)
             if self.running and self.acsp:
-                metrics.log(self.server_id, "online", value=sum(1 for d in self.acsp.board.drivers if d.connected))
+                metrics.enqueue(self.server_id, "online", value=sum(1 for d in self.acsp.board.drivers if d.connected))
 
     async def _idle_watch(self) -> None:
         """Stop the process once ACSP has shown no connected cars for idle_stop_seconds."""
@@ -173,7 +173,7 @@ class Instance:
             self._stopping = True
             if self.http_port:
                 await self._snapshot_info()
-            metrics.log(self.server_id, "server_stop", name=reason, value=self.uptime)
+            metrics.enqueue(self.server_id, "server_stop", name=reason, value=self.uptime)
             os.kill(self.pid, signal.SIGTERM)
             deadline = time.time() + timeout
             while self.running and time.time() < deadline:
@@ -290,7 +290,7 @@ async def _start(
     _instances[server_id] = inst   # registered before the plugin socket: a failure there must not leave a running acServer nobody owns
     if acsp_local_port and acsp_remote_port:
         await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host)
-    metrics.log(server_id, "server_start")
+    metrics.enqueue(server_id, "server_start")
     return inst
 
 
@@ -318,7 +318,7 @@ async def adopt(
     _instances[server_id] = inst
     if acsp_local_port and acsp_remote_port:
         await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host, car_slots)
-    metrics.log(server_id, "server_adopted", name=f"pid {pid}")
+    metrics.enqueue(server_id, "server_adopted", name=f"pid {pid}")
     return inst
 
 

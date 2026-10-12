@@ -217,16 +217,17 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
             uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
         kind = "car" if dest_parent == _cars_dir() else "track"
-        if cataloged:
-            digest, size, nfiles = catalog.digest_dir(tops[0])
-            catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
-        dest_parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
-        res = Installed(root)
-        if cataloged:
-            res.kind = kind
-            integrity.seal_installed(kind, root)
-            catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
+        with catalog.mutation_lock:   # ponytail: held during copytree/digest (one process, runs in the threadpool); uploads and scans queue up. Staging dir + short swap under the lock if that hurts
+            if cataloged:
+                digest, size, nfiles = catalog.digest_dir(tops[0])
+                catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
+            dest_parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+            res = Installed(root)
+            if cataloged:
+                res.kind = kind
+                integrity.seal_installed(kind, root)
+                catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
         res.note = note
         return res
     except uploadguard.Rejected as e:

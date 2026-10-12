@@ -26,7 +26,6 @@ log = logging.getLogger("acmanager")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    metrics.purge()
     if n_sealed := integrity.seal_new():
         log.info("sealed %d installed item(s) that had no seal", n_sealed)
     with Session(engine) as sess:
@@ -38,12 +37,19 @@ async def lifespan(_app: FastAPI):
     ticker = asyncio.create_task(schedule.run_forever())
     waking = asyncio.create_task(wake.run_forever())
     sampling = asyncio.create_task(resourcelog.run_forever())   # a plain log file of CPU/RAM/steal per server, outside the pages
-    yield
-    ticker.cancel()
-    waking.cancel()
-    sampling.cancel()
-    if not metrics.flush(8):   # (a write can wait 5 s for SQLite's lock)   # the events queued from the UDP callbacks get a moment to reach the database
-        log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
+    retention_stop = asyncio.Event()
+    retention = asyncio.create_task(metrics.purge_forever(retention_stop))
+    try:
+        yield
+    finally:
+        ticker.cancel()
+        waking.cancel()
+        sampling.cancel()
+        retention_stop.set()
+        await asyncio.gather(ticker, waking, sampling, return_exceptions=True)
+        await retention
+        if not await asyncio.to_thread(metrics.flush, 8):
+            log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
 
 
 app = FastAPI(
@@ -71,10 +77,10 @@ async def count_server_errors(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        metrics.log(0, "http_5xx", name=request.url.path[:120], value=500)
+        metrics.enqueue(0, "http_5xx", name=request.url.path[:120], value=500)
         raise
     if response.status_code >= 500:
-        metrics.log(0, "http_5xx", name=request.url.path[:120], value=response.status_code)
+        metrics.enqueue(0, "http_5xx", name=request.url.path[:120], value=response.status_code)
     return response
 
 

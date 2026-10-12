@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
+from sqlalchemy import func
 from sqlmodel import select
 
 from app import supervisor
@@ -21,7 +22,7 @@ from app.config import settings
 from app.db import SessionDep
 from app.live import acsp
 from app.live.acsp import ACSPClient
-from app.models import Server
+from app.models import Activity, ChampionshipEvent, Incident, Penalty, Schedule, Server, Setting
 from app.services import ini_generator, server_service
 from app.services.server_service import ServerError, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
@@ -109,12 +110,35 @@ def _alloc_base_port(sess: SessionDep) -> int:
     raise HTTPException(507, "no free port block in configured range")
 
 
+def _alloc_id(sess: SessionDep) -> int:
+    """Persistent high-water mark; called under _alloc_lock in the create transaction."""
+    seq = sess.get(Setting, "server_id_seq")
+    high = seq.value if seq else 0
+    if type(high) is not int or high < 0:
+        raise RuntimeError("invalid server_id_seq")
+    for column in (Server.id, Activity.server_id, Incident.server_id, Penalty.server_id,
+                   Schedule.server_id, ChampionshipEvent.server_id):
+        high = max(high, sess.exec(select(func.max(column))).one() or 0)
+    instances = Path(settings.data_dir) / "instances"
+    if instances.exists():
+        high = max(high, max((int(p.name) for p in instances.iterdir()
+                              if p.is_dir() and p.name.isascii() and p.name.isdecimal()), default=0))
+    next_id = high + 1
+    if seq is None:
+        seq = Setting(key="server_id_seq", value=next_id)
+    else:
+        seq.value = next_id
+    sess.add(seq)
+    return next_id
+
+
 # --- routes --------------------------------------------------------------
 
 @router.post("", response_model=ServerOut, status_code=201)
 def create(body: ServerIn, sess: SessionDep) -> ServerOut:
     with _alloc_lock:   # choosing the block and committing it are one step: two simultaneous creates must not get the same ports
         s = Server(
+            id=_alloc_id(sess),
             name=body.name,
             config=body.config,
             entry_list=body.entry_list,
@@ -148,13 +172,22 @@ def update(server_id: int, body: ServerIn, sess: SessionDep) -> ServerOut:
 
 
 @router.delete("/{server_id}", status_code=204)
-def delete(server_id: int, sess: SessionDep) -> None:
-    s = _get(sess, server_id)
-    inst = supervisor.get(server_id)
-    if inst and inst.running:
-        raise HTTPException(409, "stop the server before deleting it")
-    sess.delete(s)
-    sess.commit()
+async def delete(server_id: int, sess: SessionDep) -> None:
+    def drop() -> None:   # the blocking SQLite commit runs off the event loop, still under the per-server lock
+        s = _get(sess, server_id)
+        inst = supervisor.get(server_id)
+        if inst and inst.running:
+            raise HTTPException(409, "stop the server before deleting it")
+        sess.delete(s)
+        sess.commit()
+
+    async with server_service.server_lock(server_id):
+        work = asyncio.ensure_future(asyncio.to_thread(drop))
+        try:
+            await asyncio.shield(work)
+        finally:
+            if not work.done():   # cancelled: a thread cannot be stopped, so keep the lock and the session until it ends
+                await asyncio.wait({work})
 
 
 @router.get("/{server_id}/server_cfg.ini", response_class=PlainTextResponse)

@@ -29,3 +29,15 @@
 ## Interactions
 - **Lee:** `/healthz` del manager, `status.json` del respaldo (`OPR WP/ops/backup.py`), el disco. **Escribe:** su estado y un POST al webhook de estado de Discord.
 - Los avisos pendientes se guardan atómicamente antes del POST. Si Discord falla, conserva las marcas anteriores y reintenta el aviso en la siguiente corrida. Un estado antiguo `{}` sigue siendo válido; un estado corrupto se reinicia. Si Discord acepta el POST pero falla el guardado posterior, el aviso puede repetirse (no hay transacción entre disco y Discord).
+
+El unit generado por `ops/install.sh` fija `UMask=0077` en `[Service]`:
+los archivos nuevos del manager y sus procesos hijos quedan privados al usuario del servicio.
+Para el unit vivo del VPS, aplicar manualmente un drop-in con `systemctl edit acm`:
+
+```ini
+[Service]
+UMask=0077
+```
+
+Después ejecutar `systemctl daemon-reload` y reiniciar el manager para aplicar la máscara.
+No cambia los permisos de archivos existentes.
