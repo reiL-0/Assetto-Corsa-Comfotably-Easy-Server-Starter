@@ -94,9 +94,45 @@ def _m002_domain_defaults_and_indexes(con: sqlite3.Connection) -> None:
             con.execute(f'CREATE {"UNIQUE " if idx.unique else ""}INDEX "{idx.name}" ON "{table.name}" ({", ".join(chr(34) + c + chr(34) for c in cols)})')
 
 
+def _ensure_index(con: sqlite3.Connection, name: str, table: str, columns: tuple[str, ...], unique: bool = False) -> None:
+    """Explicit DDL (migrations after 002 never read the models). An index with this name must already be exactly this one, or it is refused."""
+    row = con.execute("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone()
+    if row:
+        found = tuple(r[2] for r in con.execute(f'PRAGMA index_info("{name}")'))
+        listed = [r for r in con.execute(f'PRAGMA index_list("{table}")') if r[1] == name]   # (seq, name, unique, origin, partial)
+        is_unique, partial = bool(listed and listed[0][2]), bool(listed and listed[0][4])
+        if row[0] != table or found != columns or is_unique != unique or partial:
+            raise RuntimeError(f"index {name} exists with another definition (table {row[0]}, columns {found}, unique={is_unique}, partial={partial}); "
+                               f"expected table {table}, columns {columns}, unique={unique}, not partial")
+        return
+    con.execute(f'CREATE {"UNIQUE " if unique else ""}INDEX "{name}" ON "{table}" ({", ".join(chr(34) + c + chr(34) for c in columns)})')
+
+
+_LEGACY_SCAN_BEFORE = "2026-10-08"   # the scan bug (every pass logged `upload` for the same folder) was fixed on 2026-10-07; nothing later is touched
+
+
+def _m003_catalog_dedupe_and_indexes(con: sqlite3.Connection) -> None:
+    """Review A6/M5. (1) Stops if content_holders already has two rows for one (hash, holder), then makes that UNIQUE. (2) Removes the repeats
+    the old scan loop left in catalog_events: only actor 'scan' + action 'upload' + before the fix date, keeping the FIRST row (lowest id, so
+    its time) of each (hash, holder, detail); every other actor/action and date is left alone. (3) Indexes for the queries that do scan today
+    (catalog events by hash; activity and incidents by server and time). It does not VACUUM: that cannot run inside the transaction."""
+    dup = con.execute("SELECT hash, holder, COUNT(*), GROUP_CONCAT(id) FROM content_holders GROUP BY hash, holder HAVING COUNT(*) > 1").fetchall()
+    if dup:   # merging holders would decide who owns what: never automatic
+        shown = "; ".join(f"{h[:12]}…/{holder}: ids {ids}" for h, holder, _, ids in dup[:5])
+        raise RuntimeError(f"cannot add UNIQUE(content_holders.hash, holder): {len(dup)} pair(s) are duplicated ({shown}); fix them by hand and restart")
+    con.execute("DELETE FROM catalog_events WHERE actor = 'scan' AND action = 'upload' AND at < ? AND id NOT IN ("
+                "SELECT MIN(id) FROM catalog_events WHERE actor = 'scan' AND action = 'upload' AND at < ? GROUP BY hash, holder, detail)",
+                (_LEGACY_SCAN_BEFORE, _LEGACY_SCAN_BEFORE))
+    _ensure_index(con, "ux_content_holders_hash_holder", "content_holders", ("hash", "holder"), unique=True)
+    _ensure_index(con, "ix_catalog_events_hash_id", "catalog_events", ("hash", "id"))
+    _ensure_index(con, "ix_activity_server_ts", "activity", ("server_id", "ts"))
+    _ensure_index(con, "ix_incidents_server_ts", "incidents", ("server_id", "ts"))
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
+    (3, _m003_catalog_dedupe_and_indexes),
 ]
 
 
