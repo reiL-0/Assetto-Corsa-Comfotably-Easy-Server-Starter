@@ -15,6 +15,7 @@ from app.auth import CurrentUser, require
 from app.db import SessionDep
 from app.models import Championship, ChampionshipEvent, Notice, Penalty, ResultClose, _now
 from app.results import TIMED, parse_result_file, penalties_for
+from app.rulebook import effective, legacy_catalogue
 from app.servers import _get, result_path
 
 # stewards write (the router default would make every write admin-only)
@@ -93,7 +94,7 @@ def catalogue(server_id: int, filename: str, sess: SessionDep) -> list[dict]:
     """The penalties the steward can pick for this result: its league's catalogue (empty when it is not a league's)."""
     _existing_result(sess, server_id, filename)
     league = _league_of(sess, server_id, filename)
-    return list(league.penalties or []) if league else []
+    return legacy_catalogue(effective(league)) if league else []
 
 
 @router.get("", response_model=list[PenaltyOut])
@@ -108,16 +109,16 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
     _open(sess, server_id, filename)
     league = _league_of(sess, server_id, filename)
     if body.item:
-        found = next((i for i in (league.penalties or []) if i["name"] == body.item), None) if league else None
+        found = next((i for i in legacy_catalogue(effective(league)) if i["name"] == body.item), None) if league else None
         if not found:
             raise HTTPException(422, f"{body.item!r} is not in the penalty catalogue of this result's league")
-        body.kind, body.value = ("dsq", 0) if found["dsq"] else ("time", found["seconds"])
+        body.kind, body.value = ("dsq", 0) if found["dsq"] else ("stopgo" if found["kind"] == "stopgo" else "time", found["seconds"])   # a drive-through is charged as time (app/rulebook.py)
         body.reason = f"{found['name']}: {body.reason.strip()}" if body.reason.strip() else found["name"]
     if body.kind is None:
         raise HTTPException(422, "kind or item is required")
     if len(body.reason.strip()) < 3:
         raise HTTPException(422, "a steward always says why (reason, at least 3 characters)")
-    if league and league.penalties and body.kind == "points":   # a league with a catalogue penalises with race time
+    if league and effective(league).catalogue and body.kind == "points":   # a league with a catalogue penalises with race time
         raise HTTPException(422, "leagues penalise with race time, not championship points")
     what, lo, hi = LIMITS[body.kind]
     if not lo <= body.value <= hi:

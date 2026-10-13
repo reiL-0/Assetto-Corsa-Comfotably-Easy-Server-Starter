@@ -151,12 +151,19 @@ def _m005_auto_penalties(con: sqlite3.Connection) -> None:
     _ensure_index(con, "ux_penalties_auto", "penalties", ("server_id", "filename", "driver_guid", "auto_key"), unique=True)
 
 
+def _m006_rulebook(con: sqlite3.Connection) -> None:
+    """`championships.rulebook` (NULL = the league has none: its rules are derived from points_system / penalties / auto_rules, so every existing league behaves as before)."""
+    if "rulebook" not in {row[1] for row in con.execute('PRAGMA table_info("championships")')}:
+        con.execute('ALTER TABLE "championships" ADD COLUMN "rulebook" JSON')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
     (3, _m003_catalog_dedupe_and_indexes),
     (4, _m004_championship_archive),
     (5, _m005_auto_penalties),
+    (6, _m006_rulebook),
 ]
 
 

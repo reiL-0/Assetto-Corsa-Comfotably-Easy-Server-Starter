@@ -213,10 +213,12 @@ def test_public_races_show_the_penalised_classification_before_and_after_archivi
 def test_cut_notices_are_warnings_the_director_confirms_dismisses_or_closes():
     from app.championship import AutoRules
     from app.models import Championship, Notice
+    from app.rulebook import CutRule
     from app.stewards.auto import cut_notices, cut_seconds
 
-    rules = AutoRules(cuts_per_step=5, step_seconds=5, max_seconds=12).model_dump()
-    assert [cut_seconds(n, rules) for n in (4, 5, 9, 10, 99)] == [0, 5, 5, 10, 12]
+    rules = AutoRules(cuts_per_step=5, step_seconds=5, max_seconds=12).model_dump()   # the older column: still read, through the rulebook derived from it
+    assert [cut_seconds(n, CutRule(**rules)) for n in (4, 5, 9, 10, 99)] == [0, 5, 5, 10, 12]
+    assert [cut_seconds(n, CutRule(tolerance=5, cuts_per_step=1, step_seconds=5, max_seconds=5)) for n in (5, 6, 20)] == [0, 5, 5]   # VRL: more than 5 cuts = +5 s
     sid = api.post(f"{V}/servers", json={"name": "t"}).json()["id"]
     f = _result(sid, "cuts.json")
     data = json.loads(f.read_text())
