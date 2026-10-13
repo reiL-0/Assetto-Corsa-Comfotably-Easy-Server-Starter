@@ -197,6 +197,16 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
     return ranked, races
 
 
+@router.get("/{championship_id}/races")
+def races(championship_id: int, sess: SessionDep) -> list[dict]:
+    """Every counted result with its classification after the stewards' penalties (position, original_position, adjusted time, points) and the penalties
+    with their reason: what the public site shows. An archived league answers from its snapshot. Who penalised is not given out."""
+    c = _get(sess, championship_id)
+    arch = sess.get(ChampionshipArchive, championship_id) if c.archived_at else None
+    out = (arch.data.get("races", []) if arch else []) if c.archived_at else score(sess, c)[1]
+    return [{**r, "penalties": [{k: v for k, v in p.items() if k != "created_by"} for p in r.get("penalties", [])]} for r in out]
+
+
 @router.get("/{championship_id}/standings")
 def standings(championship_id: int, sess: SessionDep) -> list[dict]:
     c = _get(sess, championship_id)

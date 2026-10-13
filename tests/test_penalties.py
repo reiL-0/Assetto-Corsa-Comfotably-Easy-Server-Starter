@@ -190,3 +190,21 @@ def test_a_driver_with_no_finish_time_does_not_jump_to_the_front_when_a_time_pen
         "Result": [{"DriverName": n, "DriverGuid": g, "CarModel": "bmw", "BestLap": 119000 + i, "TotalTime": t} for i, (n, g, t) in enumerate(rows)], "Laps": laps}))
     got = apply_penalties(parse_result_file(d / "dnf.json"), [P(A, "time", 20000)])     # A: 620 s, C: 610 s
     assert _order(got) == ["C", "A", "B", "D"], _order(got)
+
+
+def test_public_races_show_the_penalised_classification_before_and_after_archiving():
+    sid, name = _sid_and_file("pub.json")
+    cid = api.post(f"{V}/championships", json={"name": "Publica"}).json()["id"]
+    api.post(f"{V}/championships/{cid}/events", json={"server_id": sid, "filename": name})
+    api.post(f"{V}/servers/{sid}/results/{name}/penalties", json={"driver_guid": A, "kind": "time", "value": 20, "reason": "Contacto"})
+    races = lambda: api.get(f"{V}/championships/{cid}/races").json()
+
+    def check(r):
+        cls = r[0]["classification"]
+        assert [e["driver_guid"] for e in cls[:3]] == [B, C, A] and cls[2]["original_position"] == 1 and cls[2]["adjusted_total_ms"] == 620000
+        assert r[0]["penalties"] == [{"driver_guid": A, "kind": "time", "value": 20000, "reason": "Contacto"}]   # nobody's username leaks
+
+    before = races()
+    check(before)
+    assert api.post(f"{V}/championships/{cid}/archive", json={"confirm": "Publica"}).status_code == 200
+    assert races() == before   # the snapshot answers the same once the result file and the penalty rows are gone
