@@ -7,16 +7,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, get_args
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.requests import HTTPConnection
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app.db import SessionDep
+from app.login_limiter import LoginLimiter
 from app.models import Token, User
 
-Role = Literal["driver", "steward", "admin"]
-ROLES = get_args(Role)  # ascending privilege
+Role = Literal["driver", "reporter", "steward", "admin"]   # reporter: files track-limit reports and nothing else (the website's token)
+ROLES = get_args(Role)  # ascending privilege (a reporter reads what a driver reads; steward routes and up are closed to it)
 COOKIE = "acm_session"
 SESSION_DAYS = 30
 
@@ -84,6 +85,17 @@ def guard(read: Role = "driver"):
         return _need(user, read if reading else "admin")
 
     return dep
+
+
+_limiter = LoginLimiter()
+_DUMMY: list[str] = []
+
+
+def _dummy_hash() -> str:
+    """A well-formed hash nobody can match, to spend the same time on an unknown username (made once, on first use)."""
+    if not _DUMMY:
+        _DUMMY.append(_hash_pw(secrets.token_urlsafe(16), secrets.token_bytes(16)))
+    return _DUMMY[0]
 
 
 def _issue(sess: SessionDep, user: User, name: str, ttl: timedelta | None) -> tuple[Token, str]:
@@ -159,10 +171,18 @@ class LoginIn(BaseModel):
 
 
 @router.post("/auth/login", response_model=UserOut)
-def login(body: LoginIn, resp: Response, sess: SessionDep) -> User:
+def login(body: LoginIn, request: Request, resp: Response, sess: SessionDep) -> User:
+    ip = request.client.host if request.client else "?"   # the socket peer, never X-Forwarded-For: the manager listens on loopback and trusts no header
+    wait = _limiter.retry_after(ip, body.username)
+    if wait:
+        raise HTTPException(429, "too many attempts, try again later", headers={"Retry-After": str(wait)})
     u = sess.exec(select(User).where(User.username == body.username)).first()
-    if not u or not u.password_hash or not _check_pw(body.password, u.password_hash):
+    # an unknown user pays for one password hash too, or the response time tells which names exist
+    good = _check_pw(body.password, u.password_hash if u and u.password_hash else _dummy_hash())
+    if not u or not u.password_hash or not good:
+        _limiter.failed(ip, body.username)
         raise HTTPException(401, "bad credentials")
+    _limiter.succeeded(ip, body.username)
     _, raw = _issue(sess, u, "session", timedelta(days=SESSION_DAYS))
     # SameSite=Lax is the CSRF guard; a cross-origin frontend should use a Bearer token instead.
     resp.set_cookie(COOKIE, raw, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax")

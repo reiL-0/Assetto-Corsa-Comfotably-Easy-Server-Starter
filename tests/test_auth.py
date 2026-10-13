@@ -71,3 +71,26 @@ def test_timezone_defaults_to_cdmx_and_is_validated():
     assert c.get("/api/v1/auth/me").json()["timezone"] == "America/Mexico_City"
     assert c.patch("/api/v1/auth/me", json={"timezone": "Nope/Nowhere"}).status_code == 422
     assert c.patch("/api/v1/auth/me", json={"timezone": "Europe/Madrid"}).json()["timezone"] == "Europe/Madrid"
+
+
+def test_a_reporter_can_only_file_track_limit_reports():
+    """The website files the drivers' track-limit reports with ITS token. That token is a `reporter`: it reaches that one route and nothing else, so a leaked
+    one cannot start servers, kick, ban, read configs (passwords) or manage users like the admin token it replaces."""
+    admin = TestClient(app, headers=ADMIN)
+    assert admin.post(f"{V}/users", json={"username": "rep", "password": "hunter2hunter2", "role": "reporter"}).status_code == 201
+    login = _login("rep")
+    token = login.post(f"{V}/auth/tokens", json={"name": "website"}).json()["token"]
+    rep = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+    sid = admin.post(f"{V}/servers", json={"name": "rep-srv"}).json()["id"]
+    body = {"car_id": 0, "name": "ana", "ms": 1800, "wheels": 4, "speed": 120.5, "lap": 2, "spline": 0.4, "pos": [1.0, 2.0, 3.0]}
+    url = f"{V}/servers/{sid}/stewards/report"
+    assert rep.post(url, json=body).status_code == 409                   # passed the role check: the server is simply not running
+    assert TestClient(app).post(url, json=body).status_code == 401       # anonymous: no
+    admin.post(f"{V}/users", json={"username": "drv-r", "password": "hunter2hunter2", "role": "driver"})
+    assert _login("drv-r").post(url, json=body).status_code == 403       # a plain driver cannot file reports either
+    for method, path, kw in (("get", "/servers", {}), ("get", f"/servers/{sid}", {}), ("post", f"/servers/{sid}/start", {}), ("post", f"/servers/{sid}/kick/0", {}),
+                             ("get", f"/servers/{sid}/incidents", {}), ("put", f"/servers/{sid}/stewards", {"json": {"mode": "off"}}), ("get", "/users", {}),
+                             ("post", "/users", {"json": {"username": "x", "password": "hunter2hunter2", "role": "admin"}}), ("get", "/bans", {}),
+                             ("post", "/servers", {"json": {"name": "y"}})):
+        r = getattr(rep, method)(f"{V}{path}", **kw)
+        assert r.status_code == 403, (method, path, r.status_code)
