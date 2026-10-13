@@ -60,3 +60,8 @@ cp /tmp/rollback-acm/pyproject.toml "$APP/pyproject.toml"
 echo "$PREV" > "$APP/DEPLOYED"; chown -R acm:acm "$APP/app" "$APP/DEPLOYED"; systemctl restart acm
 echo "Restaurado desde $last" >&2; exit 1
 REMOTE
+
+# Deja en el changelog del dia que esta construido, desplegado y si ya esta en main (git + DEPLOYED del VPS, ver el script): le pasa la REV enviada y el HOST al que se desplego. Solo se llega aqui si el despliegue salio bien.
+LOG=${DEPLOY_LOG:-$HOME/.claude/skills/feature-done/deploy-log.sh}
+if [ -x "$LOG" ]; then DEPLOY_HOST="$HOST" "$LOG" manager --deploy "$REV" || echo "OJO: el registro del changelog no cuadra con lo que hay en la VPS (ver arriba)" >&2
+else echo "(no existe $LOG: este despliegue no queda en el changelog)" >&2; fi
