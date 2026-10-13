@@ -19,6 +19,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/telemetry/ingest` | in-game client v0.1.0 (clients/OPRTelemetry), clients/probe.py |
 | GET | `/api/v1/championships` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships` | the site (leagues), the manager's UI |
+| GET | `/api/v1/championships/rulebook/presets` | the site (leagues), the manager's UI |
 | DELETE | `/api/v1/championships/{championship_id}` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}` | the site (leagues), the manager's UI |
 | PATCH | `/api/v1/championships/{championship_id}` | the site (leagues), the manager's UI |
@@ -32,6 +33,9 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/championships/{championship_id}/members` | the site (leagues), the manager's UI |
 | DELETE | `/api/v1/championships/{championship_id}/members/{guid}` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/races` | the site (leagues), the manager's UI |
+| GET | `/api/v1/championships/{championship_id}/rulebook` | the site (leagues), the manager's UI |
+| PUT | `/api/v1/championships/{championship_id}/rulebook` | the site (leagues), the manager's UI |
+| POST | `/api/v1/championships/{championship_id}/rulebook/dry-run` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/standings` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/suspensions` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships/{championship_id}/suspensions` | the site (leagues), the manager's UI |

@@ -299,6 +299,7 @@ class Championship(SQLModel, table=True):
     practice_required: bool = False  # a roster driver needs `practice_laps` valid laps in the last `practice_days` days to be on the entry list (app/league.py)
     practice_laps: int = 5
     practice_days: int = 7
+    rulebook: dict | None = Field(default=None, sa_type=JSON)  # the league's versioned rulebook (app/rulebook.py); None = derived from the three older columns below
     auto_rules: dict | None = Field(default=None, sa_type=JSON)  # automatic time penalties for track cuts in a counted Race: {cuts_per_step, step_seconds, max_seconds}; None = off (app/stewards/auto.py)
     penalties: list | None = Field(default=None, sa_type=JSON)  # the league's catalogue: [{name, seconds, dsq}]; the steward picks from it (app/penalties.py)
     created_at: datetime = Field(default_factory=_now)

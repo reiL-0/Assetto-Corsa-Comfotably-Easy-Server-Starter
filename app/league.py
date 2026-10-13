@@ -224,8 +224,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
         if parsed["type"] == "Race":
             added += 1
             _race_served(sess, c, f.stat().st_mtime)
-            if c.auto_rules:
-                cut_notices(sess, c, sc.server_id, f.name, parsed)
+            cut_notices(sess, c, sc.server_id, f.name, parsed)
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)
     sess.commit()

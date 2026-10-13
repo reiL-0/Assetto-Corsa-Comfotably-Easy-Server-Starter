@@ -14,6 +14,8 @@ from app.db import SessionDep
 from app.leaguelock import serialized
 from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, LeagueSuspension
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
+from app.rulebook import PRESETS, Rulebook, effective
+from app.stewards.auto import cut_drafts
 from app.servers import result_path
 
 router = APIRouter(prefix="/championships", tags=["championships"])
@@ -80,6 +82,12 @@ def list_championships(sess: SessionDep) -> list[Championship]:
     return list(sess.exec(select(Championship)).all())
 
 
+@router.get("/rulebook/presets")
+def rulebook_presets() -> dict[str, Rulebook]:
+    """Templates to copy into a league (they are not kept in sync with it)."""
+    return PRESETS
+
+
 @router.get("/{championship_id}", response_model=Championship)
 def get(championship_id: int, sess: SessionDep) -> Championship:
     return _get(sess, championship_id)
@@ -89,7 +97,10 @@ def get(championship_id: int, sess: SessionDep) -> Championship:
 @serialized
 def update(championship_id: int, body: ChampionshipIn, sess: SessionDep) -> Championship:
     c = get_open(sess, championship_id)
-    for k, v in body.model_dump(exclude_unset=True).items():   # only what was sent: an older client that sends name + points leaves the league rules alone
+    sent = body.model_dump(exclude_unset=True)
+    if c.rulebook and {"points_system", "penalties", "auto_rules"} & sent.keys():
+        raise HTTPException(409, "this league has a rulebook: its points, catalogue and detectors are edited there (PUT /championships/{id}/rulebook)")
+    for k, v in sent.items():   # only what was sent: an older client that sends name + points leaves the league rules alone
         setattr(c, k, [p.model_dump() for p in body.penalties] if k == "penalties" else v)
     sess.add(c)
     sess.commit()
@@ -166,6 +177,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
         select(ChampionshipEvent).where(ChampionshipEvent.championship_id == c.id).order_by(ChampionshipEvent.id)
     ).all()
 
+    table = effective(c).scoring.table
     totals: dict[str, dict] = {}
     races: list[dict] = []
     for e in events:
@@ -181,7 +193,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             guid = entry["driver_guid"]
             pos = entry["position"]  # after penalties; None = disqualified, scores nothing
             counts = scoring and guid and guid not in nonrun   # the safety car, the race director and the caster do not score
-            points = c.points_system[pos - 1] if counts and pos and pos <= len(c.points_system) else 0
+            points = table[pos - 1] if counts and pos and pos <= len(table) else 0
             rows.append({"position": pos, "original_position": entry["original_position"], "driver_guid": guid, "driver_name": entry["driver_name"], "car_model": entry["car_model"],
                          "best_lap_ms": entry["best_lap_ms"], "total_time_ms": entry["total_time_ms"], "adjusted_total_ms": entry["adjusted_total_ms"], "gap_ms": entry["gap_ms"],
                          "laps": entry["laps"], "disqualified": entry["disqualified"], "points": points, "points_penalty": entry["points_penalty"] if counts else 0})
@@ -223,3 +235,44 @@ def standings(championship_id: int, sess: SessionDep) -> list[dict]:
         arch = sess.get(ChampionshipArchive, championship_id)
         return arch.data.get("standings", []) if arch else []
     return score(sess, c)[0]
+
+
+# --- the rulebook (app/rulebook.py) ---
+
+@router.get("/{championship_id}/rulebook")
+def get_rulebook(championship_id: int, sess: SessionDep) -> dict:
+    c = _get(sess, championship_id)
+    return {"source": "rulebook" if c.rulebook else "legacy", "rulebook": effective(c)}
+
+
+@router.put("/{championship_id}/rulebook", response_model=Rulebook)
+@serialized
+def put_rulebook(championship_id: int, body: Rulebook, sess: SessionDep) -> Rulebook:
+    c = get_open(sess, championship_id)
+    c.rulebook = body.model_dump()
+    sess.add(c)
+    sess.commit()
+    return body
+
+
+class DryRunIn(BaseModel):
+    server_id: int
+    filename: str
+    rulebook: Rulebook | None = None   # try one that is not saved; omitted = the league's own
+
+
+# What the rules say that no result file can show: said out loud so nobody reads "no warnings" as "no infractions".
+NOT_EVALUATED = ["contactos y de quién es la culpa", "ventaja obtenida en un exceso de límites", "devolver tiempo o posición", "velocidad y línea de boxes", "banderas"]
+
+
+@router.post("/{championship_id}/rulebook/dry-run")
+def dry_run(championship_id: int, body: DryRunIn, sess: SessionDep) -> dict:
+    """Calibration: what a rulebook WOULD warn about in a result that already exists. Reads the result and the league; writes nothing."""
+    c = _get(sess, championship_id)
+    path = result_path(body.server_id, body.filename)
+    if not path.is_file():
+        raise HTTPException(404, "result not found")
+    rb = body.rulebook or effective(c)
+    parsed = parse_result_file(path)
+    racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, body.server_id, body.filename)
+    return {"type": parsed["type"], "cuts_rule": rb.detectors.cuts, "notices": cut_drafts(parsed, rb.detectors.cuts, racing) if rb.detectors.cuts else [], "not_evaluated": NOT_EVALUATED}

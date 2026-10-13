@@ -25,6 +25,7 @@ from app.auth import CurrentUser
 from app.championship import _get, get_open, score
 from app.db import SessionDep
 from app.leaguelock import serialized
+from app.rulebook import effective
 from app.models import Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, Notice, Penalty, ResultClose, _now
 from app.servers import result_path
 
@@ -55,12 +56,12 @@ def _stamp(sess: Session, c: Championship) -> tuple:
     count = sum(len(sess.exec(select(Penalty.id).where(Penalty.server_id == s, Penalty.filename == f)).all()) for s, f in files)
     mtimes = tuple(result_path(s, f).stat().st_mtime if result_path(s, f).is_file() else None for s, f in files)
     roster = tuple(sorted(sess.exec(select(LeagueMember.guid).where(LeagueMember.championship_id == c.id, LeagueMember.non_racing)).all()))
-    return tuple(e.id for e in events), newest, count, mtimes, c.name, tuple(c.points_system), roster
+    return tuple(e.id for e in events), newest, count, mtimes, c.name, tuple(effective(c).scoring.table), roster
 
 
 def snapshot(sess: Session, c: Championship) -> dict:
     standings, races = score(sess, c)
-    return {"version": VERSION, "name": c.name, "points_system": list(c.points_system), "standings": standings, "races": races}
+    return {"version": VERSION, "name": c.name, "points_system": list(effective(c).scoring.table), "standings": standings, "races": races}
 
 
 class ArchiveIn(BaseModel):
