@@ -147,7 +147,7 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
         assert sid in w.listening
         code, body = await _http_get(port + 1, "/INFO")
         info = json.loads(body)
-        assert code == 200 and info["name"] == "Prácticas" and info["clients"] == 0 and info["maxclients"] == 2 and info["pass"] is True
+        assert code == 200 and info["name"] == f"Prácticas ℹ{port + 1}" and info["clients"] == 0 and info["maxclients"] == 2 and info["pass"] is True
         assert info["track"] == "monza" and info["cars"] == ["bmw_m3"] and info["sessiontypes"] == [1, 3] and info["durations"] == [15, 5]
         assert info["timeleft"] == 15 * 60 and info["port"] == port and info["cport"] == port + 1
         cars = json.loads((await _http_get(port + 1, "/JSON|76561190000000001"))[1])["Cars"]
@@ -171,7 +171,7 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
         wake._instance_dir(sid).mkdir(parents=True, exist_ok=True)
         (wake._instance_dir(sid) / "info.json").write_text(json.dumps({**info, "name": "Real", "clients": 5, "session": 2, "durations": [10, 10, 30], "timeleft": 7}))
         got = json.loads((await _http_get(port + 1, "/INFO"))[1])
-        assert got["name"] == "Real" and got["clients"] == 0 and got["session"] == 0 and got["durations"] == [15, 5] and got["timeleft"] == 15 * 60
+        assert got["name"] == f"Real ℹ{port + 1}" and got["clients"] == 0 and got["session"] == 0 and got["durations"] == [15, 5] and got["timeleft"] == 15 * 60
         w.close()
 
     asyncio.run(scenario())
@@ -366,3 +366,40 @@ def test_a_running_server_only_relays_info_and_json(monkeypatch):
     finally:
         up.shutdown()
     assert seen == ["/INFO", "/JSON|1"], seen   # nothing but what the lobby asks ever reached acServer's internal port
+
+
+def test_content_manager_finds_the_description_through_the_name_marker(monkeypatch):
+    """Content Manager ignores the "extra" flag of /INFO: it reads the port of /api/details from the END OF THE SERVER NAME ("<name> ℹ<port>", ServerEntry.CleanUp in
+    gro-ove/actools) and then asks that port. So /INFO must carry the marker, pointing at the port that really answers /api/details, whose answer repeats it as
+    `wrappedPort` (ServerInformationExtended.PortExtended) and keeps the CLEAN name, because the league site shows it. Same while acServer runs."""
+    _setup(monkeypatch)
+    sid, port = _plain_server("always", SERVER={"NAME": "Liga OPR", "TRACK": "monza"})   # "always": a stopped server holds its ports
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.welcome = "Reglas: sin contacto"
+        db.add(srv)
+        db.commit()
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()
+        info = json.loads((await _http_get(port + 1, "/INFO"))[1])
+        name, _, marked_port = info["name"].partition("ℹ")                         # how Content Manager splits it
+        assert name.strip() == "Liga OPR" and int(marked_port) == port + 1, info["name"]
+        det = json.loads((await _http_get(int(marked_port), "/api/details"))[1])      # and it asks THAT port
+        assert det["description"].startswith("Reglas: sin contacto") and det["wrappedPort"] == int(marked_port) and det["name"] == "Liga OPR", det
+        w.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_name_marker_is_replaced_never_duplicated_and_real_names_survive():
+    s = type("S", (), {"base_port": 9600})()
+    http = wake._ports(9600)["http"]
+    for given, wanted in (("Liga OPR", "Liga OPR"), ("Liga OPR ℹ9601", "Liga OPR"), ("Liga OPR ℹ9999", "Liga OPR"), ("Liga OPR ℹ1ℹ2", "Liga OPR ℹ1"),
+                          ("Liga ℹ información", "Liga ℹ información"), ("", ""), (None, "")):
+        got = wake.lobby_info(s, {"name": given})["name"]
+        assert got == f"{wanted} ℹ{http}".lstrip() or got == f" ℹ{http}", (given, got)     # exactly one marker, always ours
+        assert got.count("ℹ") == wanted.count("ℹ") + 1, (given, got)
+        assert wake.clean_name(got) == wanted, (given, got)                                   # and /api/details gets the clean name back
+    assert wake.lobby_info(s, {})["name"].endswith(f"ℹ{http}")                                 # a missing name does not crash

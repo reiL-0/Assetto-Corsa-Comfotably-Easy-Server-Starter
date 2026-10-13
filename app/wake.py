@@ -25,6 +25,7 @@ import asyncio
 import http.client
 import json
 import logging
+import re
 import socket
 import struct
 import time
@@ -56,6 +57,25 @@ def _instance_dir(server_id: int) -> Path:
     return Path(settings.data_dir) / "instances" / str(server_id)
 
 
+EXTENDED_SEPARATOR = "ℹ"   # Content Manager does NOT read the "extra" flag of /INFO: it takes the port of /api/details from the END OF THE SERVER NAME, "<name> ℹ<port>"
+
+
+_MARKER = re.compile(rf"\s*{EXTENDED_SEPARATOR}\s*\d+\s*$")   # only a TRAILING "ℹ<digits>": a name like "Liga ℹ información" is a real name
+
+
+def clean_name(name) -> str:
+    return _MARKER.sub("", str(name or ""))
+
+
+def lobby_info(s: Server, info: dict) -> dict:
+    """What /INFO tells a player: our public HTTP port as `cport` and the name ending in " ℹ<port>" (an old or duplicated marker is replaced) so Content
+    Manager asks that port for /api/details (the description). The marker is only for /INFO; /api/details keeps the clean name (the league site shows it)."""
+    port = _ports(s.base_port)["http"]
+    info["cport"], info["extra"] = port, True
+    info["name"] = f"{clean_name(info.get('name'))} {EXTENDED_SEPARATOR}{port}"
+    return info
+
+
 def facade_info(s: Server) -> dict:
     """What acServer's /INFO would say with nobody on: the last real answer (info.json) when there is one, else built from the config."""
     try:
@@ -74,7 +94,7 @@ def facade_info(s: Server) -> dict:
                 "pickup": bool(int(srv.get("PICKUP_MODE_ENABLED", 1))), "tport": ports["udp"], "timed": False, "extra": False,
                 "pit": False, "inverted": 0}
     info["cport"] = _ports(s.base_port)["http"]   # the snapshot came from acServer's own HTTP port: players are told ours
-    info["extra"] = True   # «this server has more to say»: Content Manager then asks /api/details (description...)
+    info["extra"] = True   # the lobby flag; Content Manager does NOT use it to find /api/details: that is the " ℹ<port>" marker (lobby_info)
     info.update(clients=0, session=0)
     if timeline.config_durations(s.config):   # the snapshot may have been taken while a session was shortened to catch up with the clock
         info["durations"] = timeline.config_durations(s.config)
@@ -130,6 +150,8 @@ def details(s: Server, live: bytes | None) -> dict:
     except ValueError:
         info = facade_info(s)
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
+    info["name"] = clean_name(info.get("name"))   # clean, whatever the source was
+    info["wrappedPort"] = info["cport"]   # Content Manager keeps asking THIS port for the details (ServerInformationExtended.PortExtended)
     req = requirements.lines()   # what the player must install, under the welcome text
     info["description"] = s.welcome + ("\n\nRequisitos:\n" + "\n".join(req) if req else "")
     return info
@@ -175,12 +197,11 @@ def _http_handler(server_id: int, ac_seen):
                     if path.startswith("/INFO") and data:
                         try:
                             info = json.loads(data)
-                            info["cport"], info["extra"] = _ports(s.base_port)["http"], True
-                            data = _dump(info).encode()
+                            data = _dump(lobby_info(s, info)).encode()
                         except ValueError:
                             pass
                 else:
-                    body = _dump(facade_info(s)) if path.startswith("/INFO") else _dump(facade_cars(s)) if path.startswith("/JSON") else ""
+                    body = _dump(lobby_info(s, facade_info(s))) if path.startswith("/INFO") else _dump(facade_cars(s)) if path.startswith("/JSON") else ""
                     data = body.encode()
                 date = formatdate(usegmt=True)
                 writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: {ctype}\r\n".encode()
