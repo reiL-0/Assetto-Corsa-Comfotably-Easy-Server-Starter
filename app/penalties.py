@@ -12,7 +12,7 @@ from app import discord
 from app.auth import CurrentUser, require
 from app.db import SessionDep
 from app.models import Championship, ChampionshipEvent, Penalty
-from app.results import parse_result_file, penalties_for
+from app.results import TIMED, parse_result_file, penalties_for
 from app.servers import _get, result_path
 
 # stewards write (the router default would make every write admin-only)
@@ -21,14 +21,14 @@ router = APIRouter(
 )
 
 # kind -> (what `value` means, min, max)
-LIMITS = {"time": ("seconds added to the race time", 1, 3600), "position": ("places lost", 1, 30),
+LIMITS = {"time": ("seconds added to the race time", 1, 3600), "stopgo": ("seconds of the stop-and-go, added to the race time", 1, 60), "position": ("places lost", 1, 30),
           "grid": ("places lost on the next race's grid", 1, 30), "points": ("championship points taken", 1, 100),
           "dsq": ("unused", 0, 0)}
 
 
 class PenaltyIn(BaseModel):
     driver_guid: str = Field(pattern=r"^\d{17}$")
-    kind: Literal["time", "position", "dsq", "grid", "points"] | None = None  # not needed with `item`
+    kind: Literal["time", "stopgo", "position", "dsq", "grid", "points"] | None = None  # not needed with `item`
     value: int = 0  # meaning depends on `kind`, see LIMITS
     item: str | None = None  # a name from the result's league catalogue (Championship.penalties): sets kind and value
     reason: str = Field(default="", max_length=300)  # a steward always says why (with `item`, the item's name is enough)
@@ -46,7 +46,7 @@ class PenaltyOut(BaseModel):
 def _out(p: Penalty) -> PenaltyOut:
     # time is stored in ms, handed out in seconds like it was given
     return PenaltyOut(id=p.id, driver_guid=p.driver_guid, kind=p.kind, reason=p.reason, created_by=p.created_by,
-                      value=p.value // 1000 if p.kind == "time" else p.value)
+                      value=p.value // 1000 if p.kind in TIMED else p.value)
 
 
 def _existing_result(sess: SessionDep, server_id: int, filename: str) -> dict:
@@ -104,7 +104,7 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
     if body.driver_guid not in guids:
         raise HTTPException(400, "that driver is not in this result")
     p = Penalty(server_id=server_id, filename=filename, driver_guid=body.driver_guid, kind=body.kind,
-                value=body.value * 1000 if body.kind == "time" else body.value, reason=body.reason.strip(),
+                value=body.value * 1000 if body.kind in TIMED else body.value, reason=body.reason.strip(),
                 created_by=user.username)
     sess.add(p)
     sess.commit()

@@ -67,7 +67,8 @@ def parse_result_file(path: Path) -> dict:
     }
 
 
-KINDS = ("time", "position", "dsq", "grid", "points")
+KINDS = ("time", "stopgo", "position", "dsq", "grid", "points")
+TIMED = ("time", "stopgo")   # stored in ms and added to the race time (acServer cannot force a stop-and-go, so the stop is charged as time)
 
 
 def penalties_for(sess: Session, server_id: int, filename: str) -> list[Penalty]:
@@ -111,7 +112,7 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
         ps = by_guid.get(e["driver_guid"], [])
         e.update(
             original_position=e["position"], laps=laps.get(e["driver_guid"], 0),
-            time_penalty_ms=sum(p.value for p in ps if p.kind == "time"),
+            time_penalty_ms=sum(p.value for p in ps if p.kind in TIMED),
             position_penalty=sum(p.value for p in ps if p.kind == "position"),
             grid_penalty=sum(p.value for p in ps if p.kind == "grid"),
             points_penalty=sum(p.value for p in ps if p.kind == "points"),
