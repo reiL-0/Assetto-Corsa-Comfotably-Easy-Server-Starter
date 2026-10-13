@@ -9,16 +9,16 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app import supervisor
-from app.auth import require
+from app.auth import require_any
 from app.db import SessionDep
 from app.models import Incident
 from app.servers import ServerOut, _get, _out
 from app.stewards import engine
 
 router = APIRouter(prefix="/servers/{server_id}", tags=["stewards"])
-# The website files the drivers' reports with a token that may do THIS and nothing else (role `reporter`; stewards and admins pass too). It is its own router because
+# The website files the drivers' reports with a token that may do THIS and nothing else (role `reporter`, the lowest; stewards and admins pass too, a plain driver does not). It is its own router because
 # the one above is included with the steward guard, whose writes need admin: a leaked website token must not be able to start, kick or read configs.
-report_router = APIRouter(prefix="/servers/{server_id}", tags=["stewards"], dependencies=[Depends(require("reporter"))])
+report_router = APIRouter(prefix="/servers/{server_id}", tags=["stewards"], dependencies=[Depends(require_any("reporter", "steward", "admin"))])
 
 
 class StewardsIn(BaseModel):

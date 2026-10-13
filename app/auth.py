@@ -16,8 +16,8 @@ from app.db import SessionDep
 from app.login_limiter import LoginLimiter
 from app.models import Token, User
 
-Role = Literal["driver", "reporter", "steward", "admin"]   # reporter: files track-limit reports and nothing else (the website's token)
-ROLES = get_args(Role)  # ascending privilege (a reporter reads what a driver reads; steward routes and up are closed to it)
+Role = Literal["reporter", "driver", "steward", "admin"]   # reporter: the LOWEST role, below driver: it passes no guard() and files track-limit reports through require_any (the website's token)
+ROLES = get_args(Role)  # ascending privilege
 COOKIE = "acm_session"
 SESSION_DAYS = 30
 
@@ -75,6 +75,17 @@ def require(role: Role):
     return dep
 
 
+def require_any(*roles: Role):
+    """Dependency: the caller's role must be one of these exactly (for routes that are not a rung of the ladder, like the website's reporter)."""
+
+    def dep(user: CurrentUser) -> User:
+        if user.role not in roles:
+            raise HTTPException(403, f"one of {', '.join(roles)} required")
+        return user
+
+    return dep
+
+
 def guard(read: Role = "driver"):
     """Router-level default: GET/HEAD/websocket need `read`, every other method needs admin.
     Fail-safe: a new write route is admin-only until it is deliberately moved.
@@ -88,14 +99,15 @@ def guard(read: Role = "driver"):
 
 
 _limiter = LoginLimiter()
-_DUMMY: list[str] = []
+_DUMMY = _hash_pw(secrets.token_urlsafe(16), secrets.token_bytes(16))   # a well-formed hash nobody can match: an unknown username spends the same single scrypt, with no first-use extra
 
 
-def _dummy_hash() -> str:
-    """A well-formed hash nobody can match, to spend the same time on an unknown username (made once, on first use)."""
-    if not _DUMMY:
-        _DUMMY.append(_hash_pw(secrets.token_urlsafe(16), secrets.token_bytes(16)))
-    return _DUMMY[0]
+def _client_ip(request: Request) -> str:
+    """The address the limiter counts. uvicorn replaces the client with X-Forwarded-For when it comes from loopback, and loopback is the only place callers come from,
+    so a local caller could pick its own «address»: any request carrying that header is counted as ONE shared address instead."""
+    if "x-forwarded-for" in request.headers:
+        return "forwarded"
+    return request.client.host if request.client else "?"
 
 
 def _issue(sess: SessionDep, user: User, name: str, ttl: timedelta | None) -> tuple[Token, str]:
@@ -172,15 +184,18 @@ class LoginIn(BaseModel):
 
 @router.post("/auth/login", response_model=UserOut)
 def login(body: LoginIn, request: Request, resp: Response, sess: SessionDep) -> User:
-    ip = request.client.host if request.client else "?"   # the socket peer, never X-Forwarded-For: the manager listens on loopback and trusts no header
-    wait = _limiter.retry_after(ip, body.username)
+    ip = _client_ip(request)
+    wait = _limiter.attempt(ip, body.username)   # counted now; a good login gives it back
     if wait:
         raise HTTPException(429, "too many attempts, try again later", headers={"Retry-After": str(wait)})
-    u = sess.exec(select(User).where(User.username == body.username)).first()
-    # an unknown user pays for one password hash too, or the response time tells which names exist
-    good = _check_pw(body.password, u.password_hash if u and u.password_hash else _dummy_hash())
+    try:
+        u = sess.exec(select(User).where(User.username == body.username)).first()
+        # an unknown user pays for one password hash too, or the response time tells which names exist
+        good = _check_pw(body.password, u.password_hash if u and u.password_hash else _DUMMY)
+    except Exception:
+        _limiter.refund(ip, body.username)   # our failure (a database error...) must not count against the user
+        raise
     if not u or not u.password_hash or not good:
-        _limiter.failed(ip, body.username)
         raise HTTPException(401, "bad credentials")
     _limiter.succeeded(ip, body.username)
     _, raw = _issue(sess, u, "session", timedelta(days=SESSION_DAYS))
