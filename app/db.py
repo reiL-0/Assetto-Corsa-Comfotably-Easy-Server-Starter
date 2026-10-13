@@ -139,11 +139,24 @@ def _m004_championship_archive(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "championships" ADD COLUMN "archived_by" VARCHAR NOT NULL DEFAULT \'\'')
 
 
+def _m005_auto_penalties(con: sqlite3.Connection) -> None:
+    """Automatic stewards: `penalties.auto_key` (NULL = a steward's own, every existing row) and `penalties.dismissed` (0), `championships.auto_rules` (NULL = off), and
+    one automatic penalty per (file, driver, key). NULLs never collide in a UNIQUE index, so the manual penalties are free to repeat."""
+    def add(table: str, column: str, ddl: str) -> None:
+        if column not in {row[1] for row in con.execute(f'PRAGMA table_info("{table}")')}:
+            con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl}')
+    add("penalties", "auto_key", "VARCHAR")
+    add("penalties", "dismissed", "BOOLEAN NOT NULL DEFAULT 0")
+    add("championships", "auto_rules", "JSON")
+    _ensure_index(con, "ux_penalties_auto", "penalties", ("server_id", "filename", "driver_guid", "auto_key"), unique=True)
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
     (3, _m003_catalog_dedupe_and_indexes),
     (4, _m004_championship_archive),
+    (5, _m005_auto_penalties),
 ]
 
 

@@ -33,6 +33,14 @@ class PenaltyItem(BaseModel):
         return self
 
 
+class AutoRules(BaseModel):
+    """Automatic time penalty for track cuts in a counted Race (app/stewards/auto.py): every `cuts_per_step` cuts add `step_seconds`, up to `max_seconds`."""
+
+    cuts_per_step: int = Field(ge=1, le=100)
+    step_seconds: int = Field(ge=1, le=60)
+    max_seconds: int = Field(ge=1, le=600)
+
+
 class ChampionshipIn(BaseModel):
     name: str
     points_system: list[int] = list(DEFAULT_POINTS_SYSTEM)
@@ -40,6 +48,7 @@ class ChampionshipIn(BaseModel):
     practice_laps: int = Field(default=5, ge=1, le=999)
     practice_days: int = Field(default=7, ge=1, le=60)
     penalties: list[PenaltyItem] = []
+    auto_rules: AutoRules | None = None  # None = no automatic penalties
 
 
 def _get(sess: SessionDep, championship_id: int) -> Championship:

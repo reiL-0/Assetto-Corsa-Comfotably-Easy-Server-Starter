@@ -117,9 +117,13 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
 @router.delete("/{penalty_id}", status_code=204)
 def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: SessionDep) -> None:
     p = sess.get(Penalty, penalty_id)
-    if not p or (p.server_id, p.filename) != (server_id, filename):
+    if not p or p.dismissed or (p.server_id, p.filename) != (server_id, filename):
         raise HTTPException(404, "penalty not found")
     out, parsed = _out(p), _existing_result(sess, server_id, filename)
-    sess.delete(p)
+    if p.auto_key:   # an automatic one stays as a mark, so counting the file again does not bring it back
+        p.dismissed = True
+        sess.add(p)
+    else:
+        sess.delete(p)
     sess.commit()
     discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))
