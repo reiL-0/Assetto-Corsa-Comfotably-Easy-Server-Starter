@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Index
+from sqlalchemy import JSON, Index, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -213,6 +213,35 @@ class Penalty(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
     auto_key: str | None = None  # set on the penalties the automatic stewards create (app/stewards/auto.py): one per (file, driver, key), so counting a file twice never doubles it
     dismissed: bool = False  # a steward withdrew an automatic penalty: the row stays so it is not created again, and the result ignores it
+
+
+class Notice(SQLModel, table=True):
+    """A warning for the race director: something in a counted result that may deserve a penalty (app/stewards/auto.py). Nothing is applied until a steward
+    confirms it (it becomes a `Penalty`) or dismisses it; closing the result deletes what is left (app/penalties.py)."""
+
+    __tablename__ = "penalty_notices"
+    __table_args__ = (UniqueConstraint("server_id", "filename", "driver_guid", "kind"),)   # one warning per driver and reason in a file
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    filename: str = Field(index=True)
+    driver_guid: str
+    kind: str  # why: cuts
+    penalty_kind: str = "time"  # what the penalty would be (a Penalty.kind)
+    value: int = 0  # as stored in Penalty.value (time: ms)
+    reason: str
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ResultClose(SQLModel, table=True):
+    """The race director closed this result: its warnings are gone and it takes no more penalties."""
+
+    __tablename__ = "result_closes"
+
+    server_id: int = Field(primary_key=True)
+    filename: str = Field(primary_key=True)
+    closed_by: str = ""
+    closed_at: datetime = Field(default_factory=_now)
 
 
 class Incident(SQLModel, table=True):

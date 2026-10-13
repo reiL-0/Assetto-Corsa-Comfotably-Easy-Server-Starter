@@ -25,7 +25,7 @@ from app.auth import CurrentUser
 from app.championship import _get, get_open, score
 from app.db import SessionDep
 from app.leaguelock import serialized
-from app.models import Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, Penalty, _now
+from app.models import Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, Notice, Penalty, ResultClose, _now
 from app.servers import result_path
 
 log = logging.getLogger("acmanager.archive")
@@ -111,6 +111,8 @@ def archive(championship_id: int, body: ArchiveIn, sess: SessionDep, user: Curre
     for s, f in files:
         for p in sess.exec(select(Penalty).where(Penalty.server_id == s, Penalty.filename == f)):
             sess.delete(p)
+        for x in (*sess.exec(select(Notice).where(Notice.server_id == s, Notice.filename == f)), *sess.exec(select(ResultClose).where(ResultClose.server_id == s, ResultClose.filename == f))):
+            sess.delete(x)   # the warnings and the closing mark go with the result file
     for e in sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == championship_id)):
         sess.delete(e)
     sess.commit()

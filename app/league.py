@@ -34,7 +34,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import auto_penalties
+from app.stewards.auto import cut_notices
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn
@@ -210,7 +210,7 @@ def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
 
 
 def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, until: float) -> int:
-    d, added, news = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0, []
+    d, added = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         if not sc.start_at <= f.stat().st_mtime <= until:
             continue
@@ -225,12 +225,10 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             added += 1
             _race_served(sess, c, f.stat().st_mtime)
             if c.auto_rules:
-                news += auto_penalties(sess, c, sc.server_id, f.name, parsed)
+                cut_notices(sess, c, sc.server_id, f.name, parsed)
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)
     sess.commit()
-    for text in news:   # after the commit: nobody is told about a penalty that was not saved
-        discord.announce(text)
     return added
 
 

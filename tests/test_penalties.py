@@ -210,10 +210,10 @@ def test_public_races_show_the_penalised_classification_before_and_after_archivi
     assert races() == before   # the snapshot answers the same once the result file and the penalty rows are gone
 
 
-def test_automatic_cut_penalties_are_made_once_and_a_withdrawal_sticks():
+def test_cut_notices_are_warnings_the_director_confirms_dismisses_or_closes():
     from app.championship import AutoRules
-    from app.models import Championship
-    from app.stewards.auto import auto_penalties, cut_seconds
+    from app.models import Championship, Notice
+    from app.stewards.auto import cut_notices, cut_seconds
 
     rules = AutoRules(cuts_per_step=5, step_seconds=5, max_seconds=12).model_dump()
     assert [cut_seconds(n, rules) for n in (4, 5, 9, 10, 99)] == [0, 5, 5, 10, 12]
@@ -221,7 +221,7 @@ def test_automatic_cut_penalties_are_made_once_and_a_withdrawal_sticks():
     f = _result(sid, "cuts.json")
     data = json.loads(f.read_text())
     for lap in data["Laps"]:
-        lap["Cuts"] = {"A": 3, "B": 1}.get(lap["DriverName"], 0)   # A: 5 laps x 3 = 15 cuts (capped 12 s), B: 5 cuts = 5 s, C/D: none
+        lap["Cuts"] = {"A": 3, "B": 1, "D": 1}.get(lap["DriverName"], 0)   # A: 5 laps x 3 = 15 cuts (capped 12 s), B: 5 cuts = 5 s, D: 4 laps x 1 = 4 (nothing), C: none
     data["Laps"].append({"DriverName": "C", "DriverGuid": C, "CarId": 2, "LapTime": 0, "Cuts": 50})   # an unfinished lap does not count
     f.write_text(json.dumps(data))
     parsed = parse_result_file(f)
@@ -229,19 +229,46 @@ def test_automatic_cut_penalties_are_made_once_and_a_withdrawal_sticks():
         c = Championship(name="Auto", auto_rules=rules)
         s.add(c)
         s.commit()
-        assert len(auto_penalties(s, c, sid, "cuts.json", parsed)) == 2
+        assert cut_notices(s, c, sid, "cuts.json", parsed) == 2
         s.commit()
-        assert auto_penalties(s, c, sid, "cuts.json", parsed) == []   # counting the file again changes nothing
-        assert auto_penalties(s, Championship(name="Off"), sid, "cuts.json", parsed) == []
+        assert cut_notices(s, c, sid, "cuts.json", parsed) == 0   # counting the file again changes nothing
+        assert cut_notices(s, Championship(name="Off"), sid, "cuts.json", parsed) == 0
     steward = _client("steward")
     url = f"{V}/servers/{sid}/results/cuts.json/penalties"
-    got = {p["driver_guid"]: p for p in steward.get(url).json()}
-    assert got[A]["value"] == 12 and got[B]["value"] == 5 and got[A]["created_by"] == "auto" and "automática" in got[A]["reason"]
-    assert steward.delete(f"{url}/{got[A]['id']}").status_code == 204
-    assert [p["driver_guid"] for p in steward.get(url).json()] == [B]   # withdrawn: gone from the result...
+    assert steward.get(url).json() == []   # a warning is not a penalty: the result is untouched
+    got = steward.get(f"{url}/notices").json()
+    by = {n["driver_guid"]: n for n in got["notices"]}
+    assert got["closed"] is False and by[A]["value"] == 12 and by[A]["penalty_kind"] == "time" and by[B]["value"] == 5 and by[A]["reason"] == "Cortes de pista: 15"
+    # confirm A: it becomes a penalty under the steward's name and the warning is gone; a second click finds nothing
+    r = steward.post(f"{url}/notices/{by[A]['id']}/confirm")
+    assert r.status_code == 201 and r.json()["kind"] == "time" and r.json()["value"] == 12 and "confirmado" in r.json()["reason"]
+    assert steward.post(f"{url}/notices/{by[A]['id']}/confirm").status_code == 404
+    assert [p["driver_guid"] for p in steward.get(url).json()] == [A]
+    # below steward cannot decide
+    assert _client("reporter").post(f"{url}/notices/{by[B]['id']}/confirm").status_code == 403
+    # close: the warning left (B) is deleted, the result takes no more penalties and its confirmed one stays
+    assert steward.post(f"{url}/close").status_code == 204 and steward.post(f"{url}/close").status_code == 204
+    assert steward.get(f"{url}/notices").json() == {"closed": True, "notices": []}
+    assert steward.post(f"{url}/notices/{by[B]['id']}/confirm").status_code == 409
+    assert steward.post(url, json={"driver_guid": B, "kind": "time", "value": 5, "reason": "tarde"}).status_code == 409
+    p = steward.get(url).json()[0]
+    assert steward.delete(f"{url}/{p['id']}").status_code == 409
     with Session(engine) as s:
-        assert auto_penalties(s, s.get(Championship, 1) or Championship(name="x", auto_rules=rules), sid, "cuts.json", parsed) == []   # ...and never made again
-    assert steward.delete(f"{url}/{got[A]['id']}").status_code == 404
+        assert cut_notices(s, s.get(Championship, 1) or Championship(name="x", auto_rules=rules), sid, "cuts.json", parsed) == 0   # a closed result gets no new warnings
+        assert s.query(Notice).filter_by(server_id=sid).count() == 0
+
+
+def test_dismissing_a_notice_deletes_it_without_a_penalty():
+    from app.models import Notice
+    sid, name = _sid_and_file("dismiss.json")
+    with Session(engine) as s:
+        s.add(Notice(server_id=sid, filename=name, driver_guid=A, kind="cuts", penalty_kind="time", value=5000, reason="Cortes de pista: 5"))
+        s.commit()
+        nid = s.query(Notice).filter_by(server_id=sid).one().id
+    steward = _client("steward")
+    url = f"{V}/servers/{sid}/results/{name}/penalties"
+    assert steward.delete(f"{url}/notices/{nid}").status_code == 204 and steward.delete(f"{url}/notices/{nid}").status_code == 404
+    assert steward.get(f"{url}/notices").json()["notices"] == [] and steward.get(url).json() == []
 
 
 def test_stop_and_go_is_charged_as_race_time_and_shown_in_seconds():
@@ -253,3 +280,17 @@ def test_stop_and_go_is_charged_as_race_time_and_shown_in_seconds():
     assert r.status_code == 201 and r.json()["kind"] == "stopgo" and r.json()["value"] == 30
     got = api.get(f"{V}/servers/{sid}/results/{name}/parsed").json()["classification"]
     assert [e["driver_name"] for e in got] == ["B", "C", "A", "D"] and got[2]["time_penalty_ms"] == 30000 and got[2]["adjusted_total_ms"] == 630000
+
+
+def test_archiving_a_league_removes_its_notices_and_closing_marks():
+    from app.models import Notice, ResultClose
+    sid, name = _sid_and_file("arch.json")
+    cid = api.post(f"{V}/championships", json={"name": "Limpia"}).json()["id"]
+    api.post(f"{V}/championships/{cid}/events", json={"server_id": sid, "filename": name})
+    with Session(engine) as s:
+        s.add(Notice(server_id=sid, filename=name, driver_guid=A, kind="cuts", value=5000, reason="Cortes de pista: 5"))
+        s.add(ResultClose(server_id=sid, filename=name, closed_by="x"))
+        s.commit()
+    assert api.post(f"{V}/championships/{cid}/archive", json={"confirm": "Limpia"}).status_code == 200
+    with Session(engine) as s:
+        assert s.query(Notice).filter_by(server_id=sid).count() == 0 and s.query(ResultClose).filter_by(server_id=sid).count() == 0
