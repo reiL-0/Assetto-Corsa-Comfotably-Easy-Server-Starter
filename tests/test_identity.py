@@ -451,6 +451,33 @@ def test_mode_change_restarts_failed_challenge_and_enforces_expiry(state):
     assert sent[-1] == acsp.encode_kick_user(0)
 
 
+def test_warn_to_enforce_keeps_verified_cars_and_off_resets_them(state):
+    with Session(engine) as sess:
+        server = Server(name='Identity keep', base_port=11998)
+        sess.add(server)
+        sess.commit()
+        sess.refresh(server)
+        sid = server.id
+    state[0].modes[sid] = 'warn'
+    c, sent = client(sid)
+    join(c)
+    state[0].verify(GUID, code(sent), 'origin')
+    record = state[0].clients[c][0]
+    assert record.state == 'verified'
+    with Session(engine) as sess:
+        identity.server_put(sid, identity.ModeIn(mode='enforce'), sess)
+    assert state[0].clients[c][0] is record and record.state == 'verified'
+    assert not state[0].hidden(c, 0)
+    c.cars[0]['driver_guid'] = OTHER                      # a verified record never carries over to a different GUID
+    state[0].protected.add(OTHER)
+    with Session(engine) as sess:
+        identity.server_put(sid, identity.ModeIn(mode='warn'), sess)
+    assert state[0].clients[c][0] is not record and state[0].clients[c][0].guid == OTHER
+    with Session(engine) as sess:
+        identity.server_put(sid, identity.ModeIn(mode='off'), sess)
+    assert 0 not in state[0].clients.get(c, {})
+
+
 def test_a_challenge_started_from_a_worker_thread_still_expires_on_the_acsp_loop(state, monkeypatch):
     """PUT /servers/{id}/identity is a plain `def` route, so it runs in a worker thread with NO running loop. A challenge started there used to get no expiry timer: in enforce
     the car stayed hidden for ever and was never kicked. The client remembers its loop and the timer is armed there."""

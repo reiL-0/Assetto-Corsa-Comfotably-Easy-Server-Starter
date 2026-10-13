@@ -287,9 +287,12 @@ def server_put(server_id: int, body: ModeIn, sess: SessionDep) -> dict:
             previous = service.modes.get(server_id, 'off')
             service.modes[server_id] = body.mode
             if previous != body.mode:
+                keep_verified = 'off' not in (previous, body.mode)   # warn <-> enforce: whoever already proved their identity is not asked again
                 for client in list(service.clients):
                     if client.server_id == server_id:
-                        service.reset(client)
+                        for car_id, r in list(service.clients.get(client, {}).items()):
+                            if not (keep_verified and r.state == 'verified' and r.guid == client.cars.get(car_id, {}).get('driver_guid')):
+                                service.reset(client, car_id)
                         for car_id in list(client.cars):
                             service.start(client, car_id)
             return service.status(server_id)
