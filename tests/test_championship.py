@@ -222,14 +222,14 @@ def test_league_suspensions_kinds_grid_places_and_non_racing_cars(monkeypatch):
     assert not league.qualy_banned(sid, G[5])
 
 
-def test_counting_a_race_makes_the_automatic_cut_penalties_of_a_league_with_rules():
+def test_counting_a_race_makes_cut_notices_for_a_league_with_rules():
     import json, os, time
     from pathlib import Path
     from sqlmodel import Session, select
     from app import league
     from app.config import settings
     from app.db import engine
-    from app.models import Event, Penalty, Schedule
+    from app.models import Event, Notice, Penalty, Schedule
     from conftest import ADMIN
     from fastapi.testclient import TestClient
     from app.main import app
@@ -256,6 +256,7 @@ def test_counting_a_race_makes_the_automatic_cut_penalties_of_a_league_with_rule
             s.add(sc)
             s.commit()
             league.count_results(s, sc, ev, now + 60)
-            got.append([(p.kind, p.value, p.auto_key) for p in s.exec(select(Penalty).where(Penalty.server_id == sid))])
-    assert got[0] == [("time", 3000, "cuts")]   # 3 cuts = one full step of 2
-    assert got[1] == got[0]   # the second league counts the same file: the penalty belongs to the file and is not doubled
+            got.append([(n.kind, n.penalty_kind, n.value) for n in s.exec(select(Notice).where(Notice.server_id == sid))])
+            assert not s.exec(select(Penalty).where(Penalty.server_id == sid)).all()   # a warning, never a penalty by itself
+    assert got[0] == [("cuts", "time", 3000)]   # 3 cuts = one full step of 2
+    assert got[1] == got[0]   # the second league counts the same file: the warning belongs to the file and is not doubled
