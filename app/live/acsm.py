@@ -26,7 +26,7 @@ def leaderboard(server_id: int) -> dict:
     if not inst or not inst.running:
         raise HTTPException(409, "server not running")  # 4xx, not 5xx: a stopped server is normal and must not count as a manager error; sites treat a failed fetch as "offline"
     if inst.acsp:
-        return inst.acsp.leaderboard()
+        return inst.acsp.board.leaderboard()
     out = inst.logboard.board.leaderboard()   # no plugin socket (yet): the same table read from acServer's log
     info = _read_json(inst.cwd / "info.json")
     track, _, config = str(info.get("track", "")).partition("-")

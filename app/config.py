@@ -52,7 +52,6 @@ class Settings(BaseSettings):
     discord_role: str = ""  # role id mentioned at the top of the announcement (empty = no mention)
     discord_client_id: str = ""
     discord_client_secret: str = ""
-    site_url: str = ""  # League website; identity challenges link to /verificar
     public_url: str = ""  # the manager's public base URL, e.g. https://acm.example.com; the OAuth redirect is <public_url>/api/v1/auth/discord/callback
 
     def acserver_dir(self) -> Path | None:

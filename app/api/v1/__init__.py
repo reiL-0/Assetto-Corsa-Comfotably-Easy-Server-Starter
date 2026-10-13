@@ -26,7 +26,6 @@ from app.servers import router as servers_router
 from app.stewards.api import report_router as stewards_report_router
 from app.stewards.api import router as stewards_router
 from app.servers import steward as steward_router
-from app.identity import router as identity_router
 from app.telemetry import router as telemetry_router
 
 api_router = APIRouter(prefix="/api/v1")
@@ -37,7 +36,6 @@ def version() -> dict[str, str]:
     return {"version": "0.0.0-dev", "api": "v1"}
 
 
-api_router.include_router(identity_router)  # identity routes carry their own role checks
 api_router.include_router(auth_router)
 api_router.include_router(discord_router)  # link/unlink the caller's own Discord account
 # Reads: any logged-in user, except servers (config carries ADMIN_PASSWORD, plus logs) -> steward.
