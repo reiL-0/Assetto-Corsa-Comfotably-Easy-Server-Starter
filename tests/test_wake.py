@@ -317,3 +317,52 @@ def test_acserver_http_answers_are_reused_for_a_few_seconds(monkeypatch):
     monkeypatch.setattr(wake.urllib.request, "urlopen", lambda url, timeout: (_ for _ in ()).throw(OSError()))
     wake._upstream_cache.clear()
     assert wake._upstream(9700, "/INFO") == b"" and (9700, "/INFO") not in wake._upstream_cache   # failures are not kept
+
+
+def test_a_running_server_only_relays_info_and_json(monkeypatch):
+    """The public HTTP port has no login: while acServer runs it is relayed ONLY for /INFO and /JSON (what the lobby asks); any other path gets the
+    same empty 200 as a stopped server, never reaches acServer's internal port, and a malformed one (no leading slash: urllib raises InvalidURL, which is
+    not an OSError) leaves no unhandled exception in the connection task."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+    _setup(monkeypatch)
+    sid, port = _plain_server("off", SERVER={"NAME": "Real", "TRACK": "monza"})
+    internal = wake._ports(port)["http_internal"]
+    seen = []
+
+    class Fake(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            body = {"/INFO": json.dumps({"name": "Real", "clients": 3, "cport": internal}), "/JSON|1": json.dumps({"Cars": ["real"]})}.get(self.path, "SECRET")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *a):
+            pass
+    up = HTTPServer(("127.0.0.1", internal), Fake)
+    Thread(target=up.serve_forever, daemon=True).start()
+    monkeypatch.setattr(wake.supervisor, "get", lambda i: type("I", (), {"running": True})())
+    wake._upstream_cache.clear()
+    assert wake._upstream(internal, ".evil.com/") == b"" and wake._upstream(internal, "/a b") == b""   # a bad path is an empty answer, not an exception
+
+    async def scenario():
+        errors = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: errors.append(ctx))
+        w = wake.Waker()
+        await w.sync()
+        assert json.loads((await _http_get(port + 1, "/INFO"))[1])["clients"] == 3
+        assert json.loads((await _http_get(port + 1, "/JSON|1"))[1]) == {"Cars": ["real"]}   # what the lobby asks still arrives intact
+        for path in ("/secret", "/admin", ".evil.com/", "@127.0.0.1:1/x"):
+            status, body = await _http_get(port + 1, path)
+            assert status == 200 and body == "" or body == b"", (path, status, body)
+        await asyncio.sleep(0.2)
+        assert errors == [], errors   # no connection task died with an exception
+        w.close()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        up.shutdown()
+    assert seen == ["/INFO", "/JSON|1"], seen   # nothing but what the lobby asks ever reached acServer's internal port
