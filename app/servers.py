@@ -99,7 +99,7 @@ def _get(sess: SessionDep, server_id: int) -> Server:
     return s
 
 
-_alloc_lock = threading.Lock()   # ponytail: one manager process (handlers run in threads); a UNIQUE(base_port) migration (plan T1.1) covers several
+_alloc_lock = threading.Lock()   # ponytail: one manager process (handlers run in threads); the UNIQUE(base_port) index (migration 002) makes a duplicate fail instead of overlapping, if there are ever several
 
 
 def _alloc_base_port(sess: SessionDep) -> int:
