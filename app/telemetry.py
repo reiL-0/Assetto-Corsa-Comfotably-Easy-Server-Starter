@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import supervisor
+from app.config import settings
 
 router = APIRouter(prefix="/telemetry", tags=["telemetry"])
 
@@ -31,11 +32,13 @@ class Sample(BaseModel):
 
 @router.post("/ingest", status_code=204)
 def ingest(body: Sample) -> None:
-    """No auth: the driver is found by steamId among the cars connected right now.
-    409 driver not connected to any running server · 429 faster than 20 Hz.
-    ponytail: anyone who knows a connected driver's SteamID64 can feed that car fake
-    pedals/steer (cosmetic live-map data only). Sign samples if that ever matters.
+    """LEGACY (the v0.1 app of clients/OPRTelemetry; the pilots' app today talks to the telemetry backend, not here). No auth: the driver is found by
+    steamId among the cars connected right now, so anyone who knows a connected driver's SteamID64 could feed that car fake pedals/steer. Therefore it is OFF
+    (404) unless ACM_LEGACY_TELEMETRY_INGEST is set.
+    404 switched off · 409 driver not connected to any running server · 429 faster than 20 Hz.
     """
+    if not settings.legacy_telemetry_ingest:
+        raise HTTPException(404, "not found")
     hits = [
         (inst.acsp, car_id)
         for inst in supervisor.live()

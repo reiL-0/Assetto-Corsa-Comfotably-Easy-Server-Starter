@@ -5,13 +5,15 @@ already in someone's Drive does not have to go through a slow uplink.
 
 Admin-only, and still guarded against SSRF: https only, only known file hosts (`settings.download_hosts` adds more),
 and every hop, redirects included, must resolve to a public address.
-ponytail: the address is checked at resolve time, not pinned for the connection; with hosts limited to big providers
-rebinding is not a realistic path. Pin the IP if the host list ever opens up.
+The address is checked AND used in one step: `_public_addresses` resolves the name and demands that every answer be public, and the connection
+(`_PinnedHTTPS`) connects to the address it just checked (TLS still verifies the certificate against the NAME), so a second DNS answer cannot
+redirect it (DNS rebinding). `check_url` runs the same function to give the admin a clear error before anything is fetched.
 """
 
 from __future__ import annotations
 
 import base64
+import http.client
 import http.cookiejar
 import ipaddress
 import re
@@ -33,6 +35,38 @@ ALLOW_PRIVATE = False  # tests flip this to talk to a local server
 CHUNK = 1 << 20
 
 
+def _public_addresses(host: str, port: int) -> list[str]:
+    """Resolve `host`; ValueError unless EVERY answer is public (a mixed answer is how a rebinding host hides one). The connection tries them in order."""
+    try:
+        addrs = [a[4][0] for a in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+    except OSError as e:
+        raise ValueError(f"cannot resolve {host}") from e
+    if not addrs or not all(ipaddress.ip_address(a).is_global for a in addrs):
+        raise ValueError(f"{host} does not resolve to a public address")
+    return addrs
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    """Resolves and checks at the moment of connecting, and connects to that very address; the certificate is still checked against the host NAME."""
+
+    def connect(self):
+        last = OSError(f"no address to connect to for {self.host}")
+        for ip in [self.host] if ALLOW_PRIVATE else _public_addresses(self.host, self.port):   # all of them, in order, like a plain connection (IPv6 first, no IPv6 route...)
+            try:
+                sock = socket.create_connection((ip, self.port), self.timeout, self.source_address)
+            except OSError as e:
+                last = e
+                continue
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            return
+        raise last
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPS, req, context=self._context)
+
+
 def check_url(url: str) -> urllib.parse.SplitResult:
     """Raise ValueError unless `url` is an https link to an allowed host that resolves to public addresses."""
     u = urllib.parse.urlsplit(url.strip())
@@ -42,12 +76,7 @@ def check_url(url: str) -> urllib.parse.SplitResult:
     if not any(host == h or host.endswith("." + h) for h in (*HOSTS, *settings.download_hosts)):
         raise ValueError(f"{host or 'that host'} is not an allowed download host (MediaFire, Google Drive, Dropbox)")
     if not ALLOW_PRIVATE:
-        try:
-            addrs = {a[4][0] for a in socket.getaddrinfo(host, u.port or 443, type=socket.SOCK_STREAM)}
-        except OSError as e:
-            raise ValueError(f"cannot resolve {host}") from e
-        if not addrs or not all(ipaddress.ip_address(a).is_global for a in addrs):
-            raise ValueError(f"{host} does not resolve to a public address")
+        _public_addresses(host, u.port or 443)
     return u
 
 
@@ -59,7 +88,8 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
 
 def opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), _Redirects
+        urllib.request.ProxyHandler({}),   # never through a proxy from the environment: the proxy would resolve the name, and the address check would mean nothing
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), _PinnedHTTPSHandler, _Redirects
     )
 
 

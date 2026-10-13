@@ -7,15 +7,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, get_args
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.requests import HTTPConnection
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app.db import SessionDep
+from app.login_limiter import LoginLimiter
 from app.models import Token, User
 
-Role = Literal["driver", "steward", "admin"]
+Role = Literal["reporter", "driver", "steward", "admin"]   # reporter: the LOWEST role, below driver: it passes no guard() and files track-limit reports through require_any (the website's token)
 ROLES = get_args(Role)  # ascending privilege
 COOKIE = "acm_session"
 SESSION_DAYS = 30
@@ -74,6 +75,17 @@ def require(role: Role):
     return dep
 
 
+def require_any(*roles: Role):
+    """Dependency: the caller's role must be one of these exactly (for routes that are not a rung of the ladder, like the website's reporter)."""
+
+    def dep(user: CurrentUser) -> User:
+        if user.role not in roles:
+            raise HTTPException(403, f"one of {', '.join(roles)} required")
+        return user
+
+    return dep
+
+
 def guard(read: Role = "driver"):
     """Router-level default: GET/HEAD/websocket need `read`, every other method needs admin.
     Fail-safe: a new write route is admin-only until it is deliberately moved.
@@ -84,6 +96,18 @@ def guard(read: Role = "driver"):
         return _need(user, read if reading else "admin")
 
     return dep
+
+
+_limiter = LoginLimiter()
+_DUMMY = _hash_pw(secrets.token_urlsafe(16), secrets.token_bytes(16))   # a well-formed hash nobody can match: an unknown username spends the same single scrypt, with no first-use extra
+
+
+def _client_ip(request: Request) -> str:
+    """The address the limiter counts. uvicorn replaces the client with X-Forwarded-For when it comes from loopback, and loopback is the only place callers come from,
+    so a local caller could pick its own «address»: any request carrying that header is counted as ONE shared address instead."""
+    if "x-forwarded-for" in request.headers:
+        return "forwarded"
+    return request.client.host if request.client else "?"
 
 
 def _issue(sess: SessionDep, user: User, name: str, ttl: timedelta | None) -> tuple[Token, str]:
@@ -159,10 +183,21 @@ class LoginIn(BaseModel):
 
 
 @router.post("/auth/login", response_model=UserOut)
-def login(body: LoginIn, resp: Response, sess: SessionDep) -> User:
-    u = sess.exec(select(User).where(User.username == body.username)).first()
-    if not u or not u.password_hash or not _check_pw(body.password, u.password_hash):
+def login(body: LoginIn, request: Request, resp: Response, sess: SessionDep) -> User:
+    ip = _client_ip(request)
+    wait = _limiter.attempt(ip, body.username)   # counted now; a good login gives it back
+    if wait:
+        raise HTTPException(429, "too many attempts, try again later", headers={"Retry-After": str(wait)})
+    try:
+        u = sess.exec(select(User).where(User.username == body.username)).first()
+        # an unknown user pays for one password hash too, or the response time tells which names exist
+        good = _check_pw(body.password, u.password_hash if u and u.password_hash else _DUMMY)
+    except Exception:
+        _limiter.refund(ip, body.username)   # our failure (a database error...) must not count against the user
+        raise
+    if not u or not u.password_hash or not good:
         raise HTTPException(401, "bad credentials")
+    _limiter.succeeded(ip, body.username)
     _, raw = _issue(sess, u, "session", timedelta(days=SESSION_DAYS))
     # SameSite=Lax is the CSRF guard; a cross-origin frontend should use a Bearer token instead.
     resp.set_cookie(COOKIE, raw, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax")
