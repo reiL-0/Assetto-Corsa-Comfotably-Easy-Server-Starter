@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Extra hosts content may be fetched from by link, besides MediaFire / Google Drive / Dropbox.
     # Env (JSON): ACM_DOWNLOAD_HOSTS='["files.example.com"]'
     download_hosts: list[str] = []
+    legacy_telemetry_ingest: bool = False   # POST /telemetry/ingest takes a SteamID64 and no login: only the old v0.1 in-game app (clients/OPRTelemetry) needs it
     # Stop an instance after this many seconds with no connected cars (0 = never).
     # A stopped server is started again via POST /servers/{id}/start.
     idle_stop_seconds: int = 0

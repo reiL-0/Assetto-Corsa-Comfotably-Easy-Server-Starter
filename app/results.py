@@ -99,8 +99,7 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
     time -> added to the race time and the order is recomputed (laps, then time); position -> the driver drops N
     places; dsq -> removed from the classification (position None, listed last); points -> not a classification
     change, carried in `points_penalty` for the championship; grid -> only changes `grid`, the order for the next race.
-    ponytail: with time penalties the re-sort is laps desc, then total time; a driver who did not finish and whose
-    TotalTime is 0 sorts first among equals. Good enough while leagues review such cases by hand."""
+    With time penalties the re-sort is laps desc, then total time; a driver with no finish time (TotalTime 0) goes behind everybody who has one at the same laps."""
     race = parsed["type"] == "Race"
     laps = Counter(lap["driver_guid"] for lap in parsed["laps"] if (lap.get("lap_time_ms") or 0) > 0)
     by_guid: dict[str, list[Penalty]] = defaultdict(list)
@@ -124,7 +123,7 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
     ok = [e for e in cls if not e["disqualified"]]
     out = [e for e in cls if e["disqualified"]]
     if race and any(e["time_penalty_ms"] for e in ok):
-        ok.sort(key=lambda e: (-e["laps"], e["adjusted_total_ms"]))
+        ok.sort(key=lambda e: (-e["laps"], e["adjusted_total_ms"] if e["total_time_ms"] else float("inf")))   # no finish time = behind everybody who has one (the sort is stable: acServer's order among them stays)
     for e in sorted((e for e in ok if e["position_penalty"]), key=lambda e: e["original_position"]):
         i = ok.index(e)
         ok.remove(e)

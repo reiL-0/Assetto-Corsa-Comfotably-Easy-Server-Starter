@@ -20,7 +20,18 @@ class _Inst:  # stands in for a running supervisor.Instance
     def __init__(self, client):
         self.acsp = client
 
-def test_ingest_by_steam_id_no_auth():
+def test_the_legacy_ingest_is_off_unless_somebody_asks_for_it(monkeypatch):
+    """It takes a SteamID64 and no login: anybody who knows a connected driver's id could feed that car fake pedals. Only the old v0.1 in-game app
+    (clients/OPRTelemetry) and clients/probe.py use it, so it answers 404 until ACM_LEGACY_TELEMETRY_INGEST is set."""
+    from app.config import settings
+    api = TestClient(app)
+    monkeypatch.setattr(settings, "legacy_telemetry_ingest", False)
+    assert api.post(f"{V}/telemetry/ingest", json=SAMPLE).status_code == 404
+
+
+def test_ingest_by_steam_id_no_auth(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "legacy_telemetry_ingest", True)
     api = TestClient(app)  # no token, no cookie
     assert api.post(f"{V}/telemetry/ingest", json=SAMPLE).status_code == 409  # not connected
 

@@ -175,3 +175,18 @@ def test_league_catalogue_penalties_are_race_time():
     assert api.post(url, json={"driver_guid": C, "item": "Inventada"}).status_code == 422
     assert api.post(url, json={"driver_guid": C, "kind": "points", "value": 3, "reason": "Conducta"}).status_code == 422   # no points in a league with a catalogue
     assert api.post(url, json={"driver_guid": C, "kind": "time", "value": 3, "reason": "Atajo"}).status_code == 201
+
+
+def test_a_driver_with_no_finish_time_does_not_jump_to_the_front_when_a_time_penalty_resorts_the_race():
+    """B has the same laps as A and C but never crossed the line (TotalTime 0). With a time penalty the race is re-sorted by laps then time; a zero time must
+    not read as «the fastest»: B stays behind everybody who finished, and keeps the order acServer gave among those without a time."""
+    sid = api.post(f"{V}/servers", json={"name": "dnf"}).json()["id"]
+    rows = [("A", A, 600000), ("B", B, 0), ("C", C, 610000), ("D", D, 0)]
+    laps = [{"DriverName": n, "DriverGuid": g, "CarId": i, "LapTime": 120000, "Cuts": 0} for i, (n, g, _) in enumerate(rows) for _ in range(5)]
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "dnf.json").write_text(json.dumps({
+        "Type": "Race", "TrackName": "spa", "Name": "Race",
+        "Result": [{"DriverName": n, "DriverGuid": g, "CarModel": "bmw", "BestLap": 119000 + i, "TotalTime": t} for i, (n, g, t) in enumerate(rows)], "Laps": laps}))
+    got = apply_penalties(parse_result_file(d / "dnf.json"), [P(A, "time", 20000)])     # A: 620 s, C: 610 s
+    assert _order(got) == ["C", "A", "B", "D"], _order(got)
