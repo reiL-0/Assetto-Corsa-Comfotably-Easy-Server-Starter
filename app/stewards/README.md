@@ -36,7 +36,8 @@
 ## Interactions
 - **Entra:** `app/live/acsp.py` (`ACSPClient._apply`, import tardío para no hacer un ciclo) y `app/api/v1/__init__.py` (router).
 - **Usa:** `app.live.acsp` (constantes `COLLISION_WITH_*`), `app.db.engine`, `app.models`, `app.servers` (`_get`, `_out`, `ServerOut`).
-- **No hace aún:** hablar con el piloto, crear `Penalty`, avisar a Discord, cola de comisarios (fases 1+).
+- **Sanciones automáticas (`auto.py`), separadas del motor de incidentes:** no usan `Incident`. `auto_penalties(sess, liga, server_id, filename, parsed)` lo llama `league._count_results` al contar por primera vez una Race de una liga con `Championship.auto_rules` (`{cuts_per_step, step_seconds, max_seconds}`; `None` = apagado). Suma los `Cuts` de las vueltas con tiempo de cada piloto que corre y crea un `Penalty` de tiempo (`created_by='auto'`, `auto_key='cuts'`, aviso a Discord). Una por (archivo, piloto, clave) —índice único de la migración 005—, así que contar el archivo en otra liga no la duplica (cuelga del archivo, no de la liga). Al retirarla un comisario queda `dismissed=1`: el resultado la ignora y no se vuelve a crear. Solo cortes; contactos y límites siguen siendo evidencia. No se reevalúan carreras ya contadas.
+- **No hace aún:** hablar con el piloto, cola de comisarios para contactos.
 
 ## Flow
 1. acServer manda un datagrama → `ACSPClient.datagram_received` → `parse` → `_apply`.

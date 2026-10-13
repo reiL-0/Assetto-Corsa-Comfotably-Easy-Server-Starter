@@ -71,7 +71,7 @@ KINDS = ("time", "position", "dsq", "grid", "points")
 
 
 def penalties_for(sess: Session, server_id: int, filename: str) -> list[Penalty]:
-    return list(sess.exec(select(Penalty).where(Penalty.server_id == server_id, Penalty.filename == filename).order_by(Penalty.id)))
+    return list(sess.exec(select(Penalty).where(Penalty.server_id == server_id, Penalty.filename == filename, Penalty.dismissed.is_(False)).order_by(Penalty.id)))
 
 
 def non_racing_for(sess: Session, server_id: int, filename: str) -> frozenset[str]:

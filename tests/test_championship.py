@@ -220,3 +220,42 @@ def test_league_suspensions_kinds_grid_places_and_non_racing_cars(monkeypatch):
     listed = api.get(sus).json()
     assert all(r["active"] for r in listed[:5]) and api.delete(f"{sus}/{listed[0]['id']}").status_code == 204
     assert not league.qualy_banned(sid, G[5])
+
+
+def test_counting_a_race_makes_the_automatic_cut_penalties_of_a_league_with_rules():
+    import json, os, time
+    from pathlib import Path
+    from sqlmodel import Session, select
+    from app import league
+    from app.config import settings
+    from app.db import engine
+    from app.models import Event, Penalty, Schedule
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "Auto"}).json()["id"]
+    G = "76561190000000009"
+    rules = {"cuts_per_step": 2, "step_seconds": 3, "max_seconds": 30}
+    ids = [api.post("/api/v1/championships", json={"name": n, **extra}).json()["id"] for n, extra in (("Con reglas", {"auto_rules": rules}), ("Sin reglas", {}))]
+    assert api.get(f"/api/v1/championships/{ids[0]}").json()["auto_rules"] == rules and api.get(f"/api/v1/championships/{ids[1]}").json()["auto_rules"] is None
+    assert api.patch(f"/api/v1/championships/{ids[0]}", json={"name": "Con reglas", "auto_rules": {"cuts_per_step": 0, "step_seconds": 3, "max_seconds": 30}}).status_code == 422
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    (d / "r.json").write_text(json.dumps({"Type": "Race", "TrackName": "spa", "Result": [{"DriverName": "G", "DriverGuid": G, "CarModel": "x", "BestLap": 1, "TotalTime": 100}],
+                                          "Laps": [{"DriverName": "G", "DriverGuid": G, "CarId": 0, "LapTime": 90000, "Cuts": 3}]}))
+    os.utime(d / "r.json", (now - 60, now - 60))
+    got = []
+    for lid in ids:
+        with Session(engine) as s:
+            ev = Event(title="R", data={"name": "r", "track": "spa", "cars": ["a"]}, league_id=lid)
+            s.add(ev)
+            s.commit()
+            sc = Schedule(event_id=ev.id, server_id=sid, start_at=now - 1800, state="running")
+            s.add(sc)
+            s.commit()
+            league.count_results(s, sc, ev, now + 60)
+            got.append([(p.kind, p.value, p.auto_key) for p in s.exec(select(Penalty).where(Penalty.server_id == sid))])
+    assert got[0] == [("time", 3000, "cuts")]   # 3 cuts = one full step of 2
+    assert got[1] == got[0]   # the second league counts the same file: the penalty belongs to the file and is not doubled

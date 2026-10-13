@@ -208,3 +208,37 @@ def test_public_races_show_the_penalised_classification_before_and_after_archivi
     check(before)
     assert api.post(f"{V}/championships/{cid}/archive", json={"confirm": "Publica"}).status_code == 200
     assert races() == before   # the snapshot answers the same once the result file and the penalty rows are gone
+
+
+def test_automatic_cut_penalties_are_made_once_and_a_withdrawal_sticks():
+    from app.championship import AutoRules
+    from app.models import Championship
+    from app.stewards.auto import auto_penalties, cut_seconds
+
+    rules = AutoRules(cuts_per_step=5, step_seconds=5, max_seconds=12).model_dump()
+    assert [cut_seconds(n, rules) for n in (4, 5, 9, 10, 99)] == [0, 5, 5, 10, 12]
+    sid = api.post(f"{V}/servers", json={"name": "t"}).json()["id"]
+    f = _result(sid, "cuts.json")
+    data = json.loads(f.read_text())
+    for lap in data["Laps"]:
+        lap["Cuts"] = {"A": 3, "B": 1}.get(lap["DriverName"], 0)   # A: 5 laps x 3 = 15 cuts (capped 12 s), B: 5 cuts = 5 s, C/D: none
+    data["Laps"].append({"DriverName": "C", "DriverGuid": C, "CarId": 2, "LapTime": 0, "Cuts": 50})   # an unfinished lap does not count
+    f.write_text(json.dumps(data))
+    parsed = parse_result_file(f)
+    with Session(engine) as s:
+        c = Championship(name="Auto", auto_rules=rules)
+        s.add(c)
+        s.commit()
+        assert len(auto_penalties(s, c, sid, "cuts.json", parsed)) == 2
+        s.commit()
+        assert auto_penalties(s, c, sid, "cuts.json", parsed) == []   # counting the file again changes nothing
+        assert auto_penalties(s, Championship(name="Off"), sid, "cuts.json", parsed) == []
+    steward = _client("steward")
+    url = f"{V}/servers/{sid}/results/cuts.json/penalties"
+    got = {p["driver_guid"]: p for p in steward.get(url).json()}
+    assert got[A]["value"] == 12 and got[B]["value"] == 5 and got[A]["created_by"] == "auto" and "automática" in got[A]["reason"]
+    assert steward.delete(f"{url}/{got[A]['id']}").status_code == 204
+    assert [p["driver_guid"] for p in steward.get(url).json()] == [B]   # withdrawn: gone from the result...
+    with Session(engine) as s:
+        assert auto_penalties(s, s.get(Championship, 1) or Championship(name="x", auto_rules=rules), sid, "cuts.json", parsed) == []   # ...and never made again
+    assert steward.delete(f"{url}/{got[A]['id']}").status_code == 404
