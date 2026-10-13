@@ -70,7 +70,7 @@ def _plural(n: int, one: str, many: str) -> str:
 
 def effect(kind: str, value: int) -> str:
     """What a penalty does, in words. `value` as the API hands it out (seconds for `time`)."""
-    return {"time": f"+{value} s", "position": f"pierde {_plural(value, 'posición', 'posiciones')}",
+    return {"time": f"+{value} s", "stopgo": f"stop & go de {value} s (se suma al tiempo de carrera)", "position": f"pierde {_plural(value, 'posición', 'posiciones')}",
             "dsq": "descalificado", "grid": f"pierde {_plural(value, 'puesto', 'puestos')} en la parrilla de la próxima carrera",
             "points": f"-{value} puntos de campeonato"}[kind]
 

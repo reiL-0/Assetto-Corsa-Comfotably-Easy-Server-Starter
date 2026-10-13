@@ -242,3 +242,14 @@ def test_automatic_cut_penalties_are_made_once_and_a_withdrawal_sticks():
     with Session(engine) as s:
         assert auto_penalties(s, s.get(Championship, 1) or Championship(name="x", auto_rules=rules), sid, "cuts.json", parsed) == []   # ...and never made again
     assert steward.delete(f"{url}/{got[A]['id']}").status_code == 404
+
+
+def test_stop_and_go_is_charged_as_race_time_and_shown_in_seconds():
+    sid, name = _sid_and_file("sg.json")
+    url = f"{V}/servers/{sid}/results/{name}/penalties"
+    steward = _client("steward")
+    assert steward.post(url, json={"driver_guid": A, "kind": "stopgo", "value": 61, "reason": "Pits"}).status_code == 422   # more than a stop-and-go is
+    r = steward.post(url, json={"driver_guid": A, "kind": "stopgo", "value": 30, "reason": "Velocidad en pits"})
+    assert r.status_code == 201 and r.json()["kind"] == "stopgo" and r.json()["value"] == 30
+    got = api.get(f"{V}/servers/{sid}/results/{name}/parsed").json()["classification"]
+    assert [e["driver_name"] for e in got] == ["B", "C", "A", "D"] and got[2]["time_penalty_ms"] == 30000 and got[2]["adjusted_total_ms"] == 630000
