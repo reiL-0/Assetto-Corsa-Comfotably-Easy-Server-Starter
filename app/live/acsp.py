@@ -12,7 +12,7 @@ import struct
 import time
 from collections import deque
 
-from app import identity, metrics
+from app import metrics
 from app.live.board import LiveBoard
 
 TELEMETRY_TTL = 2.0  # s a sample stays in the live map after the app stops sending
@@ -66,10 +66,8 @@ def _read_sstring(buf: bytes, pos: int) -> tuple[str, int]:
 
 
 def _write_string(s: str) -> bytes:
-    """ACSP strings are a length byte and UTF-32LE code points (WriteStringW). Latin-1 text is byte-identical to what this always sent; anything else (the ✓ of the
-    identity chat) now survives instead of becoming «?»."""
-    s = s[:255]
-    return bytes([len(s)]) + b"".join(struct.pack("<I", ord(c)) for c in s)
+    data = s.encode("latin-1", errors="replace")
+    return bytes([len(data)]) + b"".join(bytes([b, 0, 0, 0]) for b in data)
 
 
 def _read_session_info(buf: bytes, pos: int) -> tuple[dict, int]:
@@ -338,7 +336,6 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
-        self.loop = asyncio.get_running_loop()   # identity challenges started from a worker thread arm their expiry here
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
@@ -366,9 +363,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
         elif t == "new_connection":
-            with identity.service.lock:
-                identity.service.reset(self, event["car_id"])
-                self.cars[event["car_id"]] = event
+            self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
             if bans.is_banned(event["driver_guid"]):
                 self.send(encode_kick_user(event["car_id"]))
@@ -376,23 +371,14 @@ class ACSPClient(asyncio.DatagramProtocol):
             elif (self.session or {}).get("session_type") == 2:
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
-            with identity.service.lock:
-                identity.service.reset(self, event["car_id"])
-                self.cars.pop(event["car_id"], None)
-        elif t == "client_loaded":
-            with identity.service.lock:
-                identity.service.start(self, event["car_id"], resend=True)
-            if self.on_client_loaded:
-                self.on_client_loaded(event["car_id"])
+            self.cars.pop(event["car_id"], None)
+        elif t == "client_loaded" and self.on_client_loaded:
+            self.on_client_loaded(event["car_id"])
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
             # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
             joined = {**event, "type": "new_connection"}
             self.board.apply(joined)
-            with identity.service.lock:
-                if self.cars.get(event["car_id"], {}).get("driver_guid") != event["driver_guid"]:
-                    identity.service.reset(self, event["car_id"])
-                self.cars[event["car_id"]] = joined
-                identity.service.start(self, event["car_id"])
+            self.cars[event["car_id"]] = joined
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
             self.trail.setdefault(event["car_id"], deque(maxlen=TRAIL)).append((time.time(), event["pos"], event["velocity"]))
@@ -425,26 +411,22 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def add_telemetry(self, car_id: int, sample: dict) -> bool:
         """Store an in-game-app sample and stream it. False if it came too soon (rate limit)."""
-        with identity.service.lock:
-            if identity.service.hidden(self, car_id):
-                return False
-            now = time.time()
-            prev = self.telemetry.get(car_id)
-            if prev and now - prev["ts"] < TELEMETRY_MIN_INTERVAL:
-                return False
-            sample = {**sample, "ts": now}
-            self.telemetry[car_id] = sample
-            self._push({"type": "telemetry", "car_id": car_id, **sample})
-            return True
+        now = time.time()
+        prev = self.telemetry.get(car_id)
+        if prev and now - prev["ts"] < TELEMETRY_MIN_INTERVAL:
+            return False
+        sample = {**sample, "ts": now}
+        self.telemetry[car_id] = sample
+        self._push({"type": "telemetry", "car_id": car_id, **sample})
+        return True
 
     def snapshot(self) -> dict[int, dict]:
         """cars + their fresh app telemetry (under `telemetry`)."""
-        with identity.service.lock:
-            now = time.time()
-            return {
-                i: {**c, "telemetry": t} if (t := self.telemetry.get(i)) and now - t["ts"] < TELEMETRY_TTL else c
-                for i, c in self.cars.items() if not identity.service.hidden(self, i)
-            }
+        now = time.time()
+        return {
+            i: {**c, "telemetry": t} if (t := self.telemetry.get(i)) and now - t["ts"] < TELEMETRY_TTL else c
+            for i, c in self.cars.items()
+        }
 
     def send(self, data: bytes) -> None:
         if self.transport:
@@ -463,20 +445,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self.send(encode_get_car_info(car_id))
                 return
 
-    def leaderboard(self) -> dict:
-        with identity.service.lock:
-            out = self.board.leaderboard()
-            for key in ("ConnectedDrivers", "DisconnectedDrivers"):
-                out[key] = [d for d in out[key]
-                            if d["CarInfo"]["DriverGUID"] != self.cars.get(d["CarInfo"]["CarID"], {}).get("driver_guid")
-                            or not identity.service.hidden(self, d["CarInfo"]["CarID"])]
-            return out
-
-    def connection_lost(self, exc) -> None:
-        identity.service.reset(self)
-
     def close(self) -> None:
-        identity.service.reset(self)
         if self._hello:
             self._hello.cancel()
         if self.transport:

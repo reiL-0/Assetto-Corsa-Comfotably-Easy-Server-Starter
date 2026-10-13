@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
-from app import identity, integrity, metrics, resourcelog, schedule, servers, wake
+from app import integrity, metrics, resourcelog, schedule, servers, wake
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
@@ -27,7 +27,6 @@ log = logging.getLogger("acmanager")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    identity.service.load()
     steward_incidents.accept(True)
     if n_sealed := integrity.seal_new():
         log.info("sealed %d installed item(s) that had no seal", n_sealed)
