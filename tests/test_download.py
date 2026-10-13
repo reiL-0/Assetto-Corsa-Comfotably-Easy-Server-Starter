@@ -151,3 +151,51 @@ def test_import_from_link_validates_and_needs_admin(monkeypatch):
     assert api.post(f"{V}/content/uploads/from-link", json={"kind": "skin", "url": "https://x.mediafire.com/a"}).status_code == 422
     anon = TestClient(app).post(f"{V}/content/uploads/from-link", json={"kind": "track", "url": "https://mediafire.com/a"})
     assert anon.status_code == 401
+
+
+def test_a_host_that_turns_private_between_the_check_and_the_connection_is_refused(monkeypatch):
+    """DNS rebinding: check_url sees a public address, then the name resolves to a private one for the connection. The connection resolves and checks AGAIN,
+    and connects to the very address it checked, never to a name it has not looked at."""
+    monkeypatch.setattr(download, "ALLOW_PRIVATE", False)
+    answers = iter([[(2, 1, 6, "", ("142.250.1.1", 443))], [(2, 1, 6, "", ("10.0.0.5", 443))]])
+    monkeypatch.setattr(download.socket, "getaddrinfo", lambda *a, **k: next(answers))
+    connected = []
+    monkeypatch.setattr(download.socket, "create_connection", lambda addr, *a, **k: connected.append(addr) or (_ for _ in ()).throw(OSError("never reached")))
+    download.check_url("https://drive.google.com/uc?id=1")                           # first resolution: public, accepted
+    with pytest.raises(ValueError, match="public address"):
+        download.opener().open("https://drive.google.com/uc?id=1", timeout=1)        # second resolution (the connection's own): private
+    assert connected == [], "it connected to an address that is not public"
+
+
+def test_the_connection_goes_to_the_address_it_checked_not_to_the_name(monkeypatch):
+    monkeypatch.setattr(download, "ALLOW_PRIVATE", False)
+    monkeypatch.setattr(download.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("142.250.1.1", 443))])
+    connected = []
+    monkeypatch.setattr(download.socket, "create_connection", lambda addr, *a, **k: connected.append(addr) or (_ for _ in ()).throw(OSError("stop here")))
+    with pytest.raises(OSError):
+        download.opener().open("https://drive.google.com/uc?id=1", timeout=1)
+    assert connected == [("142.250.1.1", 443)], connected                              # the pinned IP, so a second DNS answer cannot redirect it
+
+
+def test_it_falls_back_to_the_next_checked_address_like_a_plain_connection(monkeypatch):
+    """The first answer may be an IPv6 route this machine does not have: every checked address is tried in order, and none that was not checked."""
+    monkeypatch.setattr(download, "ALLOW_PRIVATE", False)
+    monkeypatch.setattr(download.socket, "getaddrinfo", lambda *a, **k: [(10, 1, 6, "", ("2607:f8b0:4005::1", 443, 0, 0)), (2, 1, 6, "", ("142.250.1.1", 443))])
+    tried = []
+    monkeypatch.setattr(download.socket, "create_connection", lambda addr, *a, **k: tried.append(addr[0]) or (_ for _ in ()).throw(OSError("unreachable")))
+    with pytest.raises(OSError):
+        download.opener().open("https://drive.google.com/uc?id=1", timeout=1)
+    assert tried == ["2607:f8b0:4005::1", "142.250.1.1"], tried
+
+
+def test_a_proxy_from_the_environment_is_never_used(monkeypatch):
+    """With HTTPS_PROXY set, urllib would hand the name to the proxy and the address check would not see where the connection really goes."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:9")
+    monkeypatch.setattr(download, "ALLOW_PRIVATE", False)
+    monkeypatch.setattr(download.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("142.250.1.1", 443))])
+    tried = []
+    monkeypatch.setattr(download.socket, "create_connection", lambda addr, *a, **k: tried.append(addr) or (_ for _ in ()).throw(OSError("stop")))
+    with pytest.raises(OSError):
+        download.opener().open("https://drive.google.com/uc?id=1", timeout=1)
+    assert tried == [("142.250.1.1", 443)], tried

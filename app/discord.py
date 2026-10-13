@@ -129,18 +129,27 @@ def rsvp_edit(mid: str, payload: dict) -> None:
     _api("PATCH", f"/channels/{settings.discord_channel}/messages/{mid}", payload)
 
 
+MAX_REACTION_PAGES = 20
+
+
 def rsvp_read(mid: str) -> dict[str, list[str]]:
     """status -> Discord ids that reacted with its emoji (the bot excluded). One call for the message (it carries the counts) and one per
     emoji somebody besides the bot used: the reaction-list route is rate-limited hard (429), so an idle announcement costs a single call.
-    ponytail: first 100 per emoji, paginate with `after` if a league outgrows that."""
+    More than 100 reactors of one emoji are read page by page with `after`, up to MAX_REACTION_PAGES pages (2,000 people)."""
     path = f"/channels/{settings.discord_channel}/messages/{mid}"
     used = {r["emoji"]["name"] for r in _api("GET", path).get("reactions", []) if r["count"] - r["me"] > 0}   # `me`: the bot's own reaction
     out = {}
     for e, st in RSVP.items():
         out[st] = []
         if e in used:
-            out[st] = [u["id"] for u in _api("GET", f"{path}/reactions/{urllib.parse.quote(e)}?limit=100") if not u.get("bot")]
-            time.sleep(0.5)
+            after = ""
+            for _ in range(MAX_REACTION_PAGES):
+                page = _api("GET", f"{path}/reactions/{urllib.parse.quote(e)}?limit=100{after}") or []
+                out[st] += [u["id"] for u in page if not u.get("bot")]
+                time.sleep(0.5)
+                if len(page) < 100:
+                    break
+                after = f"&after={page[-1]['id']}"   # Discord lists reactors by ascending id: the next page starts after the last one seen
     return out
 
 

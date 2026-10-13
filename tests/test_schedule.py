@@ -254,6 +254,26 @@ def test_rsvp_read_asks_only_for_emojis_somebody_used(monkeypatch):
     assert len(calls) == 2   # the message + ✅ only; ❌ is just the bot
 
 
+def test_rsvp_read_pages_through_more_than_a_hundred_reactions(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "discord_channel", "1")
+    monkeypatch.setattr(discord.time, "sleep", lambda s: None)
+    everyone = [{"id": str(1000 + i)} for i in range(230)] + [{"id": "9", "bot": True}]
+    everyone.sort(key=lambda u: int(u["id"]))                  # Discord lists reactors by ascending user id
+    asked = []
+
+    def fake(method, path, *a, **k):
+        if "/reactions/" not in path:
+            return {"reactions": [{"emoji": {"name": "✅"}, "count": 232, "me": True}]}
+        asked.append(path)
+        after = int(path.split("after=")[1]) if "after=" in path else 0
+        return [u for u in everyone if int(u["id"]) > after][:100]
+    monkeypatch.setattr(discord, "_api", fake)
+    got = discord.rsvp_read("m")["yes"]
+    assert sorted(got) == sorted(str(1000 + i) for i in range(230)) and len(set(got)) == 230   # nobody lost, nobody twice, the bot excluded
+    assert len(asked) == 3 and "after=" not in asked[0]       # 100 + 100 + 31 -> three calls, each one starting after the last id seen
+
+
 def test_announcement_layout(monkeypatch):
     from datetime import UTC, datetime
     from app import announcement
