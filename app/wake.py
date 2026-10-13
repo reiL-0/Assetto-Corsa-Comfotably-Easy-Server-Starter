@@ -22,6 +22,7 @@ start anything. Limited to MAX_PER_HOUR wakes and COOLDOWN seconds between two.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import socket
@@ -113,7 +114,7 @@ def _upstream(port: int, path: str) -> bytes:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
             body = r.read()
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):   # (InvalidURL is an HTTPException: a path with no leading slash or odd characters is an empty answer)
         return b""
     if len(_upstream_cache) > 200:   # /JSON|<guid> has one key per player that ever asked
         _upstream_cache.clear()
@@ -169,7 +170,7 @@ def _http_handler(server_id: int, ac_seen):
                     ctype = "application/json; charset=utf-8"
                     live = await asyncio.to_thread(_upstream, internal, "/INFO") if running else None
                     data = _dump(details(s, live)).encode()
-                elif running:   # the real acServer answers; only its own HTTP port number is swapped for ours in /INFO
+                elif running and path.startswith(("/INFO", "/JSON")):   # the real acServer answers (only what the lobby asks: this port has no login); its own HTTP port number is swapped for ours in /INFO
                     data = await asyncio.to_thread(_upstream, internal, path)
                     if path.startswith("/INFO") and data:
                         try:
