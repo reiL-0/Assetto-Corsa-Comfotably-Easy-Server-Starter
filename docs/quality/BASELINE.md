@@ -31,6 +31,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | GET | `/api/v1/championships/{championship_id}/members` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships/{championship_id}/members` | the site (leagues), the manager's UI |
 | DELETE | `/api/v1/championships/{championship_id}/members/{guid}` | the site (leagues), the manager's UI |
+| GET | `/api/v1/championships/{championship_id}/races` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/standings` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/suspensions` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships/{championship_id}/suspensions` | the site (leagues), the manager's UI |
