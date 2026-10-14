@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session
 
 from app import integrity, metrics, resourcelog, schedule, servers, wake
+from app import racecontrol as race_control
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
@@ -37,6 +38,7 @@ async def lifespan(_app: FastAPI):
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     ticker = asyncio.create_task(schedule.run_forever())
+    judging = asyncio.create_task(race_control.monitor_forever())   # the virtual safety car: judges the drivers when its grace ends
     waking = asyncio.create_task(wake.run_forever())
     sampling = asyncio.create_task(resourcelog.run_forever())   # a plain log file of CPU/RAM/steal per server, outside the pages
     retention_stop = asyncio.Event()
@@ -45,10 +47,11 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         ticker.cancel()
+        judging.cancel()
         waking.cancel()
         sampling.cancel()
         retention_stop.set()
-        await asyncio.gather(ticker, waking, sampling, return_exceptions=True)
+        await asyncio.gather(ticker, judging, waking, sampling, return_exceptions=True)
         await retention
         if not await asyncio.to_thread(metrics.flush, 8):
             log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])

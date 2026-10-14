@@ -37,8 +37,13 @@ def render_ini(sections: dict[str, dict[str, Scalar]]) -> str:
     return buf.getvalue()
 
 
-def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool) -> str:
-    """server_cfg.ini with the allocated ports `p` merged into [SERVER] (user values win)."""
+# acServer's own penalties, off: with the OPR hub (CSP) every penalty is ours, so the game must not add any of its own. No master switch exists: START_RULE 0 = the car is
+# locked until the start (no jump-start penalty), RACE_GAS_PENALTY_DISABLED 1 = a cut only gets logged (no "lift the gas" penalty), ALLOWED_TYRES_OUT -1 = no cut limit.
+GAME_PENALTIES_OFF = {"START_RULE": 0, "RACE_GAS_PENALTY_DISABLED": 1, "ALLOWED_TYRES_OUT": -1}
+
+
+def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool, game_penalties_off: bool = False) -> str:
+    """server_cfg.ini with the allocated ports `p` merged into [SERVER] (user values win, except the game's own penalties when `game_penalties_off`: those are always off)."""
     sections = {name: dict(kv) for name, kv in config.items()}
     server = sections.setdefault("SERVER", {})
     server.setdefault("TCP_PORT", p["tcp"])
@@ -50,6 +55,8 @@ def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welc
     else:
         server.pop("WELCOME_MESSAGE", None)
     server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
+    if game_penalties_off:
+        server.update(GAME_PENALTIES_OFF)
     return render_ini(sections)
 
 
