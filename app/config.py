@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # `csp_hub_version` goes in the script URL: CSP caches a script by URL, so it is raised whenever the script changes. ACM_CSP_HUB=false turns it off everywhere.
     csp_hub: bool = True
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
-    csp_hub_version: str = "8"
+    csp_hub_version: str = "9"
 
     host: str = "127.0.0.1"
     port: int = 8080
