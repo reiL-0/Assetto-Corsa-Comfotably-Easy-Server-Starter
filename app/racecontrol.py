@@ -2,7 +2,7 @@
 
   GET    /servers/{id}/race-state               what the hub reads (the website serves it as /api/csp/state): the website's token (role reporter) and everyone above
   POST   /servers/{id}/race-control/pit         {car_id, name, pit}: the hub of a car says whether it is in the pit lane (a VSC exemption; reporter and above)
-  POST   /servers/{id}/race-control             {flag: green|yellow|vsc|white|checkered, ...}: the director (steward). A yellow is only a flag; a `vsc` needs pace_kmh and may carry
+  POST   /servers/{id}/race-control             {flag: green|yellow|vsc|fcy|white|checkered, ...}: the director (steward). A yellow is only a flag; a `vsc` or `fcy` needs pace_kmh and may carry
                                                 grace_s (10), tolerance_kmh (5) and penalty {kind: none|pits, laps}
   POST   /servers/{id}/race-control/penalties   {car_id, laps}: a drive-through to serve, the game enforces it (steward)
   DELETE /servers/{id}/race-control/penalties/{pid}
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Literal
 
@@ -33,6 +34,7 @@ state_router = APIRouter(prefix="/servers/{server_id}", tags=["race-control"], d
 control_router = APIRouter(prefix="/servers/{server_id}/race-control", tags=["race-control"], dependencies=[Depends(require("steward"))])
 
 SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARILLA: sin adelantar", "white": "BANDERA BLANCA: última vuelta", "checkered": "BANDERA DE CUADROS"}
+CHAT_DELAY = 2.0       # s; the hub asks every 1 s (+ the website's 1 s cache)
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
 
 
@@ -42,7 +44,7 @@ class PenaltyCfg(BaseModel):
 
 
 class FlagIn(BaseModel):
-    flag: Literal["green", "yellow", "vsc", "white", "checkered"]
+    flag: Literal["green", "yellow", "vsc", "fcy", "white", "checkered"]
     pace_kmh: int | None = Field(default=None, ge=PACE_MIN, le=PACE_MAX)   # a VSC only (a yellow is only a flag)
     grace_s: int = Field(default=GRACE_DEFAULT, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves
     tolerance_kmh: int = Field(default=TOL_DEFAULT, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends
@@ -67,6 +69,20 @@ def _live(server_id: int):
 
 def _chat(inst, text: str) -> None:
     inst.acsp.send(acsp.encode_broadcast_chat(text))
+
+
+def _say_later(inst, text: str) -> None:
+    """The chat line of a flag change goes out CHAT_DELAY s late: the hub of every client learns the flag by asking (at most POLL + the website's 1 s cache later), and the yellow on
+    screen must not come after the announcement. The state itself changes at once."""
+    def go() -> None:
+        try:
+            _chat(inst, text)
+        except Exception:   # the server may have stopped meanwhile: a lost announcement is not worth a traceback in a timer thread
+            log.debug("flag announcement not sent", exc_info=True)
+
+    t = threading.Timer(CHAT_DELAY, go)   # the API runs in worker threads: no event loop here
+    t.daemon = True
+    t.start()
 
 
 @state_router.get("/race-state")
@@ -106,11 +122,12 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
         rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump())
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    if body.flag == "vsc":
+    if body.flag in ("vsc", "fcy"):
         pen = f" · si sigues por encima: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
-        _chat(inst, f"VIRTUAL SAFETY CAR: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}")
+        name = "VIRTUAL SAFETY CAR" if body.flag == "vsc" else "FULL COURSE YELLOW"
+        _say_later(inst, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}")
     else:
-        _chat(inst, SAY[body.flag])
+        _say_later(inst, SAY[body.flag])
     return rc.snapshot()
 
 

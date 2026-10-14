@@ -4,7 +4,8 @@ Plain state, no I/O: `RaceControl` is what the director (a steward in Control AC
 website's /api/csp/state). The manager is the only authority: the client shows the flag, limits its pace and sets the game's own penalty; a modified client can ignore it, so nothing
 here is a sanction by itself (the penalties of the result stay in app/penalties.py).
 
-A yellow flag is only a flag. A VSC is the only thing that limits speed: every driver first gets `grace_s` seconds (10 by default) to slow to `pace_kmh` by themselves; when the grace ends,
+A yellow flag is only a flag. A VSC (power cut smoothly by the hub from the start, throttle only, no brake) and an FCY (full course yellow: controls untouched during the grace, braked gradually
+after it) are the two things that limit speed, and are judged the same way: every driver first gets `grace_s` seconds (10 by default) to slow to `pace_kmh` by themselves; when the grace ends,
 anybody still over `pace_kmh + tolerance_kmh` -- judged by the MEDIAN of the manager's own speed samples of the last 1.5 s of the grace (ACSP, ~5 Hz, so one lost packet does not decide it)
 -- gets the penalty set for this VSC (none or a drive-through of N laps), once per VSC; the hub then brings every car down to the pace gradually and keeps it there. A car the hub says
 is in the pit lane is exempt: only a "yes" counts and it lasts a few seconds, so nobody can cancel another driver's exemption (the hub is untrusted: a liar only escapes the penalty, the
@@ -26,7 +27,8 @@ _penalty_ids = itertools.count(int(time.time()))
 _vsc_ids = itertools.count(int(time.time()))
 _lock = threading.RLock()   # the API runs in worker threads and the monitor in the event loop: every change and read of a state goes through it
 
-FLAGS = ("green", "yellow", "vsc", "white", "checkered")
+FLAGS = ("green", "yellow", "vsc", "fcy", "white", "checkered")
+SLOWING = ("vsc", "fcy")   # the flags with a pace, a grace and a judgement: a VSC cuts the power smoothly from the start, an FCY (full course yellow) brakes the car once the grace is over
 PACE_MIN, PACE_MAX = 30, 250     # km/h a VSC may ask for
 GRACE_MIN, GRACE_MAX, GRACE_DEFAULT = 3, 60, 10
 TOL_MAX, TOL_DEFAULT = 30, 5     # km/h over the pace that are still forgiven when the grace ends
@@ -60,7 +62,7 @@ class RaceControl:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
         now = time.time() if now is None else now
         pen = {"kind": "none", "laps": 0}
-        if flag == "vsc":   # validate BEFORE touching the state: a refused VSC leaves everything as it was
+        if flag in SLOWING:   # validate BEFORE touching the state: a refused VSC leaves everything as it was
             if pace_kmh is None or not PACE_MIN <= pace_kmh <= PACE_MAX:
                 raise ValueError(f"a VSC needs a pace between {PACE_MIN} and {PACE_MAX} km/h")
             if not GRACE_MIN <= grace_s <= GRACE_MAX:
@@ -74,7 +76,7 @@ class RaceControl:
         with _lock:
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
-            if flag == "vsc":
+            if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
             self._bump()
@@ -106,7 +108,7 @@ class RaceControl:
     def sample(self, speeds: dict[int, float], now: float) -> None:
         """Speeds (km/h) of the cars now. Only the last seconds of the grace are kept."""
         with _lock:
-            if self.flag != "vsc" or self.evaluated:
+            if self.flag not in SLOWING or self.evaluated:
                 return
             for car_id, v in speeds.items():
                 d = self._samples.setdefault(car_id, deque(maxlen=64))
@@ -114,13 +116,13 @@ class RaceControl:
 
     def grace_left(self, now: float | None = None) -> int:
         with _lock:
-            if self.flag != "vsc":
+            if self.flag not in SLOWING:
                 return 0
             return max(0, math.ceil(self.grace_end - (time.time() if now is None else now)))
 
     def due(self, now: float) -> bool:
         with _lock:
-            return self.flag == "vsc" and not self.evaluated and now >= self.grace_end
+            return self.flag in SLOWING and not self.evaluated and now >= self.grace_end
 
     def evaluate(self, now: float) -> list[dict]:
         """When the grace is over: who was still over the pace (see the module docstring). Marks the VSC judged (once); returns [{car_id, speed_kmh}], the penalty is already listed."""
@@ -151,8 +153,8 @@ class RaceControl:
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
         with _lock:
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties),
-                    "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag == "vsc" else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag == "vsc" else None, "violations": list(self.violations), "exempt": list(self.exempt)}
+                    "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt)}
 
 
 _states: dict[int, RaceControl] = {}
@@ -187,7 +189,7 @@ def tick(now: float, live) -> list[tuple[int, list[dict]]]:
     for server_id, cars in live:
         with _lock:
             rc = _states.get(server_id)
-        if not rc or rc.flag != "vsc" or rc.evaluated:
+        if not rc or rc.flag not in SLOWING or rc.evaluated:
             continue
         rc.sample({i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}, now)
         if rc.due(now):

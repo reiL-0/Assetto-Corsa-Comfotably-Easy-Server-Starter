@@ -9,7 +9,10 @@ from conftest import ADMIN
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+import time
+
 from app import csp, supervisor
+from app import racecontrol as rcmod
 from app.auth import _sha
 from app.config import settings
 from app.db import engine
@@ -45,8 +48,16 @@ def _client(role):
     return TestClient(app, headers={"Authorization": f"Bearer {raw}"})
 
 
+def _wait(sent, n, timeout=2.0):
+    """The chat line of a flag change goes out late (rcmod.CHAT_DELAY, on a timer thread): wait for it."""
+    end = time.time() + timeout
+    while len(sent) < n and time.time() < end:
+        time.sleep(0.01)
+    return len(sent)
+
+
 @pytest.fixture
-def live():
+def live(monkeypatch):
     """A server row with a fake running instance whose ACSP client records what it would send."""
     sid = api.post(f"{V}/servers", json={"name": "rc"}).json()["id"]
     c = acsp.ACSPClient(sid)
@@ -54,6 +65,7 @@ def live():
     c.cars[3] = {"driver_name": "Ana", "driver_guid": "76561190000000001"}
     sent = []
     c.send = sent.append
+    monkeypatch.setattr(rcmod, "CHAT_DELAY", 0.05)
     supervisor._instances[sid] = _Inst(c)
     yield sid, c, sent
     supervisor._instances.pop(sid, None)
@@ -113,7 +125,7 @@ def test_the_director_sets_the_flag_and_the_chat_says_it(live):
     sid, c, sent = live
     steward = _client("steward")
     r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "yellow", "pace_kmh": 60})   # a pace on a yellow is ignored: it is only a flag
-    assert r.status_code == 200 and r.json()["flag"] == "yellow" and r.json()["pace_kmh"] is None and len(sent) == 1
+    assert r.status_code == 200 and r.json()["flag"] == "yellow" and r.json()["pace_kmh"] is None and _wait(sent, 1) == 1
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "yellow"
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "red"}).status_code == 422
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "vsc"}).status_code == 422   # a VSC needs its pace
@@ -231,7 +243,7 @@ def test_the_vsc_through_the_api_and_the_pit_report(live):
     body = {"flag": "vsc", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
     r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
     assert r.status_code == 200 and r.json()["flag"] == "vsc" and r.json()["pace_kmh"] == 60 and r.json()["grace_left"] in (4, 5) and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 2}
-    assert len(sent) == 1
+    assert _wait(sent, 1) == 1
     pit = f"{V}/servers/{sid}/race-control/pit"
     assert hub.post(pit, json={"car_id": 3, "name": "ana", "pit": False}).status_code == 204
     assert hub.post(pit, json={"car_id": 3, "name": "Beto", "pit": True}).status_code == 409, "the name must be the driver's"
@@ -256,3 +268,19 @@ def test_the_games_own_penalties_are_off_whenever_the_hub_is_on(monkeypatch):
     assert "ALLOWED_TYRES_OUT=-1" in text and "START_RULE=0" in text and "RACE_GAS_PENALTY_DISABLED=1" in text, "the file a server really starts with"
     monkeypatch.setattr(settings, "csp_hub", False)   # the kill switch also gives the game's own penalties back
     assert "ALLOWED_TYRES_OUT=2" in api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+
+
+def test_the_chat_line_of_a_flag_goes_out_after_the_state_changes_and_an_fcy_is_a_pace_flag_too(live, monkeypatch):
+    sid, c, sent = live
+    monkeypatch.setattr(rcmod, "CHAT_DELAY", 0.3)
+    steward = _client("steward")
+    body = {"flag": "fcy", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
+    r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
+    assert r.json()["flag"] == "fcy" and r.json()["pace_kmh"] == 60 and r.json()["vsc_id"] and r.json()["grace_left"] in (4, 5)
+    assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "fcy" and sent == [], "the state is already there, the announcement is not"
+    assert _wait(sent, 1) == 1
+    assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"}).status_code == 422, "an FCY needs its pace like a VSC"
+    rc = RaceControl()
+    rc.set_flag("fcy", 60, 5, 5, {"kind": "pits", "laps": 1}, now=100.0)
+    rc.sample({1: 120.0}, 104.0); rc.sample({1: 120.0}, 104.3); rc.sample({1: 120.0}, 104.6)
+    assert rc.due(105.0) and [v["car_id"] for v in rc.evaluate(105.0)] == [1] and rc.penalties, "an FCY is judged like a VSC"
