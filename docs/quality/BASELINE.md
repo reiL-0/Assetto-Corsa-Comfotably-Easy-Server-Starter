@@ -78,6 +78,8 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | GET | `/api/v1/servers/{server_id}/logs` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/next_session` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| PATCH | `/api/v1/servers/{server_id}/race-control/nascar` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/nascar` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/penalties` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | DELETE | `/api/v1/servers/{server_id}/race-control/penalties/{penalty_id}` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/pit` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

@@ -131,6 +131,7 @@ class Nascar:
 
     def _chequered(self, text: str) -> list[tuple]:
         self.phase = DRAINING
+        self.flag = "checkered"
         return [("say", text), ("flag", "checkered"), ("finish",)]
 
     def _ot_failed(self, why: str) -> list[tuple]:

@@ -21,6 +21,8 @@ import threading
 import time
 from collections import deque
 
+from app.live.nascar import Nascar, STAGES_DEFAULT
+
 # Penalty and VSC ids only ever rise, across sessions and manager restarts (they start at the clock): the hub applies each penalty id once, and a client that stays connected through a
 # session change must never see an id it has already used come back for something else.
 _penalty_ids = itertools.count(int(time.time()))
@@ -45,6 +47,9 @@ class RaceControl:
         self.penalties: list[dict] = []
         self.rev, self.ts = 0, time.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
+        self.nascar: Nascar | None = None
+        self.finish_wait: set[int] | None = None
+        self.finish_deadline = 0.0
         self._clear_vsc()
 
     def _clear_vsc(self) -> None:
@@ -57,7 +62,8 @@ class RaceControl:
         self.rev += 1
         self.ts = time.time()
 
-    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None) -> None:
+    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director") -> list[tuple]:
+        """Return NASCAR actions for the caller to execute after releasing the lock."""
         if flag not in FLAGS:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
         now = time.time() if now is None else now
@@ -79,6 +85,24 @@ class RaceControl:
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
+            actions = self.nascar.on_flag(flag) if self.nascar and source != "nascar" else []
+            self._bump()
+            return actions
+
+    def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None) -> None:
+        with _lock:
+            if total == 0:
+                self.nascar = None
+                self.finish_wait = None
+                self.finish_deadline = 0.0
+            elif self.nascar:
+                if stages is not None or shares is not None:
+                    raise ValueError("stages and shares are frozen while armed")
+                self.nascar.set_total(total)
+            else:
+                motor = Nascar(total, shares=shares if shares is not None else STAGES_DEFAULT, ends=stages)
+                motor.on_flag(self.flag)
+                self.nascar = motor
             self._bump()
 
     def add_penalty(self, car_id: int, laps: int) -> dict:
@@ -154,7 +178,7 @@ class RaceControl:
         with _lock:
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties),
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt)}
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": self.nascar.snapshot() if self.nascar else None}
 
 
 _states: dict[int, RaceControl] = {}
@@ -195,3 +219,19 @@ def tick(now: float, live) -> list[tuple[int, list[dict]]]:
         if rc.due(now):
             done.append((server_id, rc.evaluate(now)))
     return done
+
+
+def on_lap(server_id: int, leader_laps: int, car_id: int | None = None) -> tuple[RaceControl | None, list[tuple]]:
+    """Feed only the leaderboard maximum; a crossing also drains a waiting finish."""
+    with _lock:
+        rc = _states.get(server_id)
+        if not rc or not rc.nascar:
+            return rc, []
+        if rc.finish_wait is not None and car_id in rc.finish_wait:
+            rc.finish_wait.remove(car_id)
+            rc._bump()
+        before = rc.nascar.snapshot()
+        actions = rc.nascar.on_leader_lap(leader_laps)
+        if before != rc.nascar.snapshot():
+            rc._bump()
+        return rc, actions

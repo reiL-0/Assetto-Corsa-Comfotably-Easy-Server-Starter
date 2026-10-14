@@ -6,6 +6,11 @@
                                                 grace_s (10), tolerance_kmh (5) and penalty {kind: none|pits, laps}
   POST   /servers/{id}/race-control/penalties   {car_id, laps}: a drive-through to serve, the game enforces it (steward)
   DELETE /servers/{id}/race-control/penalties/{pid}
+  POST/PATCH /servers/{id}/race-control/nascar {total, stages?: cumulative ends, shares?: positive weights} (steward): arm; total=0 disarms.
+An armed engine accepts only total changes through set_total; explicit stages reject distance changes. Stage definitions stay frozen otherwise.
+The leaderboard maximum feeds NASCAR; director flags feed it once. Engine flags never reenter it. At the finish connected cars cross once more
+(the triggering car has already crossed), or 90 s elapse; the monitor calls done and sends NEXT_SESSION once. race-state adds nascar (snapshot or null).
+Everything is in memory in one process; session_info preserves the engine, new_session clears it. Every state change raises rev.
 Each change is also said in the chat, so drivers without the hub see it. The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
 lifespan) watches a VSC: it samples the speeds and judges the drivers when the grace ends.
 """
@@ -25,7 +30,8 @@ from app import supervisor
 from app.auth import require, require_any
 from app.db import SessionDep
 from app.live import acsp
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, state_of, tick
+from app.live.nascar import DRAINING
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -91,7 +97,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": []}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -119,9 +125,10 @@ def _control(server_id: int, sess: SessionDep):
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
     try:
-        rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump())
+        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump())
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    nascar_actions(server_id, rc, actions)
     if body.flag in ("vsc", "fcy"):
         pen = f" · si sigues por encima: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
         name = "VIRTUAL SAFETY CAR" if body.flag == "vsc" else "FULL COURSE YELLOW"
@@ -129,6 +136,57 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     else:
         _say_later(inst, SAY[body.flag])
     return rc.snapshot()
+
+
+class NascarIn(BaseModel):
+    total: int = Field(ge=0)
+    stages: list[int] | None = Field(default=None, min_length=1)
+    shares: list[float] | None = Field(default=None, min_length=1)
+
+
+@control_router.post("/nascar")
+@control_router.patch("/nascar")
+def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
+    _, rc = _control(server_id, sess)
+    if body.shares is not None and any(not 0 < v < float("inf") for v in body.shares):
+        raise HTTPException(422, "shares must be finite and positive")
+    try:
+        rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return rc.snapshot()
+
+
+def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | None = None) -> None:
+    inst = _live(server_id)
+    if not inst:
+        return
+    for action in actions:
+        with _lock:
+            if state_of(server_id, True, inst.acsp.session) is not rc or not rc.nascar:
+                return
+            if action[0] == "flag" and rc.nascar.flag == action[1]:
+                rc.set_flag(action[1], source="nascar")
+            elif action[0] == "finish" and rc.nascar.phase == DRAINING and rc.finish_wait is None:
+                rc.finish_wait = {i for i in inst.acsp.cars if i != crossing}
+                rc.finish_deadline = time.time() + 90
+                rc._bump()
+        if action[0] == "say":
+            _say_later(inst, action[1])
+
+
+def finish_nascar(now: float) -> None:
+    for inst in supervisor.live():
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        with _lock:
+            if not rc or not rc.nascar or rc.finish_wait is None:
+                continue
+            if rc.finish_wait & inst.acsp.cars.keys() and now < rc.finish_deadline:
+                continue
+            rc.finish_wait = None
+            rc.nascar.done()
+            rc._bump()
+        inst.acsp.send(acsp.encode_next_session())
 
 
 @control_router.post("/penalties", status_code=201)
@@ -167,6 +225,7 @@ async def monitor_forever() -> None:
         try:
             now = time.time()
             live = [(i.server_id, i.acsp.cars) for i in supervisor.live()]
+            finish_nascar(now)
             for server_id, violations in tick(now, live):
                 announce(server_id, violations)
         except Exception:   # a bug here must not stop the loop: the next tick tries again

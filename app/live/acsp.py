@@ -354,7 +354,12 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.board.apply(event)
         self._record(event)
         if t in ("new_session", "session_info"):
-            self.session = event  # drivers stay connected across sessions; keep their guid/name
+            if t == "session_info":
+                self.session.update(event)
+            else:
+                self.session = event
+            from app.live.racecontrol import state_of
+            state_of(self.server_id, True, self.session)
             if event.get("session_type") == 2:
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
@@ -362,6 +367,13 @@ class ACSPClient(asyncio.DatagramProtocol):
             if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
+        elif t == "lap_completed":
+            from app.live.racecontrol import on_lap
+            from app.racecontrol import nascar_actions  # adapter owns ACSP I/O, like timeline above
+            leader_laps = max((row["laps"] for row in event["leaderboard"]), default=0)
+            rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
+            if actions:
+                nascar_actions(self.server_id, rc, actions, event["car_id"])
         elif t == "new_connection":
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
