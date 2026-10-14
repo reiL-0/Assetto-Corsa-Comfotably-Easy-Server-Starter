@@ -16,6 +16,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from app import supervisor
+from app import csp
 from app.live import cspweather
 from app.auth import require
 from app.config import settings
@@ -83,7 +84,7 @@ _render_ini = ini_generator.render_ini
 
 def render_server_cfg(s: Server) -> str:
     """server_cfg.ini with allocated ports merged into [SERVER] (user values win)."""
-    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or s.csp_extra.strip()))
+    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra).strip()))
 
 
 def render_entry_list(s: Server) -> str:

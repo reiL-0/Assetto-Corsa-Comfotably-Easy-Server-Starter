@@ -22,6 +22,8 @@ from app.live.acsm import router as acsm_router
 from app.metrics import router as metrics_router
 from app.requirements import router as requirements_router
 from app.penalties import router as penalties_router
+from app.racecontrol import control_router as race_control_router
+from app.racecontrol import state_router as race_state_router
 from app.servers import router as servers_router
 from app.stewards.api import report_router as stewards_report_router
 from app.stewards.api import router as stewards_router
@@ -46,6 +48,8 @@ api_router.include_router(metrics_router)  # steward reads
 api_router.include_router(bans_router)  # stewards kick and ban by Steam ID (its own steward guard)
 api_router.include_router(penalties_router)  # stewards write penalties (its own steward guard)
 api_router.include_router(stewards_router, dependencies=[Depends(guard("steward"))])  # steward reads incidents, admin switches the engine
+api_router.include_router(race_state_router)  # the CSP hub reads the race state: role reporter and above (its own guard)
+api_router.include_router(race_control_router)  # the director's flag and drive-throughs: steward (its own guard)
 api_router.include_router(stewards_report_router)  # the website files track-limit reports: role `reporter` (its own guard), nothing else
 api_router.include_router(events_router, dependencies=[Depends(guard("steward"))])  # carries passwords: steward reads, admin writes
 api_router.include_router(schedule_router, dependencies=[Depends(guard("steward"))])  # steward reads, admin writes
