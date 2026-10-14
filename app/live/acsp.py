@@ -8,12 +8,15 @@ bytes — the server serializes its wchar_t buffers naively over the wire.
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 import time
 from collections import deque
 
 from app import metrics
 from app.live.board import LiveBoard
+
+log = logging.getLogger("acmanager.acsp")
 
 TELEMETRY_TTL = 2.0  # s a sample stays in the live map after the app stops sending
 TELEMETRY_MIN_INTERVAL = 0.05  # s; the app sends ~8 Hz
@@ -354,12 +357,21 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.board.apply(event)
         self._record(event)
         if t in ("new_session", "session_info"):
-            if t == "session_info":
-                self.session.update(event)
-            else:
-                self.session = event
-            from app.live.racecontrol import state_of
-            state_of(self.server_id, True, self.session)
+            from app import supervisor   # late: supervisor owns this client and the applied preset snapshot
+            from app.live.racecontrol import _lock, state_of
+            inst = supervisor.get(self.server_id)
+            nascar = getattr(inst, "nascar_config", None) if t == "new_session" and event.get("session_type") == 3 else None
+            with _lock:
+                if t == "session_info":
+                    self.session.update(event)
+                else:
+                    self.session = event
+                rc = state_of(self.server_id, True, self.session, create=nascar is not None)
+                if nascar is not None:
+                    try:
+                        rc.configure_nascar(nascar["total"], None, tuple(nascar["shares"]) if nascar.get("shares") is not None else None)
+                    except (ValueError, OverflowError) as e:
+                        log.warning("NASCAR preset could not arm server %s: %s", self.server_id, e)
             if event.get("session_type") == 2:
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)

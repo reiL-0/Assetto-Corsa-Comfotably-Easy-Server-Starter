@@ -25,6 +25,9 @@ import math
 CAUTION = ("yellow", "vsc", "fcy")
 RACING, BREAK, OT_WAIT, OT_RUN, DRAINING, DONE = "racing", "break", "ot_wait", "ot_run", "draining", "done"
 STAGES_DEFAULT = (30, 45, 25)
+MAX_TOTAL = 1000
+MAX_SHARES = 6
+MAX_SHARE = 1000
 WINDOW_PCT = (2, 1)   # % of the stage's laps: with no caution deployed in it yet / with one or more
 
 
@@ -39,9 +42,14 @@ def stage_ends(total: int, shares: tuple[float, ...] = STAGES_DEFAULT) -> list[i
 
 class Nascar:
     def __init__(self, total: int, shares: tuple[float, ...] = STAGES_DEFAULT, ends: list[int] | None = None, ot_laps: int = 2, ot_max: int = 3) -> None:
-        if total < 2 or (ends and (list(ends) != sorted(set(ends)) or ends[-1] != total or ends[0] < 1)):
+        if type(total) is not int or not 2 <= total <= MAX_TOTAL:
+            raise ValueError(f"total must be an integer between 2 and {MAX_TOTAL}")
+        shares = tuple(shares)
+        if not shares or len(shares) > MAX_SHARES or any(not 0 < s <= MAX_SHARE or not math.isfinite(s) for s in shares):
+            raise ValueError(f"shares must contain 1 to {MAX_SHARES} finite weights greater than 0 and at most {MAX_SHARE}")
+        if ends and (list(ends) != sorted(set(ends)) or ends[-1] != total or ends[0] < 1):
             raise ValueError("a race needs at least 2 laps and stage ends that rise up to the total")
-        self.total, self.shares, self.fixed_ends = total, tuple(shares), list(ends) if ends else None
+        self.total, self.shares, self.fixed_ends = total, shares, list(ends) if ends else None
         self.ends = self.fixed_ends or stage_ends(total, self.shares)
         self.ot_laps, self.ot_max = ot_laps, ot_max
         self.phase, self.stage, self.laps, self.flag = RACING, 0, 0, "green"
@@ -58,8 +66,10 @@ class Nascar:
 
     def set_total(self, total: int) -> None:
         """Change the distance while racing (stages already over keep their end, also the one of a break that has just started). It cannot go under the laps already run."""
+        if type(total) is not int or not 2 <= total <= MAX_TOTAL:
+            raise ValueError(f"total must be an integer between 2 and {MAX_TOTAL}")
         laps = self.laps
-        if total <= laps or self.phase in (DRAINING, DONE) or total < 2:
+        if total <= laps or self.phase in (DRAINING, DONE):
             raise ValueError("the distance must be over the laps already run and the race must still be on")
         if self.fixed_ends:
             raise ValueError("explicit stage ends: change them with the stages, not the distance")

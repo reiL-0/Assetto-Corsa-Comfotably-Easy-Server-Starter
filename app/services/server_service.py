@@ -133,6 +133,7 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
             http_port=p["http_internal"],
             cpu_percent=s.cpu_limit,
             mem_mb=s.mem_limit_mb,
+            nascar_config=(s.session or {}).get("nascar"),
         )
     except RuntimeError as e:
         raise ServerError(409, str(e)) from e
@@ -224,6 +225,9 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     sess.add(s)
     sess.commit()
     sess.refresh(s)
+    inst = supervisor.get(server_id)
+    if inst:
+        inst.nascar_config = (s.session or {}).get("nascar")
     result = ApplyResult()
     if body.restart:
         try:
@@ -255,6 +259,7 @@ async def adopt_running(sess: Session) -> int:
         inst = await supervisor.adopt(
             s.id, Path(settings.data_dir) / "instances" / str(s.id),
             acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http_internal"],
+            nascar_config=(s.session or {}).get("nascar"),
         )
         if inst:
             inst.set_weather_plan(s.weather_plan, s.config)

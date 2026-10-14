@@ -5,10 +5,12 @@ Pure data (no I/O, no manager state). Moved out of `app/servers.py` unchanged; `
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.live.nascar import MAX_SHARE, MAX_SHARES, MAX_TOTAL
 
 Scalar = str | int | float | bool
 
@@ -107,6 +109,11 @@ class EntryIn(BaseModel):
     spectator: bool = False
 
 
+class NascarSessionIn(BaseModel):
+    total: int = Field(ge=2, le=MAX_TOTAL)
+    shares: list[Annotated[float, Field(gt=0, le=MAX_SHARE, allow_inf_nan=False)]] | None = Field(default=None, min_length=1, max_length=MAX_SHARES)
+
+
 class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
@@ -126,6 +133,7 @@ class SessionIn(BaseModel):
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
     race_min: int | None = Field(default=None, ge=0, le=1440)  # a timed race (endurance) instead of laps; not both
+    nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)

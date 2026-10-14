@@ -10,7 +10,7 @@
 An armed engine accepts only total changes through set_total; explicit stages reject distance changes. Stage definitions stay frozen otherwise.
 The leaderboard maximum feeds NASCAR; director flags feed it once. Engine flags never reenter it. At the finish connected cars cross once more
 (the triggering car has already crossed), or 90 s elapse; the monitor calls done and sends NEXT_SESSION once. race-state adds nascar (snapshot or null).
-Everything is in memory in one process; session_info preserves the engine, new_session clears it. Every state change raises rev.
+Everything is in memory in one process; session_info preserves the engine, new_session resets it (a race with a preset's nascar block arms a fresh engine). Every state change raises rev.
 Each change is also said in the chat, so drivers without the hub see it. The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
 lifespan) watches a VSC: it samples the speeds and judges the drivers when the grace ends.
 """
@@ -21,7 +21,7 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -30,7 +30,7 @@ from app import supervisor
 from app.auth import require, require_any
 from app.db import SessionDep
 from app.live import acsp
-from app.live.nascar import DRAINING
+from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, state_of, tick
 from app.servers import _get
 
@@ -139,17 +139,15 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
 
 
 class NascarIn(BaseModel):
-    total: int = Field(ge=0)
+    total: int = Field(ge=0, le=MAX_TOTAL)
     stages: list[int] | None = Field(default=None, min_length=1)
-    shares: list[float] | None = Field(default=None, min_length=1)
+    shares: list[Annotated[float, Field(gt=0, le=MAX_SHARE, allow_inf_nan=False)]] | None = Field(default=None, min_length=1, max_length=MAX_SHARES)
 
 
 @control_router.post("/nascar")
 @control_router.patch("/nascar")
 def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     _, rc = _control(server_id, sess)
-    if body.shares is not None and any(not 0 < v < float("inf") for v in body.shares):
-        raise HTTPException(422, "shares must be finite and positive")
     try:
         rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None)
     except ValueError as e:

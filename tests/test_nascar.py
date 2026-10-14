@@ -27,6 +27,37 @@ def test_stages_split_by_percentage_and_the_last_one_ends_at_the_total():
         Nascar(70, ends=[40, 30, 70])
 
 
+@pytest.mark.parametrize('total', [float('nan'), 70.5, True, 1001, 10**400])
+@pytest.mark.parametrize('shares', [(1,), (30, 45, 25)])
+def test_invalid_distance_raises_value_error_without_changing_the_engine(total, shares):
+    with pytest.raises(ValueError):
+        Nascar(total, shares=shares)
+    n = Nascar(70, shares=shares)
+    before = n.snapshot()
+    ends_before = n.ends.copy()
+    with pytest.raises(ValueError):
+        n.set_total(total)
+    assert n.snapshot() == before
+    assert n.ends == ends_before
+
+
+@pytest.mark.parametrize('shares', [
+    (), (1,) * 7, (0, 1), (-1, 1), (1001, 1), (1e308, 1), (10**400, 1),
+    (float('inf'), 1), (float('-inf'), 1), (float('nan'), 1),
+])
+@pytest.mark.parametrize('ends', [None, [20, 70]])
+def test_invalid_shares_raise_value_error_even_with_explicit_stages(shares, ends):
+    with pytest.raises(ValueError):
+        Nascar(70, shares, ends=ends)
+
+
+def test_upper_limits_are_accepted_and_pending_stages_can_be_recomputed():
+    n = Nascar(70, (1000,) * 6)
+    n.set_total(1000)
+    assert n.ends == [167, 333, 500, 667, 833, 1000]
+    assert Nascar(1000, (1000,) * 6).ends == n.ends
+
+
 def test_a_stage_ends_under_green_with_a_break_caution_and_the_director_restarts_it():
     n = Nascar(70)
     out = run_to(n, 21)

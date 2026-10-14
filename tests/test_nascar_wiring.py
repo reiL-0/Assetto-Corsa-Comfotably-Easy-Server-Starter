@@ -1,12 +1,258 @@
 """NASCAR manager wiring, with isolated UDP, chat and clock."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
+from sqlmodel import Session
 
-from app import racecontrol as adapter
+from app import events, servers, racecontrol as adapter
+from app.config import settings
+from app.db import engine
 from app.live import acsp, racecontrol as live_rc
 from app.live.board import Driver
+from app.models import Event, Server
+from app.schemas.servers import ServerIn, SessionIn
+from app.services import server_service
 from tests.test_racecontrol import live, api, V, _client
+
+
+SESSION = {'name': 'Oval', 'track': 'oval', 'cars': ['stockcar'], 'race_min': 1440, 'restart': False}
+
+
+@pytest.fixture
+def session_events(monkeypatch):
+    from app import timeline
+    from app.stewards import engine as stewards_engine
+    with Session(engine) as sess:
+        sid = servers.create(ServerIn(name='NASCAR'), sess).id
+    client = acsp.ACSPClient(sid)
+    client.session = {'session_index': 0}
+    sent = []
+    monkeypatch.setattr(client, 'send', sent.append)
+    monkeypatch.setitem(adapter.supervisor._instances, sid, SimpleNamespace(running=True, acsp=client, nascar_config=None))
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    monkeypatch.setattr(timeline, 'on_session_event', lambda *args: None)
+    monkeypatch.setattr(stewards_engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(server_service, 'check_content', lambda body, cars: {car: [] for car in cars})
+    yield sid, client, sent
+    live_rc.state_of(sid, False)
+
+
+def _apply_preset(sid, nascar):
+    body = {**SESSION, 'nascar': nascar} if nascar is not None else SESSION
+    with Session(engine) as sess:
+        asyncio.run(server_service.apply(sess, sess.get(Server, sid), SessionIn(**body)))
+
+
+def _race_state(sid):
+    with Session(engine) as sess:
+        return adapter.race_state(sid, sess)
+
+
+@pytest.mark.parametrize('nascar', [{'total': 70}, {'total': 70, 'shares': None}, {'total': 70, 'shares': [20, 50, 30]}])
+def test_preset_nascar_survives_dump_save_read_and_apply(session_events, nascar):
+    sid, _, _ = session_events
+    body = {**SESSION, 'nascar': nascar}
+    expected = {'total': 70, 'shares': nascar.get('shares')}
+    assert SessionIn(**body).model_dump()['nascar'] == expected
+    with Session(engine) as sess:
+        eid = events.create_event(events.EventIn(title='NASCAR', session=SessionIn(**body)), sess).id
+    with Session(engine) as sess:
+        saved = events.get_event(eid, sess).session
+        assert saved.model_dump()['nascar'] == expected
+        assert events.duplicate_event(eid, sess).session.model_dump()['nascar'] == expected
+        applied = asyncio.run(servers.apply_to_server(sess, sess.get(Server, sid), saved))
+        assert applied.session['nascar'] == expected
+    with Session(engine) as sess:
+        assert servers.get_server(sid, sess).session['nascar'] == expected
+        assert sess.get(Event, eid).data['nascar'] == expected
+        assert sess.get(Server, sid).session['nascar'] == expected
+    assert adapter.supervisor.get(sid).nascar_config == expected
+    # Editing the template does not change the session already applied to the server.
+    with Session(engine) as sess:
+        events.update_event(eid, events.EventIn(title='Changed', session=SessionIn(**{**body, 'nascar': {'total': 100}})), sess)
+    assert adapter.supervisor.get(sid).nascar_config == expected
+
+
+@pytest.mark.parametrize('nascar', [
+    {'total': 1}, {'total': 0}, {'total': 2.5}, {'total': 70, 'shares': []},
+    {'total': 1001}, {'total': 10**400}, {'total': 70, 'shares': [1] * 7},
+    {'total': 70, 'shares': [1001, 1]}, {'total': 70, 'shares': [1e308, 1]},
+    {'total': 70, 'shares': [0, 1]}, {'total': 70, 'shares': [-1, 1]},
+    {'total': 70, 'shares': [float('inf')]}, {'total': 70, 'shares': [float('nan')]},
+])
+def test_preset_nascar_validation(nascar):
+    with pytest.raises(ValidationError):
+        SessionIn(**SESSION, nascar=nascar)
+
+
+@pytest.mark.parametrize('shares', [[float('inf')], [float('-inf')], [float('nan')]])
+def test_manual_nascar_rejects_nonfinite_shares_in_the_model(shares):
+    with pytest.raises(ValidationError):
+        adapter.NascarIn(total=70, shares=shares)
+
+
+def test_nascar_models_accept_upper_limits():
+    nascar = {'total': 1000, 'shares': [1000] * 6}
+    assert SessionIn(**SESSION, nascar=nascar).nascar.model_dump() == nascar
+    assert adapter.NascarIn(**nascar).shares == nascar['shares']
+
+
+@pytest.mark.parametrize('previous', [False, True])
+@pytest.mark.parametrize('legacy_overflow', [False, True])
+def test_invalid_preset_does_not_interrupt_new_session(session_events, monkeypatch, caplog, previous, legacy_overflow):
+    from app import timeline
+    from app.stewards import engine as stewards_engine
+    sid, client, sent = session_events
+    old = live_rc.state_of(sid, True, client.session, create=previous)
+    if old:
+        old.configure_nascar(70)
+    adapter.supervisor.get(sid).nascar_config = {'total': 70, 'shares': [1e308, 1]}
+    if legacy_overflow:
+        def fail(*args):
+            raise OverflowError('legacy stage calculation overflow')
+        monkeypatch.setattr(live_rc.RaceControl, 'configure_nascar', fail)
+    timeline_events, steward_events = [], []
+    monkeypatch.setattr(timeline, 'on_session_event', lambda sid, event: timeline_events.append((sid, event)))
+    monkeypatch.setattr(stewards_engine, 'on_event', lambda client, event: steward_events.append((client, event)))
+    client.restore_when_session_changes = (0, b'restore')
+    event = {'type': 'new_session', 'session_index': 2, 'session_type': 3}
+    with caplog.at_level('WARNING', logger='acmanager.acsp'):
+        client._apply(event)
+    rc = live_rc.state_of(sid, True, client.session)
+    assert rc is not old and rc.nascar is None
+    assert client.session is event
+    assert timeline_events == [(sid, event)] and steward_events == [(client, event)]
+    assert sent == [b'restore'] and client.restore_when_session_changes is None
+    assert any(record.levelname == 'WARNING' and str(sid) in record.message and 'NASCAR' in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize('nascar', [
+    {'total': 1001}, {'total': 10**400}, {'total': 70, 'shares': [1e308, 1]},
+    {'total': 70, 'shares': [1001, 1]}, {'total': 70, 'shares': [1] * 7},
+    {'total': 70, 'shares': []}, {'total': 70, 'shares': [0, 1]}, {'total': 70, 'shares': [-1, 1]},
+])
+def test_http_rejects_invalid_nascar_before_applying_or_arming(live, nascar):
+    sid, _, _ = live
+    url = f'{V}/servers/{sid}/race-control/nascar'
+    before = _race_state(sid)
+    for method in (api.post, api.patch):
+        assert method(url, json=nascar).status_code == 422
+    assert api.post(f'{V}/servers/{sid}/apply', json={**SESSION, 'nascar': nascar}).status_code == 422
+    assert _race_state(sid) == before
+    assert getattr(adapter.supervisor.get(sid), 'nascar_config', None) is None
+
+
+@pytest.mark.parametrize('adopt', [False, True])
+def test_start_and_adopt_load_preset_before_first_udp_event(session_events, tmp_path, monkeypatch, adopt):
+    sid, client, _ = session_events
+    nascar = {'total': 70, 'shares': [20, 50, 30]}
+    _apply_preset(sid, nascar)
+    adapter.supervisor._instances.pop(sid)
+    monkeypatch.setattr(settings, 'data_dir', str(tmp_path))
+    monkeypatch.setattr(settings, 'acserver_cmd', 'fake-acserver')
+    from app import timeline
+    monkeypatch.setattr(timeline, 'start_resume', lambda *args: None)
+    cwd = tmp_path / 'instances' / str(sid)
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(server_service, 'write_instance', lambda s: cwd)
+    proc = SimpleNamespace(pid=12345, returncode=None)
+
+    async def spawn(*args, **kwargs):
+        return proc
+
+    async def connect(inst, *args, **kwargs):
+        assert inst.nascar_config == nascar
+        inst.acsp = client
+        client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})
+
+    monkeypatch.setattr(adapter.supervisor.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(adapter.supervisor.Instance, 'connect_acsp', connect)
+    monkeypatch.setattr(adapter.supervisor, '_alive', lambda pid: proc.returncode is None)
+    monkeypatch.setattr(adapter.supervisor, '_is_our_acserver', lambda *args: True)
+    if adopt:
+        (cwd / 'server.pid').write_text('{"pid": 12345}')
+
+    async def scenario():
+        try:
+            with Session(engine) as sess:
+                if adopt:
+                    assert await server_service.adopt_running(sess) == 1
+                else:
+                    assert (await server_service.start(sess, sid))['running']
+            assert live_rc.state_of(sid, True, client.session).nascar.ends == [14, 49, 70]
+        finally:
+            proc.returncode = 0
+            await adapter.supervisor.stop(sid)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('previous', [False, True])
+@pytest.mark.parametrize('shares, ends', [(None, [21, 53, 70]), ([20, 50, 30], [14, 49, 70])])
+def test_new_race_arms_fresh_engine_from_applied_preset(session_events, previous, shares, ends):
+    sid, client, _ = session_events
+    _apply_preset(sid, {'total': 70, 'shares': shares})
+    old = live_rc.state_of(sid, True, client.session, create=previous)
+    if old:
+        old.configure_nascar(100)
+        old.set_flag('yellow')
+    client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})
+    rc = live_rc.state_of(sid, True, client.session)
+    assert rc is not old and rc.flag == 'green'
+    assert rc.nascar.total == 70 and rc.nascar.ends == ends and rc.nascar.laps == 0
+    assert rc.finish_wait is None
+    assert _race_state(sid)['nascar']['total'] == 70
+
+
+@pytest.mark.parametrize('session_type', [1, 2])
+def test_practice_and_qualifying_do_not_arm_preset(session_events, session_type):
+    sid, client, _ = session_events
+    _apply_preset(sid, {'total': 70})
+    old = live_rc.state_of(sid, True, client.session, create=True)
+    old.configure_nascar(70)
+    client._apply({'type': 'new_session', 'session_index': 0, 'session_type': session_type})
+    fresh = live_rc.state_of(sid, True, client.session)
+    assert fresh is not old and fresh.nascar is None
+
+
+def test_session_info_never_arms_or_resets_preset_engine(session_events):
+    sid, client, _ = session_events
+    _apply_preset(sid, {'total': 70, 'shares': [20, 50, 30]})
+    client._apply({'type': 'session_info', 'session_index': 2, 'session_type': 3})
+    assert _race_state(sid)['nascar'] is None
+    client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})
+    rc = live_rc.state_of(sid, True, client.session)
+    motor = rc.nascar
+    live_rc.on_lap(sid, 5, 3)
+    rc.configure_nascar(80)
+    before = rc.snapshot()
+    for _ in range(2):
+        client._apply({'type': 'session_info', 'session_index': 2, 'session_type': 3})
+        assert live_rc.state_of(sid, True, client.session) is rc
+        assert rc.nascar is motor and rc.snapshot() == before
+    rc.configure_nascar(0)
+    client._apply({'type': 'session_info', 'session_index': 2, 'session_type': 3})
+    assert rc.nascar is None
+
+
+@pytest.mark.parametrize('previous', [False, True])
+def test_session_without_nascar_keeps_legacy_behavior(session_events, previous):
+    sid, client, _ = session_events
+    _apply_preset(sid, {'total': 70})
+    _apply_preset(sid, None)  # an old web client replaces the session without a NASCAR block
+    assert adapter.supervisor.get(sid).nascar_config is None
+    old = live_rc.state_of(sid, True, client.session, create=previous)
+    if old:
+        old.configure_nascar(70)
+    client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})
+    fresh = live_rc.state_of(sid, True, client.session)
+    if old is None:
+        assert fresh is None
+    else:
+        assert fresh is not old and fresh.nascar is None
+    assert _race_state(sid)['nascar'] is None
 
 
 def test_leader_and_flag_do_not_reenter(live, monkeypatch):

@@ -4,6 +4,8 @@
 de Kunos), con control en vivo por el protocolo UDP ACSP. Cada módulo es un router `/api/v1/...` (se agrupan en `api/v1/__init__.py`);
 no hay endpoints «solo para la UI». Subcarpetas: `live/` (ACSP, tiempos en vivo — su README),  `api/` (router versionado), `admin/` (página HTML).
 
+La sesión de un preset admite `nascar: {"total": int de 2 a 1000, "shares": [de 1 a 6 pesos finitos > 0 y <= 1000] | null}` (shares omitido usa los stages por defecto), conservado en `Server.session` y en la instancia al arrancar/recuperar/aplicar: solo ACSP `new_session` con `session_type == 3` arma un motor nuevo, `session_info` conserva su progreso y sin bloque no se arma nada. La API rechaza valores fuera de estos límites con 422; un preset inválido al autoarmar registra un warning y permite continuar `new_session` sin motor armado.
+
 ## Files
 
 | Módulo | Qué es / lo no obvio |
