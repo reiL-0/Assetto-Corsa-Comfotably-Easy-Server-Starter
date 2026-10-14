@@ -10,7 +10,10 @@ URL), `[EXTRA_RULES]`, `[WEATHER_FX]`...
 from __future__ import annotations
 
 import base64
+import re
 import zlib
+
+from app.config import settings
 
 SEPARATOR = "\t" * 32 + "$CSP0:"
 
@@ -23,6 +26,18 @@ def decode(text: str) -> str:
     """The INI hidden at the end of a welcome message ('' when there is none); the inverse of `encode`, for tests and for reading what a server sends."""
     _, sep, tail = text.partition(SEPARATOR)
     return zlib.decompress(base64.b64decode(tail + "=" * (-len(tail) % 4))).decode("utf-8") if sep else ""
+
+
+def extra_for(server_id: int, extra: str) -> str:
+    """The extra options a server really sends: its own (`Server.csp_extra`) plus the OPR hub script, always (flags, penalties and track-limit reports of every session do not depend on
+    anyone having pasted a section). It takes the first free `[SCRIPT_n]` from 100 up so it never replaces a script the admin added."""
+    if not settings.csp_hub:
+        return extra
+    n = 100
+    while re.search(rf"^\s*\[SCRIPT_{n}\]", extra, re.M | re.I):
+        n += 1
+    hub = f'[SCRIPT_{n}]\nSCRIPT = "{settings.csp_hub_url}?v={settings.csp_hub_version}"\nSERVER = {server_id}\n'
+    return (extra.strip() + "\n\n" if extra.strip() else "") + hub
 
 
 def welcome_with_extra(welcome: str, extra: str) -> str:
