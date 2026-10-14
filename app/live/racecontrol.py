@@ -13,6 +13,10 @@ from __future__ import annotations
 import itertools
 import time
 
+# Penalty ids only ever rise, across sessions and manager restarts (they start at the clock): the hub applies each id once, and a client that stays connected through a session change
+# must never see an id it has already used come back for a different penalty.
+_penalty_ids = itertools.count(int(time.time()))
+
 FLAGS = ("green", "yellow", "white", "checkered")
 PACE_MIN, PACE_MAX = 30, 250   # km/h a full-course yellow may ask for
 LAPS_MAX = 5                   # laps a car gets to serve a drive-through (the game enforces it: pit-lane pass clears it, running out sends the car to the pits)
@@ -23,7 +27,6 @@ class RaceControl:
         self.flag, self.pace_kmh = "green", None
         self.penalties: list[dict] = []
         self.rev, self.ts = 0, time.time()
-        self._ids = itertools.count(1)
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
 
     def _bump(self) -> None:
@@ -41,7 +44,7 @@ class RaceControl:
     def add_penalty(self, car_id: int, laps: int) -> dict:
         if not 1 <= laps <= LAPS_MAX:
             raise ValueError(f"laps is between 1 and {LAPS_MAX}")
-        p = {"id": next(self._ids), "car_id": car_id, "type": "pits", "laps": laps}
+        p = {"id": next(_penalty_ids), "car_id": car_id, "type": "pits", "laps": laps}
         self.penalties.append(p)
         self._bump()
         return p

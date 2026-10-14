@@ -67,8 +67,10 @@ def test_the_state_changes_and_every_change_raises_rev():
     rc.set_flag("white", 60)   # only a yellow carries a pace
     assert (rc.flag, rc.pace_kmh) == ("white", None)
     p = rc.add_penalty(3, 2)
-    assert p == {"id": 1, "car_id": 3, "type": "pits", "laps": 2} and rc.rev == 3
-    assert rc.clear_penalty(1) and not rc.clear_penalty(1) and rc.rev == 4   # clearing nothing is not a change
+    assert p == {"id": p["id"], "car_id": 3, "type": "pits", "laps": 2} and rc.rev == 3
+    assert rc.add_penalty(3, 1)["id"] > p["id"] and RaceControl().add_penalty(4, 1)["id"] > p["id"], "ids rise across states too (a new session must not reuse one)"
+    rc.clear_penalty(p["id"] + 1)
+    assert rc.clear_penalty(p["id"]) and not rc.clear_penalty(p["id"]) and rc.rev == 6   # clearing nothing is not a change
     for bad in (lambda: rc.set_flag("red"), lambda: rc.set_flag("yellow", 5), lambda: rc.add_penalty(3, 0), lambda: rc.add_penalty(3, 9)):
         with pytest.raises(ValueError):
             bad()
