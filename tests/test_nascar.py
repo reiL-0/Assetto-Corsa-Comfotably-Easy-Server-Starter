@@ -50,16 +50,24 @@ def test_a_caution_in_the_last_laps_of_the_stage_ends_it_right_there_a_caution_e
     assert m.phase == BREAK and any("termina aquí" in a[1] for a in out if a[0] == "say"), "inside the window: the stage ends there"
 
 
-def test_the_window_grows_with_the_cautions_already_deployed_in_the_stage():
-    n = Nascar(200)   # stages end at 60, 150, 200: a 60-lap stage has a window of 1 lap (1 %) and of 2 laps (2 %)
+def test_the_window_shrinks_with_the_cautions_already_deployed_in_the_stage():
+    n = Nascar(200)   # stages end at 60, 150, 200: a 60-lap stage has a window of 2 laps (2 %, no caution yet) and of 1 lap (1 %, one already)
     assert n.ends == [60, 150, 200]
+    run_to(n, 57)
+    n.on_flag("yellow")
+    assert n.phase == RACING and n.cautions_in_stage == 1, "first caution: 2 %, 2 laps: 3 laps from the end is outside"
+    n.on_flag("green")
     run_to(n, 58)
     n.on_flag("yellow")
-    assert n.phase == RACING and n.cautions_in_stage == 1, "first caution: 1 %, 1 lap: 2 laps from the end is outside"
-    n.on_flag("green")
-    assert n.phase == RACING
-    n.on_flag("yellow")
-    assert n.phase == BREAK and n.cautions_in_stage == 2, "second caution in the stage: 2 %, 2 laps: now it is inside"
+    assert n.phase == RACING and n.cautions_in_stage == 2, "second caution: 1 %, 1 lap: 2 laps from the end is now outside"
+    m = Nascar(200)
+    run_to(m, 58)
+    m.on_flag("yellow")
+    assert m.phase == BREAK, "a first caution 2 laps from the end: inside the window of 2 %"
+    k = Nascar(200)
+    run_to(k, 57); k.on_flag("yellow"); k.on_flag("green"); run_to(k, 59)
+    k.on_flag("yellow")
+    assert k.phase == BREAK, "a second caution 1 lap from the end: inside the window of 1 %"
 
 
 def test_yellow_to_fcy_is_one_caution_not_two():

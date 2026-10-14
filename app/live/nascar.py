@@ -10,8 +10,8 @@ The race is TIMED and long in acServer (its clock is ignored); the manager count
 Rules (the owner's):
   * The distance is `total` laps, split into stages by percentages (30/45/25 by default, so 70 laps end stage 1 at lap 21 and stage 2 at lap 53) or by explicit laps. `set_total` changes the
     distance while racing; stages that are not over yet are recomputed.
-  * A stage ends at its lap if the flag is green; if a CAUTION (yellow, vsc, fcy) comes out within the last `window` laps of the stage (1 % of its laps, 2 % when a caution was already
-    deployed in that stage; at least one lap) the stage ends right there under caution. Then a stage break (a yellow if there was none) until the director says green.
+  * A stage ends at its lap if the flag is green; if a CAUTION (yellow, vsc, fcy) comes out within the last `window` laps of the stage (2 % of its laps while no caution has been deployed in that
+    stage, 1 % once one has; at least one lap) the stage ends right there under caution. Then a stage break (a yellow if there was none) until the director says green.
   * The final stage ends when the leader completes `total`: green -> chequered (DRAINING: every car finishes its own last lap, then the caller calls `done`). A caution -> OVERTIME: wait for
     green, then `ot_laps` (2) laps; a caution before the end of those laps, or one at their end, is another attempt, up to `ot_max` (3); when they are spent the race ends.
   * A caution is counted when the flag goes from green to any caution (yellow -> fcy is the same caution).
@@ -25,7 +25,7 @@ import math
 CAUTION = ("yellow", "vsc", "fcy")
 RACING, BREAK, OT_WAIT, OT_RUN, DRAINING, DONE = "racing", "break", "ot_wait", "ot_run", "draining", "done"
 STAGES_DEFAULT = (30, 45, 25)
-WINDOW_PCT = (1, 2)   # % of the stage's laps: with no caution deployed in it yet / with one or more
+WINDOW_PCT = (2, 1)   # % of the stage's laps: with no caution deployed in it yet / with one or more
 
 
 def stage_ends(total: int, shares: tuple[float, ...] = STAGES_DEFAULT) -> list[int]:
