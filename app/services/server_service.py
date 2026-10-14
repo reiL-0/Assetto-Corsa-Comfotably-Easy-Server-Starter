@@ -157,7 +157,7 @@ def write_instance(s: Server) -> Path:
         link = d / name
         if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
-    (d / "cfg" / "server_cfg.ini").write_text(ini_generator.server_cfg(s.config, ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra).strip())))
+    (d / "cfg" / "server_cfg.ini").write_text(ini_generator.server_cfg(s.config, ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra).strip()), settings.csp_hub))
     (d / "cfg" / "entry_list.ini").write_text(ini_generator.entry_list(s.entry_list))
     welcome = d / "cfg" / "welcome.txt"
     extra = csp.extra_for(s.id, s.csp_extra)
