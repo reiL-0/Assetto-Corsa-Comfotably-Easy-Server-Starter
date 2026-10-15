@@ -6,10 +6,12 @@
                                                 grace_s (10), tolerance_kmh (5) and penalty {kind: none|pits, laps}
   POST   /servers/{id}/race-control/penalties   {car_id, laps}: a drive-through to serve, the game enforces it (steward)
   DELETE /servers/{id}/race-control/penalties/{pid}
-  POST/PATCH /servers/{id}/race-control/nascar {total, stages?: cumulative ends, shares?: positive weights} (steward): arm; total=0 disarms.
-An armed engine accepts only total changes through set_total; explicit stages reject distance changes. Stage definitions stay frozen otherwise.
+  POST/PATCH /servers/{id}/race-control/nascar {total, stages?: cumulative ends, shares?: positive weights, next_delay_min?: integer 0..60} (steward): arm; total=0 disarms.
+An armed engine accepts distance changes through set_total; explicit stages reject distance changes. Stage definitions stay frozen otherwise.
+The NEXT_SESSION delay starts at 10 min and can be edited atomically with total, armed or disarmed; omitted/null keeps it. The same total allows a delay-only edit even after the finish.
 The leaderboard maximum feeds NASCAR; director flags feed it once. Engine flags never reenter it. At the finish connected cars cross once more
-(the triggering car has already crossed), or 90 s elapse; the monitor calls done and sends NEXT_SESSION once, 10 min later. race-state adds nascar (snapshot or null).
+(the triggering car has already crossed), or 90 s elapse; the monitor calls done and captures the delay in next_at (0 sends NEXT_SESSION immediately, once).
+Later delay edits do not move an existing next_at. race-state adds nascar (snapshot with next_delay_min, or null) and always nascar_next_delay_min at the root.
 Everything is in memory in one process; session_info preserves the engine, new_session resets it (a race with a preset's nascar block arms a fresh engine). Every state change raises rev.
 Each change is also said in the chat, so drivers without the hub see it. The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
 lifespan) watches a VSC: it samples the speeds and judges the drivers when the grace ends.
@@ -31,7 +33,7 @@ from app.auth import require, require_any
 from app.db import SessionDep
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, state_of, tick
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -42,7 +44,6 @@ control_router = APIRouter(prefix="/servers/{server_id}/race-control", tags=["ra
 SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARILLA: sin adelantar", "white": "BANDERA BLANCA: última vuelta", "checkered": "BANDERA DE CUADROS"}
 CHAT_DELAY = 2.0       # s; the hub asks every 1 s (+ the website's 1 s cache)
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
-NEXT_SESSION_DELAY = 600   # s; keep the finished race and results visible
 
 
 class PenaltyCfg(BaseModel):
@@ -98,7 +99,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -143,6 +144,7 @@ class NascarIn(BaseModel):
     total: int = Field(ge=0, le=MAX_TOTAL)
     stages: list[int] | None = Field(default=None, min_length=1)
     shares: list[Annotated[float, Field(gt=0, le=MAX_SHARE, allow_inf_nan=False)]] | None = Field(default=None, min_length=1, max_length=MAX_SHARES)
+    next_delay_min: int | None = Field(default=None, ge=0, le=60)
 
 
 @control_router.post("/nascar")
@@ -150,7 +152,7 @@ class NascarIn(BaseModel):
 def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     _, rc = _control(server_id, sess)
     try:
-        rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None)
+        rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None, body.next_delay_min)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     return rc.snapshot()
@@ -175,6 +177,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
 
 
 def finish_nascar(now: float) -> None:
+    """Capture the configured delay at done; later delay edits never move an existing `next_at`."""
     for inst in supervisor.live():
         rc = state_of(inst.server_id, True, inst.acsp.session)
         with _lock:
@@ -185,7 +188,7 @@ def finish_nascar(now: float) -> None:
                     continue
                 rc.finish_wait = None
                 rc.nascar.done()
-                rc.next_at = now + NEXT_SESSION_DELAY
+                rc.next_at = now + rc.next_delay_s
                 rc._bump()
             if rc.next_at is None or now < rc.next_at:
                 continue

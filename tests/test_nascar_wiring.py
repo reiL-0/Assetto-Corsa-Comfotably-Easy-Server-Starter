@@ -404,18 +404,75 @@ def test_http_snapshot_and_configuration(live):
     url = f'{V}/servers/{sid}/race-control/nascar'
     before = api.get(f'{V}/servers/{sid}/race-state').json()
     assert before['nascar'] is None
+    assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'violations', 'exempt', 'nascar'}
+                            'tolerance_kmh', 'vsc_penalty', 'violations', 'exempt', 'nascar', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
     assert armed.keys() == before.keys()
     assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar')}
     assert armed['nascar']['total'] == 70 and armed['rev'] > before['rev']
+    assert armed['nascar']['next_delay_min'] == 10
     assert api.patch(url, json={'total': 100}).json()['nascar']['total'] == 100
     assert api.post(url, json={'total': 100, 'stages': [100]}).status_code == 422
     assert api.post(url, json={'total': 0}).json()['nascar'] is None
     assert api.post(url, json={'total': 10, 'shares': [0, 1]}).status_code == 422
+
+
+def test_http_live_delay_configuration(live):
+    sid, _, _ = live
+    url = f'{V}/servers/{sid}/race-control/nascar'
+    expected = 10
+    for total, delay in [(70, 2), (100, 60), (100, None), (0, None), (0, 0), (70, None)]:
+        response = api.patch(url, json={'total': total, 'next_delay_min': delay})
+        assert response.status_code == 200
+        state = response.json()
+        expected = delay if delay is not None else expected
+        assert state['nascar_next_delay_min'] == expected
+        if total:
+            assert state['nascar']['total'] == total
+            assert state['nascar']['next_delay_min'] == expected
+        else:
+            assert state['nascar'] is None
+        assert api.get(f'{V}/servers/{sid}/race-state').json() == state
+
+
+@pytest.mark.parametrize('delay', [-1, 61])
+@pytest.mark.parametrize('method', ['post', 'patch'])
+@pytest.mark.parametrize('total', [0, 100])
+def test_http_invalid_delay_preserves_total_and_delay(live, delay, method, total):
+    sid, _, _ = live
+    url = f'{V}/servers/{sid}/race-control/nascar'
+    before = api.post(url, json={'total': 70, 'next_delay_min': 2}).json()
+    assert getattr(api, method)(url, json={'total': total, 'next_delay_min': delay}).status_code == 422
+    assert api.get(f'{V}/servers/{sid}/race-state').json() == before
+
+
+@pytest.mark.parametrize('delay', [0, 2])
+def test_finish_uses_live_delay_and_keeps_an_existing_deadline(live, monkeypatch, delay):
+    sid, client, sent = live
+    monkeypatch.setattr(adapter, '_say_later', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(2, stages=[2])
+    state, actions = live_rc.on_lap(sid, 2, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    # The field is draining: only the delay changes, keeping the fixed distance.
+    url = f'{V}/servers/{sid}/race-control/nascar'
+    assert api.patch(url, json={'total': 2, 'next_delay_min': delay}).status_code == 200
+    adapter.finish_nascar(100)
+    assert rc.nascar.phase == 'done'
+    if delay:
+        assert rc.next_at == 220 and not sent
+        assert api.patch(url, json={'total': 2, 'next_delay_min': 0}).status_code == 200
+        assert rc.next_at == 220
+        adapter.finish_nascar(219)
+        assert not sent
+        adapter.finish_nascar(220)
+    assert rc.next_at is None and sent == [acsp.encode_next_session()]
+    adapter.finish_nascar(1000)
+    assert sent == [acsp.encode_next_session()]
 
 
 def test_acsp_hook_uses_leaderboard_maximum(live, monkeypatch):

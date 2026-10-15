@@ -3,6 +3,70 @@
 import pytest
 
 from app.live.nascar import BREAK, DONE, DRAINING, OT_RUN, OT_WAIT, RACING, Nascar, stage_ends
+from app.live.racecontrol import RaceControl, _lock
+
+
+def test_next_session_delay_defaults_updates_and_survives_disarming(monkeypatch):
+    rc = RaceControl()
+    assert rc.next_delay_s == 600
+    assert rc.snapshot()['nascar'] is None
+    assert rc.snapshot()['nascar_next_delay_min'] == 10
+    rc.configure_nascar(70, next_delay_min=2)
+    motor = rc.nascar
+    set_total = motor.set_total
+
+    def update(total):
+        assert _lock._is_owned()
+        assert rc.next_delay_s == 120
+        set_total(total)
+
+    monkeypatch.setattr(motor, 'set_total', update)
+    rc.configure_nascar(100, next_delay_min=60)
+    assert rc.nascar is motor and motor.total == 100
+    assert rc.next_delay_s == 3600
+    assert rc.snapshot()['nascar']['next_delay_min'] == 60
+    rc.configure_nascar(100)
+    assert rc.next_delay_s == 3600
+    rc.configure_nascar(0)
+    assert rc.nascar is None and rc.next_delay_s == 3600
+    rc.configure_nascar(0, next_delay_min=0)
+    assert rc.snapshot()['nascar'] is None
+    assert rc.snapshot()['nascar_next_delay_min'] == 0
+    rc.configure_nascar(70, next_delay_min=None)
+    assert rc.next_delay_s == 0
+
+
+@pytest.mark.parametrize('delay', [-1, 61, 2.5, '2', True])
+@pytest.mark.parametrize('armed', [False, True])
+@pytest.mark.parametrize('total', [0, 100])
+def test_invalid_next_session_delay_preserves_all_state(delay, armed, total):
+    rc = RaceControl()
+    if armed:
+        rc.configure_nascar(70, next_delay_min=2)
+        rc.next_at = 900
+    before = rc.snapshot()
+    motor = rc.nascar
+    with pytest.raises(ValueError):
+        rc.configure_nascar(total, next_delay_min=delay)
+    assert rc.snapshot() == before and rc.nascar is motor
+    assert rc.next_delay_s == (120 if armed else 600)
+    assert rc.next_at == (900 if armed else None)
+
+
+@pytest.mark.parametrize('config', [
+    {'total': 1}, {'total': 1001}, {'total': 100, 'stages': [80]},
+    {'total': 100, 'shares': (0,)},
+])
+@pytest.mark.parametrize('armed', [False, True])
+def test_failed_nascar_configuration_preserves_delay(config, armed):
+    rc = RaceControl()
+    if armed:
+        rc.configure_nascar(70, next_delay_min=2)
+    before = rc.snapshot()
+    with pytest.raises(ValueError):
+        rc.configure_nascar(**config, next_delay_min=5)
+    assert rc.snapshot() == before
+    assert rc.next_delay_s == (120 if armed else 600)
 
 
 def run_to(n: Nascar, lap: int, flag: str = "green") -> list[tuple]:

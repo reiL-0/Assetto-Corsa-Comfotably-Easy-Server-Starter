@@ -10,6 +10,9 @@ anybody still over `pace_kmh + tolerance_kmh` -- judged by the MEDIAN of the man
 -- gets the penalty set for this VSC (none or a drive-through of N laps), once per VSC; the hub then brings every car down to the pace gradually and keeps it there. A car the hub says
 is in the pit lane is exempt: only a "yes" counts and it lasts a few seconds, so nobody can cancel another driver's exemption (the hub is untrusted: a liar only escapes the penalty, the
 speeds stay on record). `rev` rises on every change. Lives in memory: gone when the server stops; `state_of` resets it when the session changes.
+
+NASCAR keeps a live-editable NEXT_SESSION delay (10 min initially, 0..60 min), also while disarmed. Configuration updates it atomically with the distance.
+The finish monitor captures it in `next_at` when the field finishes; later delay edits do not move an existing deadline.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ LAPS_MAX = 5                     # laps a car gets to serve a drive-through (the
 JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples decide (median)
 JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
+NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
 
@@ -51,6 +55,7 @@ class RaceControl:
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
         self.next_at: float | None = None
+        self.next_delay_s = NEXT_SESSION_DELAY
         self._clear_vsc()
 
     def _clear_vsc(self) -> None:
@@ -90,8 +95,11 @@ class RaceControl:
             self._bump()
             return actions
 
-    def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None) -> None:
+    def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None, next_delay_min: int | None = None) -> None:
+        """Update distance and delay atomically; an existing `next_at` is never rescheduled by a delay edit."""
         with _lock:
+            if next_delay_min is not None and (type(next_delay_min) is not int or not 0 <= next_delay_min <= 60):
+                raise ValueError("next_delay_min must be an integer between 0 and 60")
             if total == 0:
                 self.nascar = None
                 self.finish_wait = None
@@ -100,11 +108,14 @@ class RaceControl:
             elif self.nascar:
                 if stages is not None or shares is not None:
                     raise ValueError("stages and shares are frozen while armed")
-                self.nascar.set_total(total)
+                if type(total) is not int or total != self.nascar.total:
+                    self.nascar.set_total(total)
             else:
                 motor = Nascar(total, shares=shares if shares is not None else STAGES_DEFAULT, ends=stages)
                 motor.on_flag(self.flag)
                 self.nascar = motor
+            if next_delay_min is not None:
+                self.next_delay_s = next_delay_min * 60
             self._bump()
 
     def add_penalty(self, car_id: int, laps: int) -> dict:
@@ -178,9 +189,11 @@ class RaceControl:
 
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
         with _lock:
+            nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties),
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": self.nascar.snapshot() if self.nascar else None}
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar,
+                    "nascar_next_delay_min": self.next_delay_s // 60}
 
 
 _states: dict[int, RaceControl] = {}
