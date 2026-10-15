@@ -9,7 +9,7 @@
   POST/PATCH /servers/{id}/race-control/nascar {total, stages?: cumulative ends, shares?: positive weights} (steward): arm; total=0 disarms.
 An armed engine accepts only total changes through set_total; explicit stages reject distance changes. Stage definitions stay frozen otherwise.
 The leaderboard maximum feeds NASCAR; director flags feed it once. Engine flags never reenter it. At the finish connected cars cross once more
-(the triggering car has already crossed), or 90 s elapse; the monitor calls done and sends NEXT_SESSION once. race-state adds nascar (snapshot or null).
+(the triggering car has already crossed), or 90 s elapse; the monitor calls done and sends NEXT_SESSION once, 10 min later. race-state adds nascar (snapshot or null).
 Everything is in memory in one process; session_info preserves the engine, new_session resets it (a race with a preset's nascar block arms a fresh engine). Every state change raises rev.
 Each change is also said in the chat, so drivers without the hub see it. The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
 lifespan) watches a VSC: it samples the speeds and judges the drivers when the grace ends.
@@ -42,6 +42,7 @@ control_router = APIRouter(prefix="/servers/{server_id}/race-control", tags=["ra
 SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARILLA: sin adelantar", "white": "BANDERA BLANCA: última vuelta", "checkered": "BANDERA DE CUADROS"}
 CHAT_DELAY = 2.0       # s; the hub asks every 1 s (+ the website's 1 s cache)
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
+NEXT_SESSION_DELAY = 600   # s; keep the finished race and results visible
 
 
 class PenaltyCfg(BaseModel):
@@ -177,12 +178,18 @@ def finish_nascar(now: float) -> None:
     for inst in supervisor.live():
         rc = state_of(inst.server_id, True, inst.acsp.session)
         with _lock:
-            if not rc or not rc.nascar or rc.finish_wait is None:
+            if not rc or not rc.nascar:
                 continue
-            if rc.finish_wait & inst.acsp.cars.keys() and now < rc.finish_deadline:
+            if rc.finish_wait is not None:
+                if rc.finish_wait & inst.acsp.cars.keys() and now < rc.finish_deadline:
+                    continue
+                rc.finish_wait = None
+                rc.nascar.done()
+                rc.next_at = now + NEXT_SESSION_DELAY
+                rc._bump()
+            if rc.next_at is None or now < rc.next_at:
                 continue
-            rc.finish_wait = None
-            rc.nascar.done()
+            rc.next_at = None
             rc._bump()
         inst.acsp.send(acsp.encode_next_session())
 

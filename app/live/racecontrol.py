@@ -50,6 +50,7 @@ class RaceControl:
         self.nascar: Nascar | None = None
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
+        self.next_at: float | None = None
         self._clear_vsc()
 
     def _clear_vsc(self) -> None:
@@ -95,6 +96,7 @@ class RaceControl:
                 self.nascar = None
                 self.finish_wait = None
                 self.finish_deadline = 0.0
+                self.next_at = None
             elif self.nascar:
                 if stages is not None or shares is not None:
                     raise ValueError("stages and shares are frozen while armed")

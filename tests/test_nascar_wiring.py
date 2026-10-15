@@ -329,7 +329,9 @@ def test_reused_slot_finishes_on_its_next_crossing(live, monkeypatch):
     cross(4, 100, 2)
     assert not rc.finish_wait
     adapter.finish_nascar(102)
-    assert rc.nascar.phase == 'done' and sent == [acsp.encode_next_session()]
+    assert rc.nascar.phase == 'done' and not sent
+    adapter.finish_nascar(702)
+    assert sent == [acsp.encode_next_session()]
 
 
 def test_session_events_preserve_then_clear(live, monkeypatch):
@@ -341,11 +343,13 @@ def test_session_events_preserve_then_clear(live, monkeypatch):
     monkeypatch.setattr(engine, 'on_event', lambda *args: None)
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
+    rc.next_at = 700
     client._apply({'type': 'session_info', 'session_index': 0})
     assert live_rc.state_of(sid, True, client.session) is rc and rc.nascar
+    assert rc.next_at == 700
     client._apply({'type': 'new_session', 'session_index': 1})
     fresh = live_rc.state_of(sid, True, client.session)
-    assert fresh is not rc and fresh.nascar is None
+    assert fresh is not rc and fresh.nascar is None and fresh.next_at is None
 
 
 @pytest.mark.parametrize('timeout', [False, True])
@@ -375,10 +379,22 @@ def test_finish_once(live, monkeypatch, timeout):
     if not timeout:
         live_rc.on_lap(sid, 2, 4)
         assert rc.finish_wait == set()
-    adapter.finish_nascar(190 if timeout else 189)
+    finished_at = 190 if timeout else 189
+    adapter.finish_nascar(finished_at)
+    assert rc.nascar.phase == 'done' and count == [1]
+    assert rc.next_at == finished_at + 600
+    assert not sent and not encoded
     adapter.finish_nascar(200)
     adapter.nascar_actions(sid, state, actions, 3)
     adapter.finish_nascar(201)
+    adapter.finish_nascar(finished_at + 599)
+    assert not sent and not encoded
+    rev = rc.rev
+    adapter.finish_nascar(finished_at + 600)
+    assert rc.next_at is None and rc.rev == rev + 1
+    assert count == [1] and encoded == [1] and sent == [encode_next()]
+    adapter.finish_nascar(finished_at + 600)
+    adapter.finish_nascar(finished_at + 601)
     assert count == [1] and encoded == [1] and sent == [encode_next()]
     assert rc.nascar.phase == 'done'
 
