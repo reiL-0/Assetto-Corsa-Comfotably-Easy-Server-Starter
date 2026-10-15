@@ -14,7 +14,7 @@ from app.live.board import Driver
 from app.models import Event, Server
 from app.schemas.servers import ServerIn, SessionIn
 from app.services import server_service
-from tests.test_racecontrol import live, api, V, _client
+from test_racecontrol import live, api, V, _client
 
 
 SESSION = {'name': 'Oval', 'track': 'oval', 'cars': ['stockcar'], 'race_min': 1440, 'restart': False}
