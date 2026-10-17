@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import shutil
 import tempfile
@@ -13,13 +14,14 @@ import zipfile
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from app import catalog, download, integrity, metrics, unpack, uploadguard
+from app.auth import require
 from app.config import settings
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -51,6 +53,14 @@ def _scratch() -> Path:
 def inbox_dir() -> Path:
     """Drop big archives here (scp/sftp) and import them by name: Cloudflare caps request bodies at 100 MB."""
     d = Path(settings.data_dir) / "inbox"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def setups_dir() -> Path:
+    """Fixed setups, one `<name>.ini` each: acServer opens `setups/<FIXED_SETUP>` (the value WITH «.ini», checked against the real binary) from its working directory (every instance links this folder)."""
+    ac = settings.acserver_dir()
+    d = ac / "setups" if ac else Path(settings.data_dir) / "setups"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -462,3 +472,80 @@ async def upload_track(file: UploadFile, pack: bool = False, source_url: str = "
 @router.post("/entry_list")
 def entry_list_builder(rows: list[EntryListRow]) -> list[dict]:
     return build_entry_list(rows)
+
+
+# --- fixed setups (admin only): `FIXED_SETUP=<name>` in an entry makes acServer lock that car to setups/<name>.ini -------------------------------
+MAX_SETUP = 256 * 1024
+_admin = [Depends(require("admin"))]
+
+
+def _setup_name(name: str) -> str:
+    from app.schemas.servers import _setup_name as check   # one rule for the API, the entry list and the file name
+    try:
+        return check(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+def _wants_setup(session: dict | None, name: str) -> bool:
+    session = session or {}
+    return name in (session.get("car_setups") or {}).values() or any(e.get("fixed_setup") == name for e in session.get("entries") or [])
+
+
+def setup_users(name: str) -> list[str]:
+    """Where a setup is still chosen: a server's session or entry list, or a saved event. Used to refuse deleting it."""
+    from sqlmodel import Session, select
+
+    from app.db import engine
+    from app.models import Event, Server
+    users = []
+    with Session(engine) as sess:
+        users += [f"server {s.name}" for s in sess.exec(select(Server)).all() if _wants_setup(s.session, name) or any(e.get("FIXED_SETUP") == f"{name}.ini" for e in s.entry_list or [])]
+        users += [f"event {ev.title}" for ev in sess.exec(select(Event)).all() if _wants_setup(ev.data, name)]
+    return users
+
+
+@router.get("/setups", dependencies=_admin)
+def list_setups() -> list[dict]:
+    return [{"name": p.stem, "size": p.stat().st_size} for p in sorted(setups_dir().glob("*.ini")) if p.is_file() and not p.is_symlink()]
+
+
+@router.put("/setups/{name}", status_code=201, dependencies=_admin)
+async def put_setup(name: str, request: Request) -> dict:
+    """The body is the setup's .ini as it comes out of the game. Replacing one that is in use is fine (the swap is atomic); the next session start reads the new one."""
+    name = _setup_name(name)
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > MAX_SETUP:
+            raise HTTPException(413, f"a setup is a small text file ({MAX_SETUP >> 10} KB at most)")
+    raw = bytes(data).removeprefix(b"\xef\xbb\xbf")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "the setup is not a text (UTF-8) file") from None
+    if not text.strip() or "\0" in text:
+        raise HTTPException(400, "the setup is empty or not a text file")
+    d = setups_dir()
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, d / f"{name}.ini")
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return {"name": name, "size": len(raw)}
+
+
+@router.delete("/setups/{name}", dependencies=_admin)
+def delete_setup(name: str) -> dict:
+    name = _setup_name(name)
+    path = setups_dir() / f"{name}.ini"
+    if not path.is_file():
+        raise HTTPException(404, f"no setup called {name!r}")
+    users = setup_users(name)
+    if users:
+        raise HTTPException(409, f"{name!r} is still chosen by: {', '.join(users)}")
+    path.unlink()
+    return {"deleted": name}

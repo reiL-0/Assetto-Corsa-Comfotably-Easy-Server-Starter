@@ -5,14 +5,24 @@ Pure data (no I/O, no manager state). Moved out of `app/servers.py` unchanged; `
 """
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.live.nascar import MAX_SHARE, MAX_SHARES, MAX_TOTAL
 
 Scalar = str | int | float | bool
+
+SETUP_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")   # a file name under the server's setups/ (without «.ini»): no slash, no spaces, so nothing can escape the folder or add INI keys
+MAX_SLOTS = 50
+
+
+def _setup_name(v: str) -> str:
+    if v and (not SETUP_NAME.fullmatch(v) or ".." in v or v.startswith(".") or v.lower().endswith(".ini")):
+        raise ValueError("a setup name has letters, digits, «_», «-» and «.» only (no «..», not starting with a dot, without the «.ini»), 80 at most")
+    return v
 
 
 class ServerIn(BaseModel):
@@ -107,6 +117,9 @@ class EntryIn(BaseModel):
     ballast: int = Field(default=0, ge=0, le=300)  # kg
     restrictor: int = Field(default=0, ge=0, le=100)  # %
     spectator: bool = False
+    fixed_setup: str = ""   # name (without «.ini») of an uploaded setup (/content/setups) this car is locked to; the entry list gets FIXED_SETUP=<name>.ini
+
+    _setup = field_validator("fixed_setup")(_setup_name)
 
 
 class NascarSessionIn(BaseModel):
@@ -133,14 +146,32 @@ class SessionIn(BaseModel):
     qualify_min: int | None = Field(default=None, ge=0, le=720)
     race_laps: int | None = Field(default=None, ge=0, le=999)
     race_min: int | None = Field(default=None, ge=0, le=1440)  # a timed race (endurance) instead of laps; not both
+    car_counts: dict[str, Annotated[int, Field(strict=True, ge=0, le=MAX_SLOTS)]] | None = None   # open slots per model («5 of this, 2 of that»); then `cars` and `max_clients` follow from it. Ignored with `entries`
+    car_setups: dict[str, str] = {}   # model -> uploaded setup name, locked on that model's open slots (the league's roster slots get it too)
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
 
+    @field_validator("car_setups")
+    @classmethod
+    def _setups_named(cls, v: dict[str, str]) -> dict[str, str]:
+        for name in v.values():
+            if not name:
+                raise ValueError("car_setups: a setup name is empty")
+            _setup_name(name)
+        return v
+
     @model_validator(mode="after")
     def _has_cars(self) -> SessionIn:
+        if self.entries:
+            self.car_counts = None   # reserved slots say the cars one by one
+        elif self.car_counts is not None:
+            counts = {car: n for car, n in self.car_counts.items() if n}
+            if not counts or sum(counts.values()) > MAX_SLOTS:
+                raise ValueError(f"car_counts: at least one car, and {MAX_SLOTS} slots in total at most")
+            self.car_counts, self.cars, self.max_clients = counts, list(counts), sum(counts.values())
         if not self.cars and not self.entries:
             raise ValueError("choose cars or fill the entry list")
         if self.race_laps and self.race_min:

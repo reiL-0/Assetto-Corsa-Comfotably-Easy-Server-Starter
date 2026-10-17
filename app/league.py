@@ -146,7 +146,7 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     if out:
         discord.alert(f"⚠️ **{c.name}** · {ev.title}: quedan fuera de la lista por no cumplir la práctica ({c.practice_laps} vueltas válidas en {c.practice_days} días): "
                       + ", ".join(f"{m.name or m.guid} ({m.laps}/{c.practice_laps})" for m in out))
-    entries = [EntryIn(model=m.car if m.car in cars else cars[0], driver_name=m.name, team=m.team, guid=m.guid) for m in ok]
+    entries = [EntryIn(model=(model := m.car if m.car in cars else cars[0]), driver_name=m.name, team=m.team, guid=m.guid, fixed_setup=s.car_setups.get(model, "")) for m in ok]
     return s.model_copy(update={"entries": entries, "locked": True, "pickup": False, "cars": cars})
 
 

@@ -154,7 +154,9 @@ def write_instance(s: Server) -> Path:
     (d / "results").mkdir(exist_ok=True)
     # acServer reads content/ and system/ relative to its cwd: share the install's copies.
     bin_dir = settings.acserver_dir()
-    for name in ("content", "system"):
+    if bin_dir:
+        content.setups_dir()   # exists before it is linked
+    for name in ("content", "system", "setups"):
         link = d / name
         if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
@@ -176,6 +178,10 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         raise ServerError(400, "enable at least one session (practice, qualify or race)")
     cars = list(dict.fromkeys(e.model for e in body.entries)) if body.entries else body.cars
     skins = check_content(body, cars)
+    wanted_setups = {e.fixed_setup for e in body.entries if e.fixed_setup} | set(body.car_setups.values())
+    missing_setups = sorted(n for n in wanted_setups if not (content.setups_dir() / f"{n}.ini").is_file())
+    if missing_setups:
+        raise ServerError(400, f"setups not uploaded: {', '.join(missing_setups)}")
     guids = [g for e in body.entries for g in e.guid.split(";") if g]
     if len(guids) != len(set(guids)):
         raise ServerError(400, "a Steam ID appears in more than one entry")
@@ -213,13 +219,15 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     if body.entries:
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
-             "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast, "RESTRICTOR": e.restrictor}
+             "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast, "RESTRICTOR": e.restrictor,
+             **({"FIXED_SETUP": f"{e.fixed_setup}.ini"} if e.fixed_setup else {})}
             for e in body.entries
         ]
-    else:  # one open slot per client, cars taken in turns; the skin is the pack's first (clients pick their own)
+    else:  # one open slot per client: the models in the counts asked for (grouped), or in turns; the skin is the pack's first (clients pick their own)
+        plan = [car for car, n in body.car_counts.items() for _ in range(n)] if body.car_counts else [cars[i % len(cars)] for i in range(body.max_clients)]
         s.entry_list = [
-            {"MODEL": car, "SKIN": (skins[car] or [""])[0]}
-            for car in (cars[i % len(cars)] for i in range(body.max_clients))
+            {"MODEL": car, "SKIN": (skins[car] or [""])[0], **({"FIXED_SETUP": f"{body.car_setups[car]}.ini"} if car in body.car_setups else {})}
+            for car in plan
         ]
     s.updated_at = datetime.now(UTC)
     sess.add(s)
