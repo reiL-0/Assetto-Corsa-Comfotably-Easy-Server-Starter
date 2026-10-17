@@ -302,6 +302,8 @@ class Championship(SQLModel, table=True):
     rulebook: dict | None = Field(default=None, sa_type=JSON)  # the league's versioned rulebook (app/rulebook.py); None = derived from the three older columns below
     auto_rules: dict | None = Field(default=None, sa_type=JSON)  # automatic time penalties for track cuts in a counted Race: {cuts_per_step, step_seconds, max_seconds}; None = off (app/stewards/auto.py)
     penalties: list | None = Field(default=None, sa_type=JSON)  # the league's catalogue: [{name, seconds, dsq}]; the steward picks from it (app/penalties.py)
+    car_setups: dict | None = Field(default=None, sa_type=JSON)  # (None = none) the league's rule {car model: uploaded setup name}: every driver of that car runs it unless their own `fixed_setup` says otherwise
+    requirements: dict | None = Field(default=None, sa_type=JSON)  # what players must install for THIS league ({csp_build, items}); None = the global list (app/requirements.py)
     created_at: datetime = Field(default_factory=_now)
     archived_at: datetime | None = None  # set ONCE by app/archive.py when the league ends: its results are summarised into ChampionshipArchive and the fine detail is deleted; None = running
     archived_by: str = ""
@@ -329,6 +331,8 @@ class LeagueMember(SQLModel, table=True):
     name: str = ""  # shown on the entry list
     team: str = ""
     car: str = ""  # preferred car model; the event's first car when it is not among the event's cars
+    skin: str = ""  # folder name of the skin this driver runs ("" = the car's first); only used with their own `car`
+    fixed_setup: str = ""  # an uploaded setup (/content/setups, name without .ini) locked for this driver; "" = the league's rule for the car (Championship.car_setups)
     exempt: bool = False  # an admin lets this driver in whatever the practice requirement says
     non_racing: bool = False  # a car that is on the server but does not race (safety car, race director, caster): ignored by the grid penalty, the practice requirement and the standings
 

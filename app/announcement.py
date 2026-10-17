@@ -80,7 +80,7 @@ def _downloads(session: dict) -> str:
     return ("⬇️ **DESCARGAS**\n" + "\n".join(f"• {'Pista' if x['kind'] == 'track' else 'Auto'} {x['name']}: <{x['url']}>" for x in links)) if links else ""
 
 
-def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "") -> dict[str, str]:
+def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "", league_id: int | None = None) -> dict[str, str]:
     """Every `{name}` of `VARS` for one event. `start_at` is when the practice opens; qualifying and race follow one after the other."""
     at = int(start_at)
     fmt = []
@@ -99,6 +99,7 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
     role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
     clima = weather_name(session)
     extra = "\n".join(x for x in (notes.strip(), info.strip()) if x)
+    req = requirements.lines(requirements.current(league_id))   # the league's own list, else the global one
     return {
         "title": title, "server": server, "track": _track_name(session.get("track", "?"), session.get("track_config", "")), "cars": _car_names(session),
         "clima": clima, "clima_line": f"🌦️ Clima: {clima}" if clima else "",
@@ -109,7 +110,7 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
         "reacciones": f"Reacciona para inscribirte: ✅ voy · ❔ indeciso · ❌ no puedo\n{c}", "counts": c,
         "yes": str(counts["yes"]), "maybe": str(counts["maybe"]), "no": str(counts["no"]),
         "descargas": _downloads(session),
-        "requisitos": ("📦 **REQUISITOS**\n" + "\n".join(requirements.lines())) if requirements.lines() else "",
+        "requisitos": ("📦 **REQUISITOS**\n" + "\n".join(req)) if req else "",
         "notas": f"📋 **NOTAS**\n{extra}" if extra else "", "notes": notes.strip(), "info": info.strip(),
     }
 

@@ -227,7 +227,7 @@ async def tick(now: float | None = None) -> None:
 
 
 def _rsvp_payload(sess: Session, sc: Schedule, ev: Event, srv: Server, counts: dict[str, int]) -> dict:
-    v = announcement.variables(ev.title, srv.name, ev.data, sc.start_at, counts, sc.notes, sc.info)
+    v = announcement.variables(ev.title, srv.name, ev.data, sc.start_at, counts, sc.notes, sc.info, ev.league_id)
     return announcement.render(announcement.current(sess), v)
 
 

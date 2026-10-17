@@ -25,10 +25,10 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlmodel import Session, func, select
 
-from app import discord, metrics
+from app import content, discord, metrics
 from app.db import SessionDep
 from app.config import settings
 from app.auth import CurrentUser
@@ -37,7 +37,7 @@ from app.leaguelock import lock as league_lock, serialized
 from app.stewards.auto import cut_notices
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
 from app.results import parse_result_file
-from app.schemas.servers import EntryIn, SessionIn
+from app.schemas.servers import EntryIn, SessionIn, _folder_name, _setup_name
 
 log = logging.getLogger("acmanager.league")
 
@@ -51,9 +51,16 @@ class MemberIn(BaseModel):
     car: str = Field(default="", max_length=80)
     exempt: bool = False
     non_racing: bool = False  # safety car, race director, caster: on the entry list, but not racing
+    skin: str | None = Field(default=None, max_length=80)   # None = keep what is saved (an older panel does not send it); "" = clear it
+    fixed_setup: str | None = Field(default=None, max_length=80)   # same: None keeps, "" clears
+
+    _skin = field_validator("skin")(lambda v: v if v is None else _folder_name(v))
+    _setup = field_validator("fixed_setup")(lambda v: v if v is None else _setup_name(v))
 
 
 class MemberOut(MemberIn):
+    skin: str = ""
+    fixed_setup: str = ""
     laps: int  # valid laps in the practice window, now
     eligible: bool
 
@@ -85,7 +92,7 @@ def _league(sess: Session, championship_id: int, writing: bool = False) -> Champ
 
 def _status(sess: Session, c: Championship, m: LeagueMember, at: float) -> MemberOut:
     laps = valid_laps(sess, m.guid, at - c.practice_days * 86400, at)
-    return MemberOut(guid=m.guid, name=m.name, team=m.team, car=m.car, exempt=m.exempt, non_racing=m.non_racing, laps=laps, eligible=is_eligible(c, m, laps))
+    return MemberOut(guid=m.guid, name=m.name, team=m.team, car=m.car, skin=m.skin, fixed_setup=m.fixed_setup, exempt=m.exempt, non_racing=m.non_racing, laps=laps, eligible=is_eligible(c, m, laps))
 
 
 @router.get("", response_model=list[MemberOut])
@@ -101,7 +108,13 @@ def list_members(championship_id: int, sess: SessionDep) -> list[MemberOut]:
 def add_member(championship_id: int, body: MemberIn, sess: SessionDep) -> MemberOut:
     """Add a driver or update the one with that Steam ID."""
     c = _league(sess, championship_id, writing=True)
-    m = sess.merge(LeagueMember(championship_id=championship_id, **body.model_dump()))
+    fields, old = body.model_dump(), sess.get(LeagueMember, (championship_id, body.guid))
+    for k in ("skin", "fixed_setup"):   # not sent = what was saved stays
+        if fields[k] is None:
+            fields[k] = getattr(old, k) if old else ""
+    if fields["fixed_setup"] and not (content.setups_dir() / f"{fields['fixed_setup']}.ini").is_file():
+        raise HTTPException(400, f"setup not uploaded: {fields['fixed_setup']}")
+    m = sess.merge(LeagueMember(championship_id=championship_id, **fields))
     sess.commit()
     return _status(sess, c, m, time.time())
 
@@ -146,7 +159,11 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     if out:
         discord.alert(f"⚠️ **{c.name}** · {ev.title}: quedan fuera de la lista por no cumplir la práctica ({c.practice_laps} vueltas válidas en {c.practice_days} días): "
                       + ", ".join(f"{m.name or m.guid} ({m.laps}/{c.practice_laps})" for m in out))
-    entries = [EntryIn(model=(model := m.car if m.car in cars else cars[0]), driver_name=m.name, team=m.team, guid=m.guid, fixed_setup=s.car_setups.get(model, "")) for m in ok]
+    entries = []
+    for m in ok:   # the driver's own setup, else the league's rule for the car, else the event's
+        model = m.car if m.car in cars else cars[0]
+        setup = m.fixed_setup or (c.car_setups or {}).get(model) or s.car_setups.get(model, "")
+        entries.append(EntryIn(model=model, driver_name=m.name, team=m.team, guid=m.guid, skin=m.skin if model == m.car else "", fixed_setup=setup))   # a skin belongs to the driver's own car
     return s.model_copy(update={"entries": entries, "locked": True, "pickup": False, "cars": cars})
 
 

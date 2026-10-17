@@ -143,7 +143,7 @@ def test_chunked_upload_resumes_unpacks_and_reports_errors():
 def test_upload_endpoints_are_admin_only_and_validated():
     anon = TestClient(app)
     assert anon.post(f"{V}/content/uploads", json={"kind": "track"}).status_code == 401
-    assert api.post(f"{V}/content/uploads", json={"kind": "skin"}).status_code == 422
+    assert api.post(f"{V}/content/uploads", json={"kind": "bogus"}).status_code == 422
     assert api.get(f"{V}/content/uploads/deadbeef").status_code == 404
     uid = api.post(f"{V}/content/uploads", json={"kind": "track"}).json()["id"]
     assert api.post(f"{V}/content/uploads/{uid}/complete").status_code == 409  # nothing uploaded yet

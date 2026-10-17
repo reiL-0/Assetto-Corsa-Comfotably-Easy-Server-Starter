@@ -17,7 +17,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session
 
 from app.db import SessionDep, engine
-from app.models import Setting
+from app.models import Championship, Setting
 
 router = APIRouter(prefix="/requirements", tags=["requirements"])
 KEY = "requirements"
@@ -40,17 +40,20 @@ class RequirementsIn(BaseModel):
         return v
 
 
-def current() -> dict:
+def current(league_id: int | None = None) -> dict:
+    """The league's own list when it has one (`Championship.requirements` not None, even an empty one), else the global list."""
     try:
         with Session(engine) as s:
-            row = s.get(Setting, KEY)
+            league = s.get(Championship, league_id) if league_id else None
+            own = league.requirements if league else None
+            row = s.get(Setting, KEY) if own is None else None
     except OperationalError:   # the tables do not exist yet (announcement.SAMPLE is built when the module is imported, before init_db)
-        row = None
-    return {"csp_build": 0, "items": [], **(row.value if row and row.value else {})}
+        own, row = None, None
+    return {"csp_build": 0, "items": [], **(own if own is not None else (row.value if row and row.value else {}))}
 
 
 def lines(req: dict | None = None) -> list[str]:
-    req = req or current()
+    req = current() if req is None else req
     out = [f"Custom Shaders Patch build {req['csp_build']} o superior (obligatorio)"] if req["csp_build"] else []
     return out + [f"{i['name']}: {i['url']}" for i in req["items"]]
 

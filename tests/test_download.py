@@ -148,7 +148,7 @@ def test_import_from_link_validates_and_needs_admin(monkeypatch):
     api = TestClient(app, headers=ADMIN)
     r = api.post(f"{V}/content/uploads/from-link", json={"kind": "track", "url": "https://evil.example/a.zip"})
     assert r.status_code == 400 and "allowed download host" in r.json()["detail"]
-    assert api.post(f"{V}/content/uploads/from-link", json={"kind": "skin", "url": "https://x.mediafire.com/a"}).status_code == 422
+    assert api.post(f"{V}/content/uploads/from-link", json={"kind": "bogus", "url": "https://x.mediafire.com/a"}).status_code == 422
     anon = TestClient(app).post(f"{V}/content/uploads/from-link", json={"kind": "track", "url": "https://mediafire.com/a"})
     assert anon.status_code == 401
 

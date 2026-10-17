@@ -7,14 +7,16 @@ A championship just points at a set of already-written result files
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlmodel import select
 
+from app import content, requirements
 from app.db import SessionDep
 from app.leaguelock import serialized
 from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, LeagueSuspension
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
+from app.schemas.servers import _folder_name, _setup_name
 from app.stewards.auto import cut_drafts
 from app.servers import result_path
 
@@ -51,6 +53,17 @@ class ChampionshipIn(BaseModel):
     practice_days: int = Field(default=7, ge=1, le=60)
     penalties: list[PenaltyItem] = []
     auto_rules: AutoRules | None = None  # None = no automatic penalties
+    car_setups: dict[str, str] | None = None  # {car model: uploaded setup name}: the league's setup rule per car (the roster can override it per driver)
+
+    @field_validator("car_setups")
+    @classmethod
+    def _setups_ok(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        for car, name in (v or {}).items():
+            _folder_name(car)
+            if not car or not name:
+                raise ValueError("car_setups: a car and a setup name for each")
+            _setup_name(name)
+        return v
 
 
 def _get(sess: SessionDep, championship_id: int) -> Championship:
@@ -70,7 +83,10 @@ def get_open(sess: SessionDep, championship_id: int) -> Championship:
 
 @router.post("", response_model=Championship, status_code=201)
 def create(body: ChampionshipIn, sess: SessionDep) -> Championship:
-    c = Championship(**{**body.model_dump(), "penalties": [p.model_dump() for p in body.penalties]})
+    c = Championship(**{**body.model_dump(), "penalties": [p.model_dump() for p in body.penalties], "car_setups": body.car_setups or {}})
+    missing = sorted({n for n in c.car_setups.values() if not (content.setups_dir() / f"{n}.ini").is_file()})
+    if missing:
+        raise HTTPException(400, f"setups not uploaded: {', '.join(missing)}")
     sess.add(c)
     sess.commit()
     sess.refresh(c)
@@ -100,12 +116,45 @@ def update(championship_id: int, body: ChampionshipIn, sess: SessionDep) -> Cham
     sent = body.model_dump(exclude_unset=True)
     if c.rulebook and {"points_system", "penalties", "auto_rules"} & sent.keys():
         raise HTTPException(409, "this league has a rulebook: its points, catalogue and detectors are edited there (PUT /championships/{id}/rulebook)")
+    missing = sorted({n for n in (sent.get("car_setups") or {}).values() if not (content.setups_dir() / f"{n}.ini").is_file()})
+    if missing:
+        raise HTTPException(400, f"setups not uploaded: {', '.join(missing)}")
+    if "car_setups" in sent and sent["car_setups"] is None:
+        sent["car_setups"] = {}
     for k, v in sent.items():   # only what was sent: an older client that sends name + points leaves the league rules alone
         setattr(c, k, [p.model_dump() for p in body.penalties] if k == "penalties" else v)
     sess.add(c)
     sess.commit()
     sess.refresh(c)
     return c
+
+
+@router.get("/{championship_id}/requirements")
+def get_requirements(championship_id: int, sess: SessionDep) -> dict:
+    """What players must install for this league: its own list when it has one (`own`), else the global one."""
+    c = _get(sess, championship_id)
+    return {"own": c.requirements is not None, **requirements.current(c.id)}
+
+
+@router.put("/{championship_id}/requirements")
+@serialized
+def put_requirements(championship_id: int, body: requirements.RequirementsIn, sess: SessionDep) -> dict:
+    c = get_open(sess, championship_id)
+    c.requirements = body.model_dump()
+    sess.add(c)
+    sess.commit()
+    return {"own": True, **requirements.current(c.id)}
+
+
+@router.delete("/{championship_id}/requirements")
+@serialized
+def reset_requirements(championship_id: int, sess: SessionDep) -> dict:
+    """Back to the global list."""
+    c = get_open(sess, championship_id)
+    c.requirements = None
+    sess.add(c)
+    sess.commit()
+    return {"own": False, **requirements.current(c.id)}
 
 
 @router.delete("/{championship_id}", status_code=204)

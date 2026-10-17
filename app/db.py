@@ -157,6 +157,19 @@ def _m006_rulebook(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "championships" ADD COLUMN "rulebook" JSON')
 
 
+def _m007_league_presets(con: sqlite3.Connection) -> None:
+    """The league's preset: a skin and a fixed setup per roster driver (`league_members`, '' = none), the league's setup rule per car and its own requirements list
+    (`championships`, NULL = none / use the global list), so every existing league behaves as before."""
+    have = {row[1] for row in con.execute('PRAGMA table_info("league_members")')}
+    for col in ("skin", "fixed_setup"):
+        if col not in have:
+            con.execute(f'ALTER TABLE "league_members" ADD COLUMN "{col}" VARCHAR NOT NULL DEFAULT \'\'')
+    have = {row[1] for row in con.execute('PRAGMA table_info("championships")')}
+    for col in ("car_setups", "requirements"):
+        if col not in have:
+            con.execute(f'ALTER TABLE "championships" ADD COLUMN "{col}" JSON')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -164,6 +177,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (4, _m004_championship_archive),
     (5, _m005_auto_penalties),
     (6, _m006_rulebook),
+    (7, _m007_league_presets),
 ]
 
 

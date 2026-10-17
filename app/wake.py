@@ -38,7 +38,7 @@ from sqlmodel import Session, select
 from app import requirements, schedule, supervisor, timeline
 from app.config import settings
 from app.db import engine
-from app.models import Server
+from app.models import Event, Schedule, Server
 from app.services.server_service import ports as _ports
 
 log = logging.getLogger("acmanager.wake")
@@ -142,6 +142,18 @@ def _upstream(port: int, path: str) -> bytes:
     return body
 
 
+def _league_of(server_id: int) -> int | None:
+    """The league of the event loaded on this server (the latest schedule that is loaded and not over), None when there is none."""
+    try:
+        with Session(engine) as sess:
+            return sess.exec(select(Event.league_id).join(Schedule, Schedule.event_id == Event.id)
+                             .where(Schedule.server_id == server_id, Schedule.loaded == True, Schedule.state.in_(("pending", "running")))  # noqa: E712
+                             .order_by(Schedule.start_at.desc())).first()
+    except Exception:   # noqa: BLE001 - the lobby page must answer even when the lookup fails: it shows the global list, and the error is logged
+        log.warning("could not find the league of server %s; showing the global requirements", server_id, exc_info=True)
+        return None
+
+
 def details(s: Server, live: bytes | None) -> dict:
     """Body of /api/details, what the Content Manager wrapper serves and Content Manager shows on the server's page: the lobby
     info (acServer's own /INFO when running, the facade's when stopped) plus the description (the welcome text)."""
@@ -152,7 +164,7 @@ def details(s: Server, live: bytes | None) -> dict:
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
     info["name"] = clean_name(info.get("name"))   # clean, whatever the source was
     info["wrappedPort"] = info["cport"]   # Content Manager keeps asking THIS port for the details (ServerInformationExtended.PortExtended)
-    req = requirements.lines()   # what the player must install, under the welcome text
+    req = requirements.lines(requirements.current(_league_of(s.id)))   # what the player must install, under the welcome text: the league's list while its event is on this server
     info["description"] = s.welcome + ("\n\nRequisitos:\n" + "\n".join(req) if req else "")
     return info
 

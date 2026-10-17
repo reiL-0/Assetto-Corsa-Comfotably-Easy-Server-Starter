@@ -19,6 +19,13 @@ SETUP_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")   # a file name under the ser
 MAX_SLOTS = 50
 
 
+def _folder_name(v: str) -> str:
+    """A skin or car folder name as it goes into the entry list: one path segment, no control characters (a newline would add INI keys)."""
+    if v and (len(v) > 80 or v in (".", "..") or "/" in v or "\\" in v or any(ord(ch) < 32 or ord(ch) == 127 for ch in v) or v != v.strip()):
+        raise ValueError("a folder name is one path segment of 80 characters at most, without control characters")
+    return v
+
+
 def _setup_name(v: str) -> str:
     if v and (not SETUP_NAME.fullmatch(v) or ".." in v or v.startswith(".") or v.lower().endswith(".ini")):
         raise ValueError("a setup name has letters, digits, «_», «-» and «.» only (no «..», not starting with a dot, without the «.ini»), 80 at most")
@@ -120,6 +127,7 @@ class EntryIn(BaseModel):
     fixed_setup: str = ""   # name (without «.ini») of an uploaded setup (/content/setups) this car is locked to; the entry list gets FIXED_SETUP=<name>.ini
 
     _setup = field_validator("fixed_setup")(_setup_name)
+    _skin = field_validator("skin")(_folder_name)
 
 
 class NascarSessionIn(BaseModel):

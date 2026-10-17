@@ -295,9 +295,93 @@ async def upload_car(file: UploadFile, pack: bool = False, source_url: str = "",
     return _installed(await _unzip_upload(file, _cars_dir(), pack, source_url, source_official), "car")
 
 
+def _skin_folder(name: str) -> str:
+    from app.schemas.servers import _folder_name
+    try:
+        return _folder_name(name) or _safe(name)
+    except ValueError as e:
+        raise HTTPException(400, f"invalid name: {name!r}") from e
+
+
+def _find_skins(base: Path, car: str | None) -> list[tuple[str, Path]]:
+    """[(car, skin folder)] inside an unpacked archive. The skins are the folders under a `skins` folder (the car is the one above it, or `car`),
+    else the folders that hold a ui_skin.json, else the folders at the top. Ignores hidden and __MACOSX folders."""
+    def dirs(d: Path) -> list[Path]:
+        return sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith((".", "__MACOSX")))
+    out, queue = [], [base]
+    while queue:
+        d = queue.pop(0)
+        if d.name.lower() == "skins" and d != base:
+            out += [(d.parent.name if d.parent != base else car, s) for s in dirs(d)]
+            continue
+        queue += dirs(d)
+    if not out:
+        found = [p for p in sorted(base.rglob("ui_skin.json")) if p.is_file() and p.parent != base   # one loose at the root has no folder to name the skin by
+                 and not any(x.name.startswith((".", "__MACOSX")) for x in p.relative_to(base).parents)]
+        tops = {p.parent for p in found if not any(q in p.parent.parents for q in {x.parent for x in found})}
+        out = [(car, s) for s in sorted(tops)] or [(car, s) for s in dirs(base)]
+    return out
+
+
+def _install_skins(archive: Path, car: str | None) -> dict:
+    """The server only needs a skin's folder name (it goes into the entry list) and its ui_skin.json: whatever the archive holds, nothing else is kept
+    (textures live on the players' PCs, shared by link). Returns {car, skins: ["car/skin", ...]}."""
+    permissive = settings.upload_permissive
+    with archive.open("rb") as fh:
+        fmt = unpack.archive_format(fh.read(512))
+    if fmt != "zip" and not (fmt and permissive):
+        raise HTTPException(400, unpack.NOT_ARCHIVE if permissive else unpack.NOT_ZIP)
+    scratch = Path(tempfile.mkdtemp(dir=_scratch()))
+    try:
+        try:
+            unpack.run_sandboxed(archive, scratch, permissive=permissive)
+        except OSError as e:
+            raise HTTPException(507, str(e)) from e
+        uploadguard.check_tree(scratch)
+        for f in scratch.rglob("*"):
+            if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
+                raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
+        given = _skin_folder(car) if car else None
+        found = _find_skins(scratch, given)
+        if not found:
+            raise HTTPException(400, "no skin folders found in the archive")
+        plan, seen = [], set()
+        for owner, src in found:
+            owner = _skin_folder(owner) if owner else None
+            named = owner
+            if owner not in (None, given) and not (_cars_dir() / owner).is_dir():   # the folder above `skins` was not a car we have: the car the uploader named
+                owner = given
+            if not owner:
+                raise HTTPException(400, (f"car not installed: {named}; " if named else "") + "say which car these skins are for (the archive does not name it)")
+            if not (_cars_dir() / owner).is_dir():
+                raise HTTPException(400, f"car not installed: {owner}")
+            name = _skin_folder(src.name)
+            if (owner, name) in seen:
+                raise HTTPException(400, f"the skin {owner}/{name} appears twice in the archive")
+            seen.add((owner, name))
+            plan.append((owner, name, src))
+        for owner, name, src in plan:
+            dest = _cars_dir() / owner / "skins" / name
+            dest.mkdir(parents=True, exist_ok=True)
+            if (src / "ui_skin.json").is_file():
+                shutil.copyfile(src / "ui_skin.json", dest / "ui_skin.json")
+        return {"car": plan[0][0], "skins": [f"{o}/{n}" for o, n, _ in plan]}
+    except uploadguard.Rejected as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 @router.post("/cars/{car}/skins", status_code=201)
 async def upload_skin(car: str, file: UploadFile) -> dict:
-    return {"car": _safe(car), "skin": await _unzip_upload(file, _cars_dir() / _safe(car) / "skins")}
+    with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
+        while chunk := await file.read(1 << 20):
+            tmp.write(chunk)
+    try:
+        res = await run_in_threadpool(_install_skins, Path(tmp.name), _safe(car))
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+    return {**res, "skin": res["skins"][0].split("/", 1)[1]}   # `skin`: the first, for older clients
 
 
 @router.get("/cars/{car}/skins/{skin}.zip")
@@ -327,7 +411,8 @@ _uploads: dict[str, dict] = {}
 
 
 class UploadIn(BaseModel):
-    kind: Literal["track", "car"] | None = None   # None = detect it from the archive (only when settings.upload_permissive)
+    kind: Literal["track", "car", "skin"] | None = None   # None = detect it from the archive (only when settings.upload_permissive); "skin" = skins for `car`, kept as folder names + ui_skin.json
+    car: str = Field(default="", max_length=80)   # the car model the skins are for (only with kind "skin", when the archive does not say)
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
     source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
     source_official: bool = False
@@ -348,10 +433,12 @@ def _upload(uid: str) -> dict:
 @router.post("/uploads", status_code=201)
 def upload_start(body: UploadIn) -> dict:
     _need_kind(body.kind)
+    if body.car:
+        _skin_folder(body.car)
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "car": body.car, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -377,9 +464,13 @@ def _finish(uid: str) -> None:
     u = _uploads[uid]
     dest = _cars_dir() if u["requested_kind"] == "car" else _tracks_dir()   # no kind: the folder found inside decides where it goes
     try:
-        res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""), auto=u["requested_kind"] is None)
-        u["result"], u["note"] = str(res), getattr(res, "note", "")
-        u["kind"] = getattr(res, "kind", "") or u["requested_kind"] or ""
+        if u["requested_kind"] == "skin":
+            res = _install_skins(u["path"], u.get("car") or None)
+            u["result"], u["note"], u["kind"] = ", ".join(res["skins"]), "", "skin"
+        else:
+            res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""), auto=u["requested_kind"] is None)
+            u["result"], u["note"] = str(res), getattr(res, "note", "")
+            u["kind"] = getattr(res, "kind", "") or u["requested_kind"] or ""
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -402,7 +493,8 @@ def upload_complete(uid: str) -> dict:
 
 
 class LinkIn(BaseModel):
-    kind: Literal["track", "car"] | None = None
+    kind: Literal["track", "car", "skin"] | None = None
+    car: str = Field(default="", max_length=80)
     url: str = Field(min_length=8, max_length=2000)
     pack: bool = False
     source_url: str = ""
@@ -430,6 +522,8 @@ def _fetch_then_finish(uid: str, url: str) -> None:
 def upload_from_link(body: LinkIn) -> dict:
     """The server downloads a MediaFire / Google Drive / Dropbox link itself, then unpacks it (poll GET /uploads/{id})."""
     _need_kind(body.kind)
+    if body.car:
+        _skin_folder(body.car)
     try:
         download.check_url(body.url)
     except ValueError as e:
@@ -437,7 +531,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "car": body.car, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 
@@ -497,9 +591,11 @@ def setup_users(name: str) -> list[str]:
     from sqlmodel import Session, select
 
     from app.db import engine
-    from app.models import Event, Server
+    from app.models import Championship, Event, LeagueMember, Server
     users = []
     with Session(engine) as sess:
+        users += [f"league {c.name}" for c in sess.exec(select(Championship)).all() if name in (c.car_setups or {}).values()]
+        users += [f"driver {m.name or m.guid} (league {m.championship_id})" for m in sess.exec(select(LeagueMember).where(LeagueMember.fixed_setup == name)).all()]
         users += [f"server {s.name}" for s in sess.exec(select(Server)).all() if _wants_setup(s.session, name) or any(e.get("FIXED_SETUP") == f"{name}.ini" for e in s.entry_list or [])]
         users += [f"event {ev.title}" for ev in sess.exec(select(Event)).all() if _wants_setup(ev.data, name)]
     return users
