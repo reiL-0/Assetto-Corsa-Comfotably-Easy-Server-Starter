@@ -220,7 +220,7 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
              "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast, "RESTRICTOR": e.restrictor,
-             **({"FIXED_SETUP": f"{e.fixed_setup}.ini"} if e.fixed_setup else {})}
+             **({"FIXED_SETUP": f"{setup}.ini"} if (setup := e.fixed_setup or body.car_setups.get(e.model)) else {})}   # its own setup, else the one set for its car
             for e in body.entries
         ]
     else:  # one open slot per client: the models in the counts asked for (grouped), or in turns; the skin is the pack's first (clients pick their own)

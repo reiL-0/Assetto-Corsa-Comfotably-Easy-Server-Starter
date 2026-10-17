@@ -95,6 +95,9 @@ def test_apply_writes_fixed_setup_only_where_asked_and_checks_it_exists():
     entries = [{"model": "audi", "driver_name": "Ana", "fixed_setup": "bmw_fixed"}, {"model": "bmw", "driver_name": "Beto"}]
     r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": entries})
     assert [e.get("FIXED_SETUP") for e in r.json()["entry_list"]] == ["bmw_fixed.ini", None]
+    assert _put("audi_own").status_code == 201   # a reserved slot has its own setup, or the one set for its car
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": entries + [{"model": "audi", "driver_name": "Caro", "fixed_setup": "audi_own"}], "car_setups": {"bmw": "bmw_fixed"}})
+    assert [e.get("FIXED_SETUP") for e in r.json()["entry_list"]] == ["bmw_fixed.ini", "bmw_fixed.ini", "audi_own.ini"]
 
 
 def test_a_setup_in_use_cannot_be_deleted():
