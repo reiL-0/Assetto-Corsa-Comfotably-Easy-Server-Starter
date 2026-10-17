@@ -10,6 +10,8 @@ Pure functions (no I/O besides the files they are given), used by `content._extr
 
 from __future__ import annotations
 
+import os
+import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -55,24 +57,63 @@ def check_zip(zf: zipfile.ZipFile, *, max_files: int = MAX_FILES, max_total: int
         raise Rejected(f"the archive unpacks to {total >> 20} MB, over the {max_total >> 20} MB limit")
 
 
-def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_TOTAL) -> None:
-    """The same count/size limits on what was really unpacked (a last look after the sandboxed unpacking)."""
+MAX_DEPTH = 40
+
+
+def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_TOTAL, max_depth: int = MAX_DEPTH) -> None:
+    """The same count/size limits on what was really unpacked (a last look after the sandboxed unpacking), without following links:
+    only plain files and folders are allowed (no symlinks, hard links, devices, pipes) and not too deep."""
     n = total = 0
-    for f in root.rglob("*"):
-        if f.is_file():
+    for dirpath, dirs, files in os.walk(root):
+        if len(Path(dirpath).relative_to(root).parts) > max_depth:
+            raise Rejected("the archive nests folders too deep")
+        for name in dirs + files:
+            st = os.lstat(os.path.join(dirpath, name))
             n += 1
-            total += f.stat().st_size
-            if n > max_files or total > max_total:
-                raise Rejected("the archive unpacks to more files or bytes than allowed")
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                raise Rejected(f"unsafe archive entry (link or special file): {name!r}")
+            total += st.st_size
+        if n > max_files or total > max_total:
+            raise Rejected("the archive unpacks to more files or bytes than allowed")
+
+
+def _markers(top: Path) -> tuple[bool, bool]:
+    """(looks like a car, looks like a track) from files directly inside `top`."""
+    names = {p.name.lower() for p in top.iterdir() if p.is_file()}
+    car = (top / "ui" / "ui_car.json").is_file() or "data.acd" in names or (top / "data" / "car.ini").is_file()
+    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or (top / "data" / "surfaces.ini").is_file() or any(p.is_file() for p in top.glob("ui/**/ui_track.json"))
+    return car, track
 
 
 def detect_kind(top: Path) -> str | None:
     """«car» or «track» from what the unpacked folder holds, or None when it is not clear (then the kind the uploader chose stands).
-    A car has `ui/ui_car.json` or `data.acd` (or an unpacked `data/` with `car.ini`); a track has `models*.ini` or a `data/surfaces.ini` (also inside a layout folder)."""
-    names = {p.name.lower() for p in top.iterdir() if p.is_file()}
-    car = (top / "ui" / "ui_car.json").is_file() or "data.acd" in names or (top / "data" / "car.ini").is_file()
-    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or any(p.is_file() for p in top.glob("**/data/surfaces.ini")) or any(p.is_file() for p in top.glob("ui/**/ui_track.json"))
+    A car has `ui/ui_car.json` or `data.acd` (or an unpacked `data/` with `car.ini`); a track has `models*.ini`, a `data/surfaces.ini` or a `ui/**/ui_track.json`."""
+    car, track = _markers(top)
     return "car" if car and not track else "track" if track and not car else None
+
+
+def find_content_root(base: Path, hint: str | None = None) -> tuple[Path, str]:
+    """The ONE car or track folder somewhere inside an unpacked archive (mods ship `assettocorsa/content/tracks/<name>` and a README): the shallowest folders
+    that look like content, never looking inside one that was found. `hint` ("car"/"track") settles a folder that looks like both. Raises `Rejected` for none, several, or an unclear one."""
+    found, queue = [], [base]
+    while queue:
+        d = queue.pop(0)
+        car, track = _markers(d)
+        if car or track:
+            if d == base:   # no folder to name it by (and its layout folders would be mistaken for tracks)
+                raise Rejected("the car or track files are loose at the root of the archive: put them inside a folder named after it")
+            kind = "car" if car and not track else "track" if track and not car else hint
+            if not kind:
+                raise Rejected(f"{d.name!r} looks like both a car and a track: say which one it is")
+            found.append((d, kind))
+            continue
+        queue += sorted(p for p in d.iterdir() if p.is_dir())
+    if len(found) != 1:
+        raise Rejected("no car or track folder found in the archive (put it in a folder named after it)" if not found
+                       else "the archive holds several cars or tracks (" + ", ".join(d.name for d, _ in found) + "): upload them one at a time")
+    return found[0]
 
 
 def keep_in_pack(kind: str, rel: str) -> bool:

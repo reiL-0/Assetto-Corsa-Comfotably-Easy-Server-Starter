@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     limits_scope: str = ""
     unpack_timeout: int = 900   # seconds an uploaded archive may take to unpack before the child is killed (app/unpack.py)
     unpack_mem_mb: int = 1024   # memory cap of that child when limits_scope is on
+    # Lenient uploads of cars/tracks (the league's own panel): any common archive (.7z, .rar, .tar.gz… through bsdtar), the car or track folder may sit anywhere inside
+    # (mods ship `assettocorsa/content/tracks/<name>` plus a README) and its kind is detected. Off = strict (hosting for others): only .zip, one folder at the root, kind declared.
+    upload_permissive: bool = False
     port_range_start: int = 9600
     port_range_end: int = 9700
     resource_log_seconds: int = 30    # how often CPU/RAM/steal are written to <data_dir>/logs/resources-*.jsonl (app/resourcelog.py); 0 = off

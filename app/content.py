@@ -180,54 +180,59 @@ class Installed(str):
     note: str = ""
 
 
-def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "") -> str:
+def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "", auto: bool = False) -> str:
     """Unpacks a .zip (one top-level folder = the content's name; no .rar, no loose files) into `dest_parent`. Returns that name.
     Extracts to a scratch dir first and only moves it in after checking every entry stayed inside it (and the size limits of app/uploadguard.py).
     `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures. Cars and tracks are cut down always: `pack` is kept only so older clients that send it still work.
-    `source_url`: the modder's page for the «Descargar» button (without it the content has no button)."""
+    `source_url`: the modder's page for the «Descargar» button (without it the content has no button).
+    `settings.upload_permissive` (the league's own panel): any archive format, the car/track folder may sit anywhere inside and the kind is detected from it; `auto` = the uploader did not say what it is."""
+    permissive = settings.upload_permissive and dest_parent in (_cars_dir(), _tracks_dir())
     with archive.open("rb") as fh:
-        magic = fh.read(8)
+        magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
     try:
-        if magic[:4] == b"PK\x03\x04":
+        fmt = unpack.archive_format(magic)
+        if fmt == "zip":
             with zipfile.ZipFile(archive) as zf:
                 uploadguard.check_zip(zf)   # cheap early refusal from the headers (names, count, sizes, ratios); the real limits are enforced while unpacking
-        else:
-            raise HTTPException(400, unpack.NOT_ZIP)
+        elif not (fmt and permissive):   # other formats are listed by the child, which counts what it really writes
+            raise HTTPException(400, unpack.NOT_ARCHIVE if permissive else unpack.NOT_ZIP)
         try:
-            unpack.run_sandboxed(archive, scratch)   # in a limited child process with a byte counter and a timeout (app/unpack.py)
+            unpack.run_sandboxed(archive, scratch, permissive=permissive)   # in a limited child process with a byte counter and a timeout (app/unpack.py)
         except OSError as e:
             raise HTTPException(507, str(e)) from e
         uploadguard.check_tree(scratch)   # last look at what really landed
         for f in scratch.rglob("*"):  # no symlinks, nothing outside the scratch dir
             if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
-        tops = [p for p in scratch.iterdir()]
-        if len(tops) != 1 or not tops[0].is_dir():
-            raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
-        root = _safe(tops[0].name)
+        asked = None if dest_parent not in (_cars_dir(), _tracks_dir()) or auto else "car" if dest_parent == _cars_dir() else "track"
+        if permissive:
+            top, found = uploadguard.find_content_root(scratch, asked)
+        else:
+            tops = [p for p in scratch.iterdir()]
+            if len(tops) != 1 or not tops[0].is_dir():
+                raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
+            top, found = tops[0], uploadguard.detect_kind(tops[0])
+        root = _safe(top.name)
         note = ""
-        if dest_parent in (_cars_dir(), _tracks_dir()):
-            asked = "car" if dest_parent == _cars_dir() else "track"
-            found = uploadguard.detect_kind(tops[0])
-            if found and found != asked:   # a car sent as a track (or the other way round) goes where it belongs
-                dest_parent = _cars_dir() if found == "car" else _tracks_dir()
-                note = f"looked like a {found}, not a {asked}: installed as a {found}"
+        if dest_parent in (_cars_dir(), _tracks_dir()) and found and found != asked:   # a car sent as a track (or the other way round) goes where it belongs
+            dest_parent = _cars_dir() if found == "car" else _tracks_dir()
+            note = f"looked like a {found}, not a {asked}: installed as a {found}" if asked else ""
         full_digest = ""
         if dest_parent in (_cars_dir(), _tracks_dir()):   # cars and tracks are ALWAYS cut down to the server pack (a track keeps its map.png/map.ini for the live map)
-            full_digest = catalog.digest_dir(tops[0])[0]   # hash of the WHOLE upload: a rights claim blocked that one, and cutting the pack down must not let it back in
+            full_digest = catalog.digest_dir(top)[0]   # hash of the WHOLE upload: a rights claim blocked that one, and cutting the pack down must not let it back in
             catalog.check_not_blocked(full_digest)
-            uploadguard.prune(tops[0], "car" if dest_parent == _cars_dir() else "track")
+            uploadguard.prune(top, "car" if dest_parent == _cars_dir() else "track")
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
         kind = "car" if dest_parent == _cars_dir() else "track"
         with catalog.mutation_lock:   # ponytail: held during copytree/digest (one process, runs in the threadpool); uploads and scans queue up. Staging dir + short swap under the lock if that hurts
             if cataloged:
-                digest, size, nfiles = catalog.digest_dir(tops[0])
+                digest, size, nfiles = catalog.digest_dir(top)
                 if full_digest:
                     catalog.check_not_blocked(full_digest)   # again under the lock: a claim may have landed while the upload was cut down or waited
                 catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
             dest_parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(tops[0], dest_parent / root, dirs_exist_ok=True)
+            shutil.copytree(top, dest_parent / root, dirs_exist_ok=True)
             res = Installed(root)
             if cataloged:
                 res.kind = kind
@@ -312,10 +317,15 @@ _uploads: dict[str, dict] = {}
 
 
 class UploadIn(BaseModel):
-    kind: Literal["track", "car"]
+    kind: Literal["track", "car"] | None = None   # None = detect it from the archive (only when settings.upload_permissive)
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
     source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
     source_official: bool = False
+
+
+def _need_kind(kind: str | None) -> None:
+    if kind is None and not settings.upload_permissive:
+        raise HTTPException(422, "say whether it is a car or a track (kind)")
 
 
 def _upload(uid: str) -> dict:
@@ -327,10 +337,11 @@ def _upload(uid: str) -> dict:
 
 @router.post("/uploads", status_code=201)
 def upload_start(body: UploadIn) -> dict:
+    _need_kind(body.kind)
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "state": "uploading", "result": None, "error": None}
     return {"id": uid}
 
 
@@ -354,11 +365,11 @@ async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
 def _finish(uid: str) -> None:
     """Runs in its own thread: it must outlive the request that started it."""
     u = _uploads[uid]
-    dest = _tracks_dir() if u["requested_kind"] == "track" else _cars_dir()
+    dest = _cars_dir() if u["requested_kind"] == "car" else _tracks_dir()   # no kind: the folder found inside decides where it goes
     try:
-        res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""))
+        res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""), auto=u["requested_kind"] is None)
         u["result"], u["note"] = str(res), getattr(res, "note", "")
-        u["kind"] = getattr(res, "kind", "") or u["requested_kind"]
+        u["kind"] = getattr(res, "kind", "") or u["requested_kind"] or ""
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -381,7 +392,7 @@ def upload_complete(uid: str) -> dict:
 
 
 class LinkIn(BaseModel):
-    kind: Literal["track", "car"]
+    kind: Literal["track", "car"] | None = None
     url: str = Field(min_length=8, max_length=2000)
     pack: bool = False
     source_url: str = ""
@@ -408,6 +419,7 @@ def _fetch_then_finish(uid: str, url: str) -> None:
 @router.post("/uploads/from-link", status_code=202)
 def upload_from_link(body: LinkIn) -> dict:
     """The server downloads a MediaFire / Google Drive / Dropbox link itself, then unpacks it (poll GET /uploads/{id})."""
+    _need_kind(body.kind)
     try:
         download.check_url(body.url)
     except ValueError as e:
@@ -415,7 +427,7 @@ def upload_from_link(body: LinkIn) -> dict:
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
-    _uploads[uid] = {"path": path, "kind": body.kind, "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
+    _uploads[uid] = {"path": path, "kind": body.kind or "", "requested_kind": body.kind, "pack": body.pack, "source": catalog.check_source(body.source_url, body.source_official), "size": 0, "total": None, "state": "downloading", "result": None, "error": None}
     threading.Thread(target=_fetch_then_finish, args=(uid, body.url), daemon=True).start()
     return {"id": uid}
 

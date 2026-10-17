@@ -5,7 +5,8 @@ The manager never opens an upload itself: `run_sandboxed` starts `python -m app.
 - a wall-clock timeout in the parent, which kills the child's whole process group;
 - a real byte/file counter: the child writes member by member and stops the moment a limit is crossed, whatever the headers claimed;
 - a free-disk check before it starts (the scratch dir is on the data disk) and one unpacking at a time (`SLOTS`): the others queue.
-The child result is one JSON line. Only `.zip` is accepted (decision 2026-10-06: no `.rar`, whose unpacker is an external program with a history of bugs, and no loose files). Only the child ever touches the untrusted bytes. Stronger isolation (container, gVisor) can wrap the same command later.
+The child result is one JSON line. Strict mode (the default) accepts only `.zip` (decision 2026-10-06: no `.rar`, whose unpacker is an external program with a history of bugs). With `settings.upload_permissive` the child
+also unpacks 7z, rar, tar/gz/bz2/xz/zst with `bsdtar` (libarchive; the magic bytes are checked first so ISO/CAB/… are never opened); a loop in the child measures what it wrote and kills it past the limits. Only the child ever touches the untrusted bytes. Stronger isolation (container, gVisor) can wrap the same command later.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import zipfile
 from pathlib import Path
@@ -26,9 +28,19 @@ from app import uploadguard
 from app.config import settings
 
 NOT_ZIP = "only .zip archives are accepted (not .rar, and no loose files): put the car or track folder inside one .zip"
+NOT_ARCHIVE = "unrecognised archive: send a .zip, .7z, .rar or .tar.gz with the car or track folder inside"
 SLOTS = threading.Semaphore(1)   # ponytail: one unpacking at a time (they are rare and heavy); raise if uploads queue up
 CHUNK = 1 << 20
 MIN_FREE_MARGIN = 1.2            # free disk needed = the byte limit x this
+
+
+def archive_format(head: bytes) -> str | None:
+    """«zip» for a zip, «other» for the formats bsdtar may open in permissive mode, None for anything else (judged by the first 512 bytes, never by the name)."""
+    if head[:4] == b"PK\x03\x04":
+        return "zip"
+    if head[:6] in (b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07", b"\xfd7zXZ\x00") or head[:2] == b"\x1f\x8b" or head[:3] == b"BZh" or head[:4] == b"\x28\xb5\x2f\xfd" or head[257:262] == b"ustar":
+        return "other"
+    return None
 
 
 # ---- the child ------------------------------------------------------------------------------------------------------
@@ -59,15 +71,60 @@ def _extract_zip(archive: Path, dest: Path, max_total: int, max_files: int, max_
     return files, total
 
 
+def _measure(dest: Path) -> tuple[int, int]:
+    """Entries (files + folders) and bytes under `dest` right now, without following links."""
+    n = total = 0
+    for dirpath, dirs, files in os.walk(dest):
+        n += len(dirs) + len(files)
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return n, total
+
+
+def _extract_bsdtar(archive: Path, dest: Path, max_total: int, max_files: int) -> tuple[int, int]:
+    """No `-P`: bsdtar refuses `..`, absolute names and writing through symlinks. The sizes are measured while it runs: the headers may lie."""
+    exe = shutil.which("bsdtar")
+    if not exe:
+        raise uploadguard.Rejected("this server cannot unpack that format (bsdtar is not installed)")
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen([exe, "-x", "-f", str(archive), "-C", str(dest), "--no-same-owner", "--no-same-permissions"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+        while True:   # ponytail: polled every 0.3 s, so a fast writer overshoots by what the disk writes in that time; it is bounded by the free-disk margin, FSIZE, max_files and the timeout. Poll faster if that is ever too loose
+            try:
+                p.wait(timeout=0.3)
+                break
+            except subprocess.TimeoutExpired:
+                n, total = _measure(dest)
+                if n > max_files or total > max_total:
+                    p.kill()
+                    p.wait()
+                    raise uploadguard.Rejected("the archive unpacks to more files or bytes than allowed")
+        if p.returncode:
+            err.seek(0)
+            raise uploadguard.Rejected("cannot unpack the archive (damaged, encrypted or unsupported): " + err.read(300).decode("utf-8", "replace").strip())
+    n, total = _measure(dest)
+    if n > max_files or total > max_total:
+        raise uploadguard.Rejected("the archive unpacks to more files or bytes than allowed")
+    return n, total
+
+
 def child_main(argv: list[str]) -> int:
     archive, dest = Path(argv[0]), Path(argv[1])
     max_total, max_files, max_file, cpu_s = (int(x) for x in argv[2:6])
+    permissive = argv[6] == "1"
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_s, cpu_s + 5))
     resource.setrlimit(resource.RLIMIT_FSIZE, (max_file + CHUNK, max_file + CHUNK))   # no single file past the limit, bsdtar included
     try:
-        if archive.open("rb").read(4) != b"PK\x03\x04":
-            raise uploadguard.Rejected(NOT_ZIP)
-        files, total = _extract_zip(archive, dest, max_total, max_files, max_file)
+        with archive.open("rb") as fh:
+            fmt = archive_format(fh.read(512))
+        if fmt == "zip":
+            files, total = _extract_zip(archive, dest, max_total, max_files, max_file)
+        elif fmt and permissive:
+            files, total = _extract_bsdtar(archive, dest, max_total, max_files)
+        else:
+            raise uploadguard.Rejected(NOT_ARCHIVE if permissive else NOT_ZIP)
         print(json.dumps({"ok": True, "files": files, "bytes": total}))
         return 0
     except (uploadguard.Rejected, zipfile.BadZipFile) as e:
@@ -80,19 +137,20 @@ def child_main(argv: list[str]) -> int:
 
 # ---- the parent ------------------------------------------------------------------------------------------------------
 
-def _command(archive: Path, dest: Path, timeout: int, max_total: int, max_files: int, max_file: int) -> list[str]:
+def _command(archive: Path, dest: Path, timeout: int, max_total: int, max_files: int, max_file: int, permissive: bool = False) -> list[str]:
     scope: list[str] = []
     if settings.limits_scope in ("user", "system"):   # same switch as the per-server limits (supervisor.limit_prefix)
         scope = ["systemd-run", "--scope", "--quiet", "--collect", "-p", f"MemoryMax={settings.unpack_mem_mb}M", "-p", "MemorySwapMax=0",
                  "-p", "CPUQuota=100%", "-p", "TasksMax=64", "-p", f"RuntimeMaxSec={timeout + 10}"] + (["--user"] if settings.limits_scope == "user" else [])
-    return [*scope, sys.executable, "-m", "app.unpack", str(archive), str(dest), str(max_total), str(max_files), str(max_file), str(timeout)]
+    return [*scope, sys.executable, "-m", "app.unpack", str(archive), str(dest), str(max_total), str(max_files), str(max_file), str(timeout), "1" if permissive else "0"]
 
 
 def run_sandboxed(archive: Path, dest: Path, *, timeout: int | None = None, max_total: int = uploadguard.MAX_TOTAL,
-                  max_files: int = uploadguard.MAX_FILES, max_file: int = uploadguard.MAX_FILE) -> dict:
+                  max_files: int = uploadguard.MAX_FILES, max_file: int = uploadguard.MAX_FILE, permissive: bool | None = None) -> dict:
     """Unpacks `archive` into the (empty) `dest` in the limited child. Returns {files, bytes}; raises `uploadguard.Rejected` with a sentence, or
     `OSError` when the machine cannot take it (not enough free disk)."""
     timeout = timeout or settings.unpack_timeout
+    permissive = settings.upload_permissive if permissive is None else permissive
     free = shutil.disk_usage(dest).free
     if free < max_total * MIN_FREE_MARGIN:
         max_total = int(free / MIN_FREE_MARGIN)   # never promise more than the disk can hold
@@ -100,7 +158,7 @@ def run_sandboxed(archive: Path, dest: Path, *, timeout: int | None = None, max_
             raise OSError("not enough free disk space to unpack this archive right now")
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent), "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"}
     with SLOTS:   # the others wait here, one unpacking at a time
-        p = subprocess.Popen(_command(archive, dest, timeout, max_total, max_files, max_file), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        p = subprocess.Popen(_command(archive, dest, timeout, max_total, max_files, max_file, permissive), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              env=env, start_new_session=True)
         try:
             out, err = p.communicate(timeout=timeout)
