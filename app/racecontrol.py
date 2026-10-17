@@ -27,6 +27,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import supervisor
 from app.auth import require, require_any
@@ -150,11 +151,32 @@ class NascarIn(BaseModel):
 @control_router.post("/nascar")
 @control_router.patch("/nascar")
 def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
-    _, rc = _control(server_id, sess)
+    inst, rc = _control(server_id, sess)
     try:
         rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None, body.next_delay_min)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    # Remember it for the next race (the in-memory engine is reset by every new_session). Explicit `stages` are API-only and not part of a preset.
+    if not rc.nascar:
+        remembered = None
+    elif not rc.nascar.fixed_ends:
+        remembered = {"total": rc.nascar.total, "shares": list(rc.nascar.shares)}
+    else:
+        return rc.snapshot()
+    server = _get(sess, server_id)
+    saved = dict(server.session or {})   # a new dict: a JSON column does not notice in-place changes
+    saved.pop("nascar", None)
+    if remembered:
+        saved["nascar"] = remembered
+    server.session = saved or None
+    sess.add(server)
+    try:
+        sess.commit()
+    except SQLAlchemyError as e:   # the live engine did change (that is what was asked): say only the memory for later races failed
+        sess.rollback()
+        log.warning("NASCAR could not be saved for server %s: %s", server_id, e)
+        raise HTTPException(503, "NASCAR quedó armado en esta carrera, pero no se pudo guardar para las siguientes") from e
+    inst.nascar_config = remembered
     return rc.snapshot()
 
 

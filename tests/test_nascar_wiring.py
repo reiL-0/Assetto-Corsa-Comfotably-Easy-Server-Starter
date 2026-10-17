@@ -497,3 +497,44 @@ def test_nascar_is_steward_only(live):
     assert _client('reporter').post(url, json={'total': 70}).status_code == 403
     assert _client('driver').patch(url, json={'total': 70}).status_code == 403
     assert _client('steward').post(url, json={'total': 70}).status_code == 200
+
+
+def test_panel_nascar_is_remembered_for_the_next_race(live, monkeypatch):
+    from app import timeline
+    from app.stewards import engine as stewards_engine
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    monkeypatch.setattr(timeline, 'on_session_event', lambda *args: None)
+    monkeypatch.setattr(stewards_engine, 'on_event', lambda *args: None)
+    url = f'{V}/servers/{sid}/race-control/nascar'
+
+    def stored():
+        with Session(engine) as sess:
+            return (sess.get(Server, sid).session or {}).get('nascar')
+
+    assert api.post(url, json={'total': 70, 'shares': [20, 50, 30]}).status_code == 200
+    assert stored() == {'total': 70, 'shares': [20, 50, 30]}
+    assert api.patch(url, json={'total': 100}).status_code == 200   # the distance changes, the frozen shares stay
+    assert stored() == {'total': 100, 'shares': [20, 50, 30]}
+    client._apply({'type': 'new_session', 'session_index': 1, 'session_type': 2})   # qualifying: nothing armed
+    assert live_rc.state_of(sid, True, client.session).nascar is None
+    client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})   # the race arms itself, nobody touched the panel
+    rc = live_rc.state_of(sid, True, client.session)
+    assert rc.nascar.total == 100 and rc.nascar.ends == [20, 70, 100]
+    assert api.post(url, json={'total': 0}).status_code == 200   # disarming forgets it
+    assert stored() is None
+    client._apply({'type': 'new_session', 'session_index': 2, 'session_type': 3})
+    assert live_rc.state_of(sid, True, client.session).nascar is None
+
+
+def test_panel_nascar_save_failure_is_reported_but_the_race_stays_armed(live, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    sid, client, _ = live
+
+    def boom(self):
+        raise OperationalError('commit', {}, Exception('disk full'))
+
+    monkeypatch.setattr(Session, 'commit', boom)
+    response = api.post(f'{V}/servers/{sid}/race-control/nascar', json={'total': 70})
+    assert response.status_code == 503 and 'no se pudo guardar' in response.json()['detail']
+    assert live_rc.state_of(sid, True, client.session).nascar.total == 70
