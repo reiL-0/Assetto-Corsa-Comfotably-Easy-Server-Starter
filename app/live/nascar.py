@@ -10,10 +10,9 @@ The race is TIMED and long in acServer (its clock is ignored); the manager count
 Rules (the owner's):
   * The distance is `total` laps, split into stages by percentages (30/45/25 by default, so 70 laps end stage 1 at lap 21 and stage 2 at lap 53) or by explicit laps. `set_total` changes the
     distance while racing; stages that are not over yet are recomputed.
-  * A stage ends at its lap if the flag is green; if a CAUTION (yellow, vsc, fcy) comes out within the last `window` laps of the stage (2 % of its laps while no caution has been deployed in that
-    stage, 1 % once one has; at least one lap) the stage ends right there under caution. Then a stage break (a yellow if there was none) until the director says green.
+  * A stage ends at its lap if the flag is green; if a CAUTION (yellow, vsc, fcy) comes out within the last `window` laps of the stage (10 laps, Cup 2026; fewer if the stage is shorter) the stage ends right there under caution. Then a stage break (a yellow if there was none) until the director says green.
   * The final stage ends when the leader completes `total`: green -> chequered (DRAINING: every car finishes its own last lap, then the caller calls `done`). A caution -> OVERTIME: wait for
-    green, then `ot_laps` (2) laps; a caution before the end of those laps, or one at their end, is another attempt, up to `ot_max` (3); when they are spent the race ends.
+    green, then `ot_laps` (2) laps; a caution before the end of those laps, or one at their end, is another attempt, with no limit (Cup 2026) unless `ot_max` is given; when they are spent the race ends.
   * A caution is counted when the flag goes from green to any caution (yellow -> fcy is the same caution).
   * The WHITE flag comes out by itself when the leader completes the lap before the last one (the race, or an overtime attempt) under green; if that lap was run under caution it comes out with the
     green flag that follows. The stage warnings ("5 laps to go") are plain `say` actions.
@@ -31,7 +30,7 @@ MAX_TOTAL = 1000
 MAX_SHARES = 6
 MAX_SHARE = 1000
 WARN_LAPS = (5, 3, 1)   # "laps to go" notices before the end of a stage that is not the last
-WINDOW_PCT = (2, 1)   # % of the stage's laps: with no caution deployed in it yet / with one or more
+WINDOW_LAPS = 10   # Cup 2026: a caution in the last 10 laps of a stage (or fewer, if the stage is shorter) ends it right there
 
 
 def stage_ends(total: int, shares: tuple[float, ...] = STAGES_DEFAULT) -> list[int]:
@@ -44,7 +43,7 @@ def stage_ends(total: int, shares: tuple[float, ...] = STAGES_DEFAULT) -> list[i
 
 
 class Nascar:
-    def __init__(self, total: int, shares: tuple[float, ...] = STAGES_DEFAULT, ends: list[int] | None = None, ot_laps: int = 2, ot_max: int = 3) -> None:
+    def __init__(self, total: int, shares: tuple[float, ...] = STAGES_DEFAULT, ends: list[int] | None = None, ot_laps: int = 2, ot_max: int | None = None) -> None:
         if type(total) is not int or not 2 <= total <= MAX_TOTAL:
             raise ValueError(f"total must be an integer between 2 and {MAX_TOTAL}")
         shares = tuple(shares)
@@ -64,8 +63,7 @@ class Nascar:
 
     def window(self) -> int:
         """Laps before the end of the current stage in which a caution ends it right there."""
-        length = self.ends[self.stage] - self.stage_start()
-        return max(1, math.ceil(length * WINDOW_PCT[1 if self.cautions_in_stage else 0] / 100))
+        return min(WINDOW_LAPS, self.ends[self.stage] - self.stage_start())
 
     def set_total(self, total: int) -> list[tuple]:
         """Change the distance while racing (stages already over keep their end, also the one of a break that has just started). It cannot go under the laps already run."""
@@ -94,7 +92,7 @@ class Nascar:
         if is_caution and not was_caution:
             if self.phase == RACING:
                 self.cautions_in_stage += 1
-                if self.stage < len(self.ends) - 1 and self.ends[self.stage] - self.laps <= self.window_after_count():
+                if self.stage < len(self.ends) - 1 and self.ends[self.stage] - self.laps <= self.window():
                     out += self._end_stage(f"AMARILLA: el stage {self.stage + 1} termina aquí")
             elif self.phase == OT_RUN:
                 out += self._ot_failed("amarilla en el overtime")
@@ -109,7 +107,7 @@ class Nascar:
             elif self.phase == OT_WAIT:
                 self.attempts += 1
                 self.phase, self.ot_end = OT_RUN, self.laps + self.ot_laps
-                out.append(("say", f"OVERTIME: intento {self.attempts} de {self.ot_max}, {self.ot_laps} vueltas"))
+                out.append(("say", f"OVERTIME: intento {self.attempts}, {self.ot_laps} vueltas" if self.ot_max is None else f"OVERTIME: intento {self.attempts} de {self.ot_max}, {self.ot_laps} vueltas"))
                 out += self._white_if_due()   # (a one-lap overtime would start with the white flag)
         return out
 
@@ -120,11 +118,6 @@ class Nascar:
             return []
         self.flag = "white"
         return [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")]
-
-    def window_after_count(self) -> int:
-        """The window once this caution is counted: the first caution of a stage still uses the 'none before' percentage."""
-        length = self.ends[self.stage] - self.stage_start()
-        return max(1, math.ceil(length * WINDOW_PCT[1 if self.cautions_in_stage > 1 else 0] / 100))
 
     def on_leader_lap(self, laps: int) -> list[tuple]:
         if laps <= self.laps:
@@ -170,7 +163,7 @@ class Nascar:
         return [("say", text), ("flag", "checkered"), ("finish",)]
 
     def _ot_failed(self, why: str) -> list[tuple]:
-        if self.attempts >= self.ot_max:
+        if self.ot_max is not None and self.attempts >= self.ot_max:
             return [("say", f"OVERTIME: {why}; intentos agotados")] + self._chequered("FIN DE LA CARRERA")
         self.phase = OT_WAIT
         return [("say", f"OVERTIME: {why}; nuevo intento cuando haya verde")]

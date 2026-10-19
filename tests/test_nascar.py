@@ -133,10 +133,10 @@ def test_a_stage_ends_under_green_with_a_break_caution_and_the_director_restarts
 
 
 def test_a_caution_in_the_last_laps_of_the_stage_ends_it_right_there_a_caution_earlier_does_not():
-    n = Nascar(70)   # stage 1 = 21 laps: the window is 1 lap
-    run_to(n, 18)
+    n = Nascar(70)   # stage 1 = 21 laps: the window is the last 10 laps
+    run_to(n, 10)
     n.on_flag("yellow")
-    assert n.phase == RACING, "3 laps from the end of the stage: still racing, under caution"
+    assert n.phase == RACING, "11 laps from the end of the stage: outside the window, still racing under caution"
     out = run_to(n, 21, "yellow")
     assert n.phase == BREAK and ("flag", "yellow") not in out, "ended at its lap under the caution already out: no second yellow"
     m = Nascar(70)
@@ -145,24 +145,24 @@ def test_a_caution_in_the_last_laps_of_the_stage_ends_it_right_there_a_caution_e
     assert m.phase == BREAK and any("termina aquí" in a[1] for a in out if a[0] == "say"), "inside the window: the stage ends there"
 
 
-def test_the_window_shrinks_with_the_cautions_already_deployed_in_the_stage():
-    n = Nascar(200)   # stages end at 60, 150, 200: a 60-lap stage has a window of 2 laps (2 %, no caution yet) and of 1 lap (1 %, one already)
+def test_the_window_is_the_last_10_laps_whatever_the_cautions_already_deployed():
+    n = Nascar(200)   # stages end at 60, 150, 200
     assert n.ends == [60, 150, 200]
-    run_to(n, 57)
+    run_to(n, 48)
     n.on_flag("yellow")
-    assert n.phase == RACING and n.cautions_in_stage == 1, "first caution: 2 %, 2 laps: 3 laps from the end is outside"
+    assert n.phase == RACING and n.cautions_in_stage == 1, "12 laps from the end: outside"
     n.on_flag("green")
-    run_to(n, 58)
+    run_to(n, 49)
     n.on_flag("yellow")
-    assert n.phase == RACING and n.cautions_in_stage == 2, "second caution: 1 %, 1 lap: 2 laps from the end is now outside"
-    m = Nascar(200)
-    run_to(m, 58)
+    assert n.phase == RACING and n.cautions_in_stage == 2, "11 laps from the end: still outside, however many cautions"
+    n.on_flag("green")
+    run_to(n, 50)
+    n.on_flag("yellow")
+    assert n.phase == BREAK, "10 laps from the end: inside the window"
+    m = Nascar(8, ends=[4, 8])   # a stage shorter than 10 laps: any caution in it ends it
+    run_to(m, 1)
     m.on_flag("yellow")
-    assert m.phase == BREAK, "a first caution 2 laps from the end: inside the window of 2 %"
-    k = Nascar(200)
-    run_to(k, 57); k.on_flag("yellow"); k.on_flag("green"); run_to(k, 59)
-    k.on_flag("yellow")
-    assert k.phase == BREAK, "a second caution 1 lap from the end: inside the window of 1 %"
+    assert m.phase == BREAK
 
 
 def test_yellow_to_fcy_is_one_caution_not_two():
@@ -218,7 +218,13 @@ def test_a_caution_in_the_overtime_or_at_its_end_is_another_attempt_until_they_a
     n.on_flag("green")
     assert n.phase == OT_RUN and n.attempts == 3
     out = n.on_flag("yellow")
-    assert n.phase == DRAINING and ("flag", "checkered") in out and any("agotados" in a[1] for a in out if a[0] == "say"), "the third attempt failed: the race ends"
+    assert n.phase == OT_WAIT and ("flag", "checkered") not in out, "Cup 2026: no limit of attempts"
+    m = Nascar(70, ot_max=1)   # (a league that wants a limit can still ask for one)
+    m.stage = 2
+    run_to(m, 70, "yellow")
+    m.on_flag("green")
+    out = m.on_flag("yellow")
+    assert m.phase == DRAINING and ("flag", "checkered") in out and any("agotados" in a[1] for a in out if a[0] == "say")
 
 
 def test_the_distance_can_be_changed_while_racing_and_pending_stages_are_recomputed():
