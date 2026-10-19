@@ -259,7 +259,7 @@ def test_leader_and_flag_do_not_reenter(live, monkeypatch):
     sid, client, _ = live
     def say(*args):
         assert not live_rc._lock._is_owned()
-    monkeypatch.setattr(adapter, '_say_later', say)
+    monkeypatch.setattr(adapter, '_say', say)
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
     set_flag = rc.set_flag
@@ -295,7 +295,7 @@ def test_pending_stage_yellow_does_not_overwrite_director_green(live, monkeypatc
         assert not live_rc._lock._is_owned()
         rc.set_flag('green')
 
-    monkeypatch.setattr(adapter, '_say_later', director_restarts)
+    monkeypatch.setattr(adapter, '_say', director_restarts)
     adapter.nascar_actions(sid, state, actions, 3)
     assert rc.snapshot()['flag'] == rc.nascar.flag == 'green'
     assert rc.nascar.phase == 'racing' and rc.nascar.stage == 1
@@ -304,7 +304,7 @@ def test_pending_stage_yellow_does_not_overwrite_director_green(live, monkeypatc
 def test_reused_slot_finishes_on_its_next_crossing(live, monkeypatch):
     sid, client, sent = live
     monkeypatch.setattr(client, '_record', lambda e: None)
-    monkeypatch.setattr(adapter, '_say_later', lambda *args: None)
+    monkeypatch.setattr(adapter, '_say', lambda *args: None)
     monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
     monkeypatch.setattr(adapter.time, 'time', lambda: 100)
     from app.stewards import engine
@@ -355,7 +355,7 @@ def test_session_events_preserve_then_clear(live, monkeypatch):
 @pytest.mark.parametrize('timeout', [False, True])
 def test_finish_once(live, monkeypatch, timeout):
     sid, client, sent = live
-    monkeypatch.setattr(adapter, '_say_later', lambda *args: None)
+    monkeypatch.setattr(adapter, '_say', lambda *args: None)
     monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
     monkeypatch.setattr(adapter.time, 'time', lambda: 100)
     client.cars[4] = {'driver_name': 'Rezagado', 'driver_guid': '76561190000000002'}
@@ -406,7 +406,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'violations', 'exempt', 'nascar', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -452,7 +452,7 @@ def test_http_invalid_delay_preserves_total_and_delay(live, delay, method, total
 @pytest.mark.parametrize('delay', [0, 2])
 def test_finish_uses_live_delay_and_keeps_an_existing_deadline(live, monkeypatch, delay):
     sid, client, sent = live
-    monkeypatch.setattr(adapter, '_say_later', lambda *args: None)
+    monkeypatch.setattr(adapter, '_say', lambda *args: None)
     monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(2, stages=[2])
@@ -478,7 +478,7 @@ def test_finish_uses_live_delay_and_keeps_an_existing_deadline(live, monkeypatch
 def test_acsp_hook_uses_leaderboard_maximum(live, monkeypatch):
     sid, client, _ = live
     monkeypatch.setattr(client, '_record', lambda e: None)
-    monkeypatch.setattr(adapter, '_say_later', lambda *args: None)
+    monkeypatch.setattr(adapter, '_say', lambda *args: None)
     from app.stewards import engine
     monkeypatch.setattr(engine, 'on_event', lambda *args: None)
     rc = live_rc.state_of(sid, True, client.session, create=True)
@@ -538,3 +538,29 @@ def test_panel_nascar_save_failure_is_reported_but_the_race_stays_armed(live, mo
     response = api.post(f'{V}/servers/{sid}/race-control/nascar', json={'total': 70})
     assert response.status_code == 503 and 'no se pudo guardar' in response.json()['detail']
     assert live_rc.state_of(sid, True, client.session).nascar.total == 70
+
+
+def test_the_white_flag_of_the_engine_reaches_the_real_flag_and_the_screen(live):
+    sid, client, sent = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    rc.nascar.stage, rc.nascar.laps = 2, 68
+    state, actions = live_rc.on_lap(sid, 69, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    snap = rc.snapshot()
+    assert snap['flag'] == rc.nascar.flag == 'white' and sent == []
+    assert [n['text'] for n in snap['notices']] == ['BANDERA BLANCA: última vuelta']
+
+
+def test_a_green_that_brings_the_white_flag_says_green_first_and_white_after(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    rc.nascar.stage, rc.nascar.laps = 2, 68
+    adapter.nascar_actions(sid, rc, rc.set_flag('yellow'))
+    state, actions = live_rc.on_lap(sid, 69, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    assert rc.flag == 'yellow'
+    r = _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
+    assert r.status_code == 200 and r.json()['flag'] == 'white'
+    assert [n['text'] for n in r.json()['notices']][-2:] == ['BANDERA VERDE: se reanuda la carrera', 'BANDERA BLANCA: última vuelta']

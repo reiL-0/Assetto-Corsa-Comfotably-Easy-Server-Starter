@@ -197,7 +197,7 @@ def test_a_caution_when_the_leader_completes_the_distance_starts_an_overtime_tha
     assert n.phase == OT_WAIT, "laps under caution while waiting do not end it"
     n.on_flag("green")
     assert n.phase == OT_RUN and n.attempts == 1 and n.snapshot()["ot_end"] == 74
-    assert run_to(n, 73) == [] and n.phase == OT_RUN
+    assert kinds(run_to(n, 73)) == [("flag", "white")] and n.phase == OT_RUN, "the white flag for the last lap of the overtime"
     out = run_to(n, 74)
     assert n.phase == DRAINING and ("flag", "checkered") in out
 
@@ -279,3 +279,62 @@ def test_the_distance_cannot_go_under_the_laps_the_engine_has_counted():
     run_to(n, 30)
     with pytest.raises(ValueError):
         n.set_total(25)
+
+
+def test_the_white_flag_comes_out_by_itself_on_the_lap_before_the_last_and_the_stages_warn_before_their_end():
+    n = Nascar(70)
+    out = run_to(n, 16)
+    assert [a[1] for a in out] == ["STAGE 1: quedan 5 vueltas"] and n.flag == "green"
+    assert [a[1] for a in run_to(n, 18)] == ["STAGE 1: quedan 3 vueltas"] and [a[1] for a in run_to(n, 20)] == ["STAGE 1: quedan 1 vuelta"]
+    n.stage = 2   # the final stage: it warns of nothing, only the white flag and the chequered one
+    n2 = Nascar(70)
+    n2.stage, n2.laps = 2, 60
+    assert run_to(n2, 68) == [] and n2.flag == "green"
+    out = run_to(n2, 69)
+    assert out == [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")] and n2.flag == "white"
+    out = n2.on_leader_lap(70)
+    assert ("flag", "checkered") in out and n2.phase == DRAINING, "a white flag is not a caution: the race ends at the distance"
+
+
+def test_a_lap_before_the_last_run_under_caution_gets_its_white_flag_with_the_green():
+    n = Nascar(70)
+    n.stage, n.laps = 2, 60
+    run_to(n, 68)
+    n.on_flag("yellow")
+    assert run_to(n, 69, "yellow") == [], "no white flag under caution"
+    out = n.on_flag("green")
+    assert out == [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")] and n.flag == "white"
+    assert n.on_flag("green") == [], "once"
+
+
+def test_a_caution_after_the_white_flag_makes_an_overtime_whose_last_lap_gets_its_own_white_flag():
+    n = Nascar(70)
+    n.stage, n.laps = 2, 60
+    run_to(n, 69)
+    assert n.flag == "white"
+    n.on_flag("yellow")
+    assert n.cautions_in_stage == 1, "a caution out of the white flag counts"
+    run_to(n, 70, "yellow")
+    assert n.phase == OT_WAIT
+    n.on_flag("green")
+    assert n.phase == OT_RUN and n.flag == "green"
+    out = run_to(n, 71)
+    assert out == [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")] and n.flag == "white"
+    assert ("flag", "checkered") in run_to(n, 72) and n.phase == DRAINING
+
+
+def test_changing_the_distance_moves_the_white_flag_with_it():
+    n = Nascar(70)
+    n.stage, n.laps = 2, 60
+    out = n.set_total(61)
+    assert out == [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")] and n.flag == "white", "shortened to the lap before the last"
+    out = n.set_total(80)
+    assert ("flag", "green") in out and n.flag == "green", "extended after the white flag: it is not the last lap any more"
+    assert n.set_total(90) == [] and n.flag == "green"
+
+
+def test_a_last_stage_that_starts_on_the_lap_before_the_last_gets_its_white_flag_at_the_green():
+    n = Nascar(2, ends=[1, 2])
+    out = run_to(n, 1)
+    assert n.phase == BREAK
+    assert ("flag", "white") in n.on_flag("green") and n.flag == "white"

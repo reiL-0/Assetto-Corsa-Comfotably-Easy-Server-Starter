@@ -15,6 +15,8 @@ Rules (the owner's):
   * The final stage ends when the leader completes `total`: green -> chequered (DRAINING: every car finishes its own last lap, then the caller calls `done`). A caution -> OVERTIME: wait for
     green, then `ot_laps` (2) laps; a caution before the end of those laps, or one at their end, is another attempt, up to `ot_max` (3); when they are spent the race ends.
   * A caution is counted when the flag goes from green to any caution (yellow -> fcy is the same caution).
+  * The WHITE flag comes out by itself when the leader completes the lap before the last one (the race, or an overtime attempt) under green; if that lap was run under caution it comes out with the
+    green flag that follows. The stage warnings ("5 laps to go") are plain `say` actions.
 Everything lives in memory: a manager restart in the middle of a race loses it (recovery by hand in this first version).
 """
 
@@ -28,6 +30,7 @@ STAGES_DEFAULT = (30, 45, 25)
 MAX_TOTAL = 1000
 MAX_SHARES = 6
 MAX_SHARE = 1000
+WARN_LAPS = (5, 3, 1)   # "laps to go" notices before the end of a stage that is not the last
 WINDOW_PCT = (2, 1)   # % of the stage's laps: with no caution deployed in it yet / with one or more
 
 
@@ -64,7 +67,7 @@ class Nascar:
         length = self.ends[self.stage] - self.stage_start()
         return max(1, math.ceil(length * WINDOW_PCT[1 if self.cautions_in_stage else 0] / 100))
 
-    def set_total(self, total: int) -> None:
+    def set_total(self, total: int) -> list[tuple]:
         """Change the distance while racing (stages already over keep their end, also the one of a break that has just started). It cannot go under the laps already run."""
         if type(total) is not int or not 2 <= total <= MAX_TOTAL:
             raise ValueError(f"total must be an integer between 2 and {MAX_TOTAL}")
@@ -78,6 +81,10 @@ class Nascar:
         self.ends = done + [max(e, laps + 1) if e < total else total for e in fresh[len(done):]]
         self.ends[-1] = total
         self.total = total
+        if self.flag == "white" and self.phase == RACING and self.laps < total - 1:   # the distance grew after the white flag: it is not the last lap any more
+            self.flag = "green"
+            return [("say", "Distancia ampliada: sigue la carrera"), ("flag", "green")]
+        return self._white_if_due() if self.phase == RACING else []   # ... or it shrank to the lap before the last
 
     # ---- events -------------------------------------------------------------------------------------------------------------------------------------------------------
     def on_flag(self, flag: str) -> list[tuple]:
@@ -92,15 +99,27 @@ class Nascar:
             elif self.phase == OT_RUN:
                 out += self._ot_failed("amarilla en el overtime")
         elif flag == "green" and was_caution:
-            if self.phase == BREAK:
+            if self.phase == RACING:
+                out += self._white_if_due()   # the lap before the last was run under caution: the white flag comes with the green
+            elif self.phase == BREAK:
                 self.stage += 1
                 self.phase, self.cautions_in_stage = RACING, 0
                 out.append(("say", f"STAGE {self.stage + 1}: bandera verde"))
+                out += self._white_if_due()
             elif self.phase == OT_WAIT:
                 self.attempts += 1
                 self.phase, self.ot_end = OT_RUN, self.laps + self.ot_laps
                 out.append(("say", f"OVERTIME: intento {self.attempts} de {self.ot_max}, {self.ot_laps} vueltas"))
+                out += self._white_if_due()   # (a one-lap overtime would start with the white flag)
         return out
+
+    def _white_if_due(self) -> list[tuple]:
+        """The white flag: the leader has completed the lap before the last one and the field is under green."""
+        last_lap = self.ot_end if self.phase == OT_RUN else self.total if self.phase == RACING and self.stage == len(self.ends) - 1 else 0
+        if not last_lap or self.laps != last_lap - 1 or self.flag in CAUTION or self.flag == "white":
+            return []
+        self.flag = "white"
+        return [("say", "BANDERA BLANCA: última vuelta"), ("flag", "white")]
 
     def window_after_count(self) -> int:
         """The window once this caution is counted: the first caution of a stage still uses the 'none before' percentage."""
@@ -121,8 +140,14 @@ class Nascar:
                     return self._chequered("BANDERA A CUADROS")
                 self.phase = OT_WAIT
                 return [("say", f"OVERTIME: la vuelta {self.total} con amarilla; se alarga hasta acabar en verde")]
-        elif self.phase == OT_RUN and laps >= self.ot_end:
-            return self._chequered("BANDERA A CUADROS") if not caution else self._ot_failed("amarilla al final del overtime")
+            left = self.ends[self.stage] - laps
+            if not last and not caution and left in WARN_LAPS:
+                return [("say", f"STAGE {self.stage + 1}: quedan {left} {'vuelta' if left == 1 else 'vueltas'}")]
+            return self._white_if_due()
+        if self.phase == OT_RUN:
+            if laps >= self.ot_end:
+                return self._chequered("BANDERA A CUADROS") if not caution else self._ot_failed("amarilla al final del overtime")
+            return self._white_if_due()
         return []
 
     def done(self) -> None:

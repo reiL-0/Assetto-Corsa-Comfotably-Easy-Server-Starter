@@ -13,7 +13,7 @@ The leaderboard maximum feeds NASCAR; director flags feed it once. Engine flags 
 (the triggering car has already crossed), or 90 s elapse; the monitor calls done and captures the delay in next_at (0 sends NEXT_SESSION immediately, once).
 Later delay edits do not move an existing next_at. race-state adds nascar (snapshot with next_delay_min, or null) and always nascar_next_delay_min at the root.
 Everything is in memory in one process; session_info preserves the engine, new_session resets it (a race with a preset's nascar block arms a fresh engine). Every state change raises rev.
-Each change is also said in the chat, so drivers without the hub see it. The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
+Each change is also said on screen: `notices` in the race state (the hub draws them; there is no chat line any more). The state is in memory and goes with the server or the session. `monitor_forever` (started by the app's
 lifespan) watches a VSC: it samples the speeds and judges the drivers when the grace ends.
 """
 
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
 from typing import Annotated, Literal
 
@@ -43,7 +42,6 @@ state_router = APIRouter(prefix="/servers/{server_id}", tags=["race-control"], d
 control_router = APIRouter(prefix="/servers/{server_id}/race-control", tags=["race-control"], dependencies=[Depends(require("steward"))])
 
 SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARILLA: sin adelantar", "white": "BANDERA BLANCA: última vuelta", "checkered": "BANDERA DE CUADROS"}
-CHAT_DELAY = 2.0       # s; the hub asks every 1 s (+ the website's 1 s cache)
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
 
 
@@ -76,22 +74,9 @@ def _live(server_id: int):
     return inst if inst and inst.running and inst.acsp else None
 
 
-def _chat(inst, text: str) -> None:
-    inst.acsp.send(acsp.encode_broadcast_chat(text))
-
-
-def _say_later(inst, text: str) -> None:
-    """The chat line of a flag change goes out CHAT_DELAY s late: the hub of every client learns the flag by asking (at most POLL + the website's 1 s cache later), and the yellow on
-    screen must not come after the announcement. The state itself changes at once."""
-    def go() -> None:
-        try:
-            _chat(inst, text)
-        except Exception:   # the server may have stopped meanwhile: a lost announcement is not worth a traceback in a timer thread
-            log.debug("flag announcement not sent", exc_info=True)
-
-    t = threading.Timer(CHAT_DELAY, go)   # the API runs in worker threads: no event loop here
-    t.daemon = True
-    t.start()
+def _say(rc, text: str, kind: str = "info", to: int = -1) -> None:
+    """What used to go to the chat now goes on the screen of every hub (race-state `notices`): it arrives with the flag itself, so it can never come before it."""
+    rc.notify(text, kind, to)
 
 
 @state_router.get("/race-state")
@@ -99,7 +84,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
-    return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "vsc_id": 0, "grace_left": 0,
+    return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -126,18 +111,18 @@ def _control(server_id: int, sess: SessionDep):
 
 @control_router.post("")
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
-    inst, rc = _control(server_id, sess)
+    _, rc = _control(server_id, sess)
     try:
         actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump())
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    nascar_actions(server_id, rc, actions)
     if body.flag in ("vsc", "fcy"):
         pen = f" · si sigues por encima: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
         name = "VIRTUAL SAFETY CAR" if body.flag == "vsc" else "FULL COURSE YELLOW"
-        _say_later(inst, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}")
+        _say(rc, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}", "flag")
     else:
-        _say_later(inst, SAY[body.flag])
+        _say(rc, SAY[body.flag], "flag")
+    nascar_actions(server_id, rc, actions)   # (after the director's own notice: a white flag the engine adds comes last)
     return rc.snapshot()
 
 
@@ -153,9 +138,10 @@ class NascarIn(BaseModel):
 def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
     try:
-        rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None, body.next_delay_min)
+        actions = rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None, body.next_delay_min)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    nascar_actions(server_id, rc, actions)
     # Remember it for the next race (the in-memory engine is reset by every new_session). Explicit `stages` are API-only and not part of a preset.
     if not rc.nascar:
         remembered = None
@@ -184,7 +170,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
     inst = _live(server_id)
     if not inst:
         return
-    for action in actions:
+    for action in sorted(actions, key=lambda a: a[0] == "say"):   # flags and the finish first, the messages after: the notice never shows before the flag it announces
         with _lock:
             if state_of(server_id, True, inst.acsp.session) is not rc or not rc.nascar:
                 return
@@ -195,7 +181,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
                 rc.finish_deadline = time.time() + 90
                 rc._bump()
         if action[0] == "say":
-            _say_later(inst, action[1])
+            _say(rc, action[1], "race")
 
 
 def finish_nascar(now: float) -> None:
@@ -226,7 +212,7 @@ def add_penalty(server_id: int, body: PenaltyIn, sess: SessionDep) -> dict:
     if not car:
         raise HTTPException(409, "that car is not on the server")
     p = rc.add_penalty(body.car_id, body.laps)
-    _chat(inst, f"DRIVE-THROUGH para {car.get('driver_name') or '#' + str(body.car_id)}: pasa por boxes en {body.laps} vueltas")
+    _say(rc, f"DRIVE-THROUGH para {car.get('driver_name') or '#' + str(body.car_id)}: pasa por boxes en {body.laps} vueltas", "penalty")
     return p
 
 
@@ -242,11 +228,14 @@ def announce(server_id: int, violations: list[dict]) -> None:
     inst = _live(server_id)
     if not inst:
         return
+    rc = state_of(server_id, True, inst.acsp.session)
+    if not rc:
+        return
     if not violations:
-        _chat(inst, "VSC: todos al ritmo")
+        _say(rc, "VSC: todos al ritmo", "flag")
         return
     names = ", ".join((inst.acsp.cars.get(v["car_id"], {}).get("driver_name") or "#" + str(v["car_id"])) + f" ({v['speed_kmh']} km/h)" for v in violations)
-    _chat(inst, "VSC: no bajaron a tiempo: " + names)
+    _say(rc, "VSC: no bajaron a tiempo: " + names, "penalty")
 
 
 async def monitor_forever() -> None:

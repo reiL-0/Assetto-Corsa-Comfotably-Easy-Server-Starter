@@ -30,6 +30,7 @@ from app.live.nascar import Nascar, STAGES_DEFAULT
 # session change must never see an id it has already used come back for something else.
 _penalty_ids = itertools.count(int(time.time()))
 _vsc_ids = itertools.count(int(time.time()))
+_notice_ids = itertools.count(int(time.time()))   # like the penalty ids: the hub shows each notice id once, so an id must never come back for another text
 _lock = threading.RLock()   # the API runs in worker threads and the monitor in the event loop: every change and read of a state goes through it
 
 FLAGS = ("green", "yellow", "vsc", "fcy", "white", "checkered")
@@ -42,6 +43,7 @@ JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples d
 JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
+NOTICE_TTL, NOTICE_MAX = 10, 12   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
 
@@ -49,6 +51,7 @@ class RaceControl:
     def __init__(self, session_ref: object = None) -> None:
         self.flag, self.pace_kmh = "green", None
         self.penalties: list[dict] = []
+        self.notices: list[dict] = []   # on-screen messages for the hub ({id, kind, text, to, until}); `to` = a car id, -1 = everybody
         self.rev, self.ts = 0, time.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.nascar: Nascar | None = None
@@ -95,8 +98,9 @@ class RaceControl:
             self._bump()
             return actions
 
-    def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None, next_delay_min: int | None = None) -> None:
-        """Update distance and delay atomically; an existing `next_at` is never rescheduled by a delay edit."""
+    def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None, next_delay_min: int | None = None) -> list[tuple]:
+        """Update distance and delay atomically; an existing `next_at` is never rescheduled by a delay edit. Returns the NASCAR actions of a distance change (the white flag moves with it) for the caller to carry out."""
+        actions: list[tuple] = []
         with _lock:
             if next_delay_min is not None and (type(next_delay_min) is not int or not 0 <= next_delay_min <= 60):
                 raise ValueError("next_delay_min must be an integer between 0 and 60")
@@ -109,7 +113,7 @@ class RaceControl:
                 if stages is not None or shares is not None:
                     raise ValueError("stages and shares are frozen while armed")
                 if type(total) is not int or total != self.nascar.total:
-                    self.nascar.set_total(total)
+                    actions = self.nascar.set_total(total) or []
             else:
                 motor = Nascar(total, shares=shares if shares is not None else STAGES_DEFAULT, ends=stages)
                 motor.on_flag(self.flag)
@@ -117,6 +121,16 @@ class RaceControl:
             if next_delay_min is not None:
                 self.next_delay_s = next_delay_min * 60
             self._bump()
+            return actions
+
+    def notify(self, text: str, kind: str = "info", to: int = -1, ttl: int = NOTICE_TTL, now: float | None = None) -> dict:
+        """A message for the hub's banner (it replaces the chat line). The text is kept free of quotes and backslashes: the hub reads the JSON with patterns."""
+        now = time.time() if now is None else now
+        with _lock:
+            n = {"id": next(_notice_ids), "kind": kind, "text": text.replace('"', "'").replace("\\", "/")[:160], "to": to, "until": now + ttl}
+            self.notices = [x for x in self.notices if x["until"] > now][-(NOTICE_MAX - 1):] + [n]
+            self._bump()
+            return n
 
     def add_penalty(self, car_id: int, laps: int) -> dict:
         if not 1 <= laps <= LAPS_MAX:
@@ -189,8 +203,10 @@ class RaceControl:
 
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
         with _lock:
+            at = time.time() if now is None else now
+            notices = [{"id": n["id"], "kind": n["kind"], "left_s": math.ceil(n["until"] - at), "text": n["text"], "to": n["to"]} for n in self.notices if n["until"] > at]
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
-            return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties),
+            return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar,
                     "nascar_next_delay_min": self.next_delay_s // 60}

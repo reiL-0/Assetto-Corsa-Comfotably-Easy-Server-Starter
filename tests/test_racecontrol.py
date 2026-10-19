@@ -9,10 +9,7 @@ from conftest import ADMIN
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-import time
-
 from app import csp, supervisor
-from app import racecontrol as rcmod
 from app.auth import _sha
 from app.config import settings
 from app.db import engine
@@ -48,12 +45,9 @@ def _client(role):
     return TestClient(app, headers={"Authorization": f"Bearer {raw}"})
 
 
-def _wait(sent, n, timeout=2.0):
-    """The chat line of a flag change goes out late (rcmod.CHAT_DELAY, on a timer thread): wait for it."""
-    end = time.time() + timeout
-    while len(sent) < n and time.time() < end:
-        time.sleep(0.01)
-    return len(sent)
+def _notices(sid):
+    """The on-screen messages the hub would read (they replaced the chat lines)."""
+    return [n["text"] for n in api.get(f"{V}/servers/{sid}/race-state").json()["notices"]]
 
 
 @pytest.fixture
@@ -65,7 +59,6 @@ def live(monkeypatch):
     c.cars[3] = {"driver_name": "Ana", "driver_guid": "76561190000000001"}
     sent = []
     c.send = sent.append
-    monkeypatch.setattr(rcmod, "CHAT_DELAY", 0.05)
     supervisor._instances[sid] = _Inst(c)
     yield sid, c, sent
     supervisor._instances.pop(sid, None)
@@ -121,11 +114,11 @@ def test_the_hub_token_reads_the_state_and_only_a_steward_changes_it(live):
     assert _client("steward").post(f"{V}/servers/{sid}/race-control", json=body).status_code == 200
 
 
-def test_the_director_sets_the_flag_and_the_chat_says_it(live):
+def test_the_director_sets_the_flag_and_the_screen_says_it(live):
     sid, c, sent = live
     steward = _client("steward")
     r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "yellow", "pace_kmh": 60})   # a pace on a yellow is ignored: it is only a flag
-    assert r.status_code == 200 and r.json()["flag"] == "yellow" and r.json()["pace_kmh"] is None and _wait(sent, 1) == 1
+    assert r.status_code == 200 and r.json()["flag"] == "yellow" and r.json()["pace_kmh"] is None and _notices(sid) == ["BANDERA AMARILLA: sin adelantar"] and sent == [], "no chat line any more"
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "yellow"
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "red"}).status_code == 422
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "vsc"}).status_code == 422   # a VSC needs its pace
@@ -140,7 +133,7 @@ def test_a_drive_through_is_listed_once_per_id_and_needs_a_car_on_the_server(liv
     steward = _client("steward")
     assert steward.post(f"{V}/servers/{sid}/race-control/penalties", json={"car_id": 9, "laps": 3}).status_code == 409
     p = steward.post(f"{V}/servers/{sid}/race-control/penalties", json={"car_id": 3, "laps": 3})
-    assert p.status_code == 201 and p.json()["car_id"] == 3 and len(sent) == 1
+    assert p.status_code == 201 and p.json()["car_id"] == 3 and sent == [] and "DRIVE-THROUGH para Ana" in _notices(sid)[0]
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["penalties"] == [p.json()]
     assert steward.post(f"{V}/servers/{sid}/race-control/penalties", json={"car_id": 3, "laps": 9}).status_code == 422
     assert steward.delete(f"{V}/servers/{sid}/race-control/penalties/{p.json()['id']}").status_code == 204
@@ -243,7 +236,7 @@ def test_the_vsc_through_the_api_and_the_pit_report(live):
     body = {"flag": "vsc", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
     r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
     assert r.status_code == 200 and r.json()["flag"] == "vsc" and r.json()["pace_kmh"] == 60 and r.json()["grace_left"] in (4, 5) and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 2}
-    assert _wait(sent, 1) == 1
+    assert _notices(sid) and sent == []
     pit = f"{V}/servers/{sid}/race-control/pit"
     assert hub.post(pit, json={"car_id": 3, "name": "ana", "pit": False}).status_code == 204
     assert hub.post(pit, json={"car_id": 3, "name": "Beto", "pit": True}).status_code == 409, "the name must be the driver's"
@@ -270,17 +263,30 @@ def test_the_games_own_penalties_are_off_whenever_the_hub_is_on(monkeypatch):
     assert "ALLOWED_TYRES_OUT=2" in api.get(f"{V}/servers/{sid}/server_cfg.ini").text
 
 
-def test_the_chat_line_of_a_flag_goes_out_after_the_state_changes_and_an_fcy_is_a_pace_flag_too(live, monkeypatch):
-    sid, c, sent = live
-    monkeypatch.setattr(rcmod, "CHAT_DELAY", 0.3)
+def test_an_fcy_is_a_pace_flag_too_and_its_notice_comes_with_the_state(live):
+    sid, _, sent = live
     steward = _client("steward")
     body = {"flag": "fcy", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
     r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
     assert r.json()["flag"] == "fcy" and r.json()["pace_kmh"] == 60 and r.json()["vsc_id"] and r.json()["grace_left"] in (4, 5)
-    assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "fcy" and sent == [], "the state is already there, the announcement is not"
-    assert _wait(sent, 1) == 1
+    assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "fcy" and "FULL COURSE YELLOW" in _notices(sid)[0] and sent == []
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"}).status_code == 422, "an FCY needs its pace like a VSC"
     rc = RaceControl()
     rc.set_flag("fcy", 60, 5, 5, {"kind": "pits", "laps": 1}, now=100.0)
     rc.sample({1: 120.0}, 104.0); rc.sample({1: 120.0}, 104.3); rc.sample({1: 120.0}, 104.6)
     assert rc.due(105.0) and [v["car_id"] for v in rc.evaluate(105.0)] == [1] and rc.penalties, "an FCY is judged like a VSC"
+
+
+def test_notices_expire_are_capped_and_never_carry_quotes():
+    rc = RaceControl()
+    a = rc.notify('di "hola" \\ adios', "race", now=100.0)
+    assert '"' not in a["text"] and "\\" not in a["text"]
+    snap = rc.snapshot(now=103.0)
+    assert snap["notices"] == [{"id": a["id"], "kind": "race", "left_s": 7, "text": a["text"], "to": -1}]
+    assert rc.snapshot(now=111.0)["notices"] == [], "gone after its ttl"
+    ids = [rc.notify(f"n{i}", now=200.0)["id"] for i in range(30)]
+    assert ids == sorted(set(ids)), "ids only rise"
+    assert len(rc.snapshot(now=201.0)["notices"]) == 12, "the last 12 are kept"
+    rev = rc.rev
+    rc.notify("x", "info", 5, now=202.0)
+    assert rc.rev == rev + 1 and rc.snapshot(now=202.5)["notices"][-1]["to"] == 5
