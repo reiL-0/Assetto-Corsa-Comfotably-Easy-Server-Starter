@@ -33,7 +33,7 @@ from app.auth import require, require_any
 from app.db import SessionDep
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, state_of, tick
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, VIOLATION_LAPS, _lock, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -74,6 +74,36 @@ def _live(server_id: int):
     return inst if inst and inst.running and inst.acsp else None
 
 
+def _name(inst, car_id: int) -> str:
+    return inst.acsp.cars.get(car_id, {}).get("driver_name") or f"#{car_id}"
+
+
+def caution_tick(now: float) -> None:
+    """The caution procedures of every running server (nobody passes, the free pass lost to the pits). Runs in the monitor, on the event loop that also feeds the field."""
+    for inst in supervisor.live():
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        if not rc or not rc.caution:
+            continue
+        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None}
+        actions = rc.caution_tick(inst.acsp.field.snapshot(), speeds, now)
+        if actions:
+            nascar_actions(inst.server_id, rc, actions)
+
+
+def incident_tick(now: float) -> None:
+    """Contacts and stopped cars of every server racing under NASCAR: a proposal for the director, or the yellow itself when the director asked for that."""
+    for inst in supervisor.live():
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        if not rc or not rc.nascar:
+            continue
+        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None}
+        prop, actions = rc.incident_step(speeds, inst.acsp.field, now)
+        if prop:
+            who = ", ".join(_name(inst, c) for c in prop["cars"])
+            _say(rc, f"{prop['text']}: {who}" + (" · AMARILLA AUTOMÁTICA" if rc.auto_yellow else ""), "flag")
+            nascar_actions(inst.server_id, rc, actions)
+
+
 def _say(rc, text: str, kind: str = "info", to: int = -1) -> None:
     """What used to go to the chat now goes on the screen of every hub (race-state `notices`): it arrives with the flag itself, so it can never come before it."""
     rc.notify(text, kind, to)
@@ -85,7 +115,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": False, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -111,9 +141,9 @@ def _control(server_id: int, sess: SessionDep):
 
 @control_router.post("")
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
-    _, rc = _control(server_id, sess)
+    inst, rc = _control(server_id, sess)
     try:
-        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump())
+        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if body.flag in ("vsc", "fcy"):
@@ -170,18 +200,32 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
     inst = _live(server_id)
     if not inst:
         return
-    for action in sorted(actions, key=lambda a: a[0] == "say"):   # flags and the finish first, the messages after: the notice never shows before the flag it announces
+    queue = sorted(actions, key=lambda a: a[0] == "say")   # flags and the finish first, the messages after: the notice never shows before the flag it announces
+    while queue:
+        action = queue.pop(0)
         with _lock:
             if state_of(server_id, True, inst.acsp.session) is not rc or not rc.nascar:
                 return
             if action[0] == "flag" and rc.nascar.flag == action[1]:
-                rc.set_flag(action[1], source="nascar")
+                queue += rc.set_flag(action[1], source="nascar", field=inst.acsp.field)   # (a stage-break yellow starts a caution: its free pass and order notices come back)
             elif action[0] == "finish" and rc.nascar.phase == DRAINING and rc.finish_wait is None:
                 rc.finish_wait = {i for i in inst.acsp.cars if i != crossing}
                 rc.finish_deadline = time.time() + 90
                 rc._bump()
         if action[0] == "say":
             _say(rc, action[1], "race")
+        elif action[0] == "caution":
+            _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
+            if action[1] is not None:
+                _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race")
+                _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1])
+            else:
+                _say(rc, "SIN FREE PASS", "race")
+        elif action[0] == "no_free_pass":
+            _say(rc, f"FREE PASS anulado: {_name(inst, action[1])} entró a boxes", "race")
+        elif action[0] == "violation":
+            _say(rc, f"{_name(inst, action[1])}: adelantó bajo amarilla · DRIVE-THROUGH", "penalty")
+            _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
 
 
 def finish_nascar(now: float) -> None:
@@ -203,6 +247,40 @@ def finish_nascar(now: float) -> None:
             rc.next_at = None
             rc._bump()
         inst.acsp.send(acsp.encode_next_session())
+
+
+class AutoYellowIn(BaseModel):
+    enabled: bool
+
+
+@control_router.post("/auto-yellow")
+def auto_yellow(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
+    """The yellow comes out by itself on a pile-up or a stopped car (off: the director only gets the proposal). Memory only, like the rest of the state."""
+    _, rc = _control(server_id, sess)
+    with _lock:
+        rc.auto_yellow = body.enabled
+        rc._bump()
+    return rc.snapshot()
+
+
+class RestartIn(BaseModel):
+    to_go: Literal[1, 2] = 1   # "one to go" / "two to go" (the rulebook's choose can come with either)
+
+
+@control_router.post("/restart")
+def call_restart(server_id: int, body: RestartIn, sess: SessionDep) -> dict:
+    """'To go' under a NASCAR caution: the wave-around cars are told to pass, every car gets its place in the restart and who may choose a lane. The green flag is still the director's."""
+    inst, rc = _control(server_id, sess)
+    plan = rc.restart_plan(inst.acsp.field.snapshot())
+    if plan is None:
+        raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
+    order, waved, choosers = plan
+    _say(rc, ("UNA" if body.to_go == 1 else "DOS") + " PARA VERDE", "flag")
+    for car in waved:
+        _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car)
+    for i, car in enumerate(order, 1):
+        _say(rc, f"REINICIO: P{i}" + (" · ELIGE CARRIL (interior o exterior)" if car in choosers else " · sin elección: al final de tu vuelta"), "race", car)
+    return rc.snapshot()
 
 
 @control_router.post("/penalties", status_code=201)
@@ -245,6 +323,8 @@ async def monitor_forever() -> None:
             now = time.time()
             live = [(i.server_id, i.acsp.cars) for i in supervisor.live()]
             finish_nascar(now)
+            caution_tick(now)
+            incident_tick(now)
             for server_id, violations in tick(now, live):
                 announce(server_id, violations)
         except Exception:   # a bug here must not stop the loop: the next tick tries again

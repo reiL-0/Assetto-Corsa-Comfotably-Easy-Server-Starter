@@ -284,9 +284,9 @@ def test_notices_expire_are_capped_and_never_carry_quotes():
     snap = rc.snapshot(now=103.0)
     assert snap["notices"] == [{"id": a["id"], "kind": "race", "left_s": 7, "text": a["text"], "to": -1}]
     assert rc.snapshot(now=111.0)["notices"] == [], "gone after its ttl"
-    ids = [rc.notify(f"n{i}", now=200.0)["id"] for i in range(30)]
+    ids = [rc.notify(f"n{i}", now=200.0)["id"] for i in range(100)]
     assert ids == sorted(set(ids)), "ids only rise"
-    assert len(rc.snapshot(now=201.0)["notices"]) == 12, "the last 12 are kept"
+    assert len(rc.snapshot(now=201.0)["notices"]) == 64, "the last 64 are kept (a full field gets one instruction each)"
     rev = rc.rev
     rc.notify("x", "info", 5, now=202.0)
     assert rc.rev == rev + 1 and rc.snapshot(now=202.5)["notices"][-1]["to"] == 5

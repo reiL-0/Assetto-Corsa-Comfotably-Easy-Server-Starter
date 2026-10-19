@@ -406,7 +406,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -564,3 +564,114 @@ def test_a_green_that_brings_the_white_flag_says_green_first_and_white_after(liv
     r = _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
     assert r.status_code == 200 and r.json()['flag'] == 'white'
     assert [n['text'] for n in r.json()['notices']][-2:] == ['BANDERA VERDE: se reanuda la carrera', 'BANDERA BLANCA: última vuelta']
+
+
+def _field(client, **cars):
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'))})
+    for car, spline_laps in cars.items():
+        spline, laps = spline_laps
+        client.field.update(int(car[1:]), spline, laps)
+
+
+def test_a_yellow_freezes_the_order_names_the_free_pass_and_a_pass_under_it_costs_a_drive_through(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))   # 5 is two laps down: the free pass
+    r = _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    assert r.status_code == 200 and rc.caution and rc.caution.free_pass == 5
+    notices = [(n['text'], n['to']) for n in r.json()['notices']]
+    assert ('FREE PASS: Cleo', -1) in notices and ('FREE PASS: pasa al pace car por fuera y ponte al final de la fila', 5) in notices
+    # car 4 passes car 3 for longer than PASS_HOLD while both go 60 km/h
+    client.cars[3]['velocity'] = client.cars[4]['velocity'] = [0, 0, 16.7]
+    adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60, 5: 60}, 100.0))
+    client.field.update(4, 0.52, 9)   # now in front of car 3 by 0.02
+    for t in (101.0, 104.0):
+        adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60, 5: 60}, t))
+    assert [p['car_id'] for p in rc.penalties] == [4] and rc.penalties[0]['laps'] == 3
+    assert 'Beto: adelantó bajo amarilla · DRIVE-THROUGH' in [n['text'] for n in rc.snapshot()['notices']]
+    adapter.nascar_actions(sid, rc, rc.set_flag('green', field=client.field))
+    assert rc.caution is None, 'the green ends the caution'
+
+
+def test_a_free_pass_car_that_pits_loses_it_and_there_is_no_caution_without_nascar(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    _field(client, c3=(0.50, 9), c5=(0.30, 7))
+    rc.set_flag('yellow', field=client.field)
+    assert rc.caution is None, 'only with NASCAR armed'
+    rc.set_flag('green')
+    rc.configure_nascar(70)
+    actions = rc.set_flag('yellow', field=client.field)
+    assert ('caution', 5) in actions
+    rc.report_pit(5, True, now=50.0)
+    out = rc.caution_tick(dict(client.field.progress), {}, 51.0)
+    assert out == [('no_free_pass', 5)] and rc.caution.free_pass is None
+
+
+def test_to_go_tells_the_wave_around_the_restart_place_and_who_may_choose(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'), (6, 'Dora'))})
+    for car, spline, laps in ((3, 0.50, 9), (4, 0.30, 9), (5, 0.52, 7), (6, 0.20, 8)):
+        client.field.update(car, spline, laps)   # 5 is two laps down and 0.02 ahead of the leader (the wave-around), 6 one lap down (the free pass)
+    steward = _client('steward')
+    assert steward.post(f'{V}/servers/{sid}/race-control/restart', json={}).status_code == 409, 'no caution yet'
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    assert rc.caution.free_pass == 6
+    client.field.update(3, 0.50, 9)
+    r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={'to_go': 1})
+    assert r.status_code == 200
+    notices = {(n['text'], n['to']) for n in r.json()['notices']}
+    assert ('UNA PARA VERDE', -1) in notices
+    assert ('WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila', 5) in notices
+    assert ('REINICIO: P1 · ELIGE CARRIL (interior o exterior)', 3) in notices
+    assert ('REINICIO: P3 · sin elección: al final de tu vuelta', 5) in notices or ('REINICIO: P4 · sin elección: al final de tu vuelta', 5) in notices
+    assert r.json()['caution']['restart'][:2] == [3, 4] and r.json()['caution']['free_pass'] == 6
+
+
+def test_a_pileup_is_proposed_to_the_director_or_puts_the_yellow_out_by_itself(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    rc.nascar.laps = 5
+    _field(client, c3=(0.50, 5), c4=(0.48, 5), c5=(0.46, 5))
+    speeds = {3: 40.0, 4: 40.0, 5: 40.0}
+    for a, b in ((3, 4), (4, 5), (5, None)):
+        rc.watch.on_contact(100.0, a, b, 90.0)
+    prop, actions = rc.incident_step(speeds, client.field, 101.0)
+    assert prop and prop['kind'] == 'pileup' and actions == [] and rc.flag == 'green' and rc.snapshot()['proposal'] == prop, 'only a proposal'
+    assert _client('steward').post(f'{V}/servers/{sid}/race-control/auto-yellow', json={'enabled': True}).json()['auto_yellow'] is True
+    rc.watch.proposal = None
+    for a, b in ((3, 4), (4, 5), (5, None)):
+        rc.watch.on_contact(200.0, a, b, 90.0)
+    prop, actions = rc.incident_step(speeds, client.field, 201.0)
+    assert prop and rc.flag == 'yellow' and rc.nascar.cautions_in_stage == 1, 'the engine counts the caution'
+    assert rc.caution and rc.caution.involved == {3, 4, 5}, 'the cars of the pile-up are involved: no free pass for them'
+    assert rc.snapshot()['proposal'] is None, 'the caution answers the proposal'
+
+
+def test_a_stage_break_yellow_of_the_engine_also_freezes_the_order_and_names_the_free_pass(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
+    state, actions = live_rc.on_lap(sid, 21, 3)
+    assert ('flag', 'yellow') in actions
+    adapter.nascar_actions(sid, state, actions, 3)
+    assert rc.flag == 'yellow' and rc.caution and rc.caution.free_pass == 5
+    assert 'FREE PASS: Cleo' in [n['text'] for n in rc.snapshot()['notices']], 'the notices of the caution came back through the queue'
+
+
+def test_a_restart_call_with_a_full_field_keeps_every_cars_instruction(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    for car in range(30):
+        client.cars[car] = {'driver_name': f'P{car}'}
+        client.field.update(car, 0.9 - car * 0.01, 9)
+    _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    r = _client('steward').post(f'{V}/servers/{sid}/race-control/restart', json={'to_go': 2})
+    mine = [n for n in r.json()['notices'] if n['text'].startswith('REINICIO')]
+    assert len(mine) == 30 and {n['to'] for n in mine} == set(range(30)), 'nobody loses their place to the cap of notices'

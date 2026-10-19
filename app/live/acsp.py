@@ -15,6 +15,7 @@ from collections import deque
 
 from app import metrics
 from app.live.board import LiveBoard
+from app.live.field import Field
 
 log = logging.getLogger("acmanager.acsp")
 
@@ -334,6 +335,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
+        self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
         self.transport: asyncio.DatagramTransport | None = None
         self._hello: asyncio.Task | None = None
 
@@ -366,6 +368,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self.session.update(event)
                 else:
                     self.session = event
+                    self.field.clear()
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None)
                 if nascar is not None:
                     try:
@@ -387,6 +390,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             if actions:
                 nascar_actions(self.server_id, rc, actions, event["car_id"])
         elif t == "new_connection":
+            self.field.drop(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
             if bans.is_banned(event["driver_guid"]):
@@ -396,6 +400,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
+            self.field.drop(event["car_id"])
         elif t == "client_loaded" and self.on_client_loaded:
             self.on_client_loaded(event["car_id"])
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
@@ -403,8 +408,15 @@ class ACSPClient(asyncio.DatagramProtocol):
             joined = {**event, "type": "new_connection"}
             self.board.apply(joined)
             self.cars[event["car_id"]] = joined
+        elif t == "client_event":
+            from app.live.racecontrol import state_of   # (late, like the others)
+            rc = state_of(self.server_id, True, self.session)
+            if rc:
+                rc.contact(time.time(), event["car_id"], event["other_car_id"], event["speed"])
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
+            d = self.board._by_car(event["car_id"])
+            self.field.update(event["car_id"], event["spline_pos"], d.laps if d else None)
             self.trail.setdefault(event["car_id"], deque(maxlen=TRAIL)).append((time.time(), event["pos"], event["velocity"]))
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)

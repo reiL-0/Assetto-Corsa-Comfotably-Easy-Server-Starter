@@ -24,7 +24,9 @@ import threading
 import time
 from collections import deque
 
-from app.live.nascar import Nascar, STAGES_DEFAULT
+from app.live.caution import Caution
+from app.live.incidents import Watch
+from app.live.nascar import CAUTION, Nascar, STAGES_DEFAULT
 
 # Penalty and VSC ids only ever rise, across sessions and manager restarts (they start at the clock): the hub applies each penalty id once, and a client that stays connected through a
 # session change must never see an id it has already used come back for something else.
@@ -43,7 +45,10 @@ JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples d
 JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
-NOTICE_TTL, NOTICE_MAX = 10, 12   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
+NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
+VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
+INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
+PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
 
@@ -55,6 +60,9 @@ class RaceControl:
         self.rev, self.ts = 0, time.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.nascar: Nascar | None = None
+        self.caution: Caution | None = None   # the procedures of the caution being run (only with NASCAR armed), see app/live/caution.py
+        self.watch = Watch()   # contacts and stopped cars: the proposal of a caution, and who is involved in one (app/live/incidents.py)
+        self.auto_yellow = False   # the director asked for the yellow to come out by itself on a pile-up or a stopped car (otherwise it is only proposed)
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
         self.next_at: float | None = None
@@ -71,7 +79,7 @@ class RaceControl:
         self.rev += 1
         self.ts = time.time()
 
-    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director") -> list[tuple]:
+    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None) -> list[tuple]:
         """Return NASCAR actions for the caller to execute after releasing the lock."""
         if flag not in FLAGS:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
@@ -89,14 +97,33 @@ class RaceControl:
                 raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
             pen = {"kind": given["kind"], "laps": given.get("laps", 0) if given["kind"] == "pits" else 0}
         with _lock:
+            was_caution = self.flag in CAUTION
+            pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
             actions = self.nascar.on_flag(flag) if self.nascar and source != "nascar" else []
+            if self.nascar and field is not None:
+                actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
             self._bump()
             return actions
+
+    def contact(self, now: float, car: int, other: int | None, speed: float) -> None:
+        with _lock:
+            self.watch.on_contact(now, car, other, speed)
+
+    def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
+        """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
+        if flag in CAUTION and not was_caution:
+            recent = self.watch.recent_involved(now, INVOLVED_FOR)
+            self.watch.clear()
+            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits)
+            return [("caution", self.caution.free_pass)]
+        if flag not in CAUTION:
+            self.caution = None
+        return []
 
     def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None, next_delay_min: int | None = None) -> list[tuple]:
         """Update distance and delay atomically; an existing `next_at` is never rescheduled by a delay edit. Returns the NASCAR actions of a distance change (the white flag moves with it) for the caller to carry out."""
@@ -155,6 +182,49 @@ class RaceControl:
         if in_pit:
             with _lock:
                 self._pit_seen[car_id] = time.time() if now is None else now
+                if self.caution:
+                    self.caution.pitted.add(car_id)   # (in the pits during a caution: out of the free pass, to the pit group of the restart)
+
+    def incident_step(self, speeds: dict[int, float], field, now: float) -> tuple[dict | None, list[tuple]]:
+        """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
+        with _lock:
+            racing = bool(self.nascar and self.nascar.phase in ("racing", "ot_run") and self.nascar.laps >= 1 and self.flag in ("green", "white"))
+            in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
+            prop = self.watch.step(now, speeds, in_pit, racing)
+            if not prop:
+                return None, []
+            actions: list[tuple] = []
+            if self.auto_yellow:
+                actions = self.set_flag("yellow", now=now, source="incident", field=field)
+            else:
+                self._bump()
+            return prop, actions
+
+    def restart_plan(self, progress: dict[int, float]) -> tuple[list[int], list[int], set[int]] | None:
+        """The director calls 'to go': see Caution.call_restart. None when no caution of ours is being run."""
+        with _lock:
+            if not self.caution:
+                return None
+            plan = self.caution.call_restart(progress)
+            self._bump()
+            return plan
+
+    def caution_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
+        """One step of the caution being run: the free pass lost to the pits, the cars that passed. Returns actions for the adapter; a violator already has its drive-through listed."""
+        with _lock:
+            c = self.caution
+            if not c:
+                return []
+            out: list[tuple] = []
+            if c.free_pass is not None and c.free_pass in c.pitted:
+                out.append(("no_free_pass", c.void_free_pass()))
+            exempt = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
+            for car in c.check(progress, speeds, now, exempt):
+                self.add_penalty(car, VIOLATION_LAPS)
+                out.append(("violation", car))
+            if out:
+                self._bump()
+            return out
 
     def sample(self, speeds: dict[int, float], now: float) -> None:
         """Speeds (km/h) of the cars now. Only the last seconds of the grace are kept."""
@@ -208,7 +278,8 @@ class RaceControl:
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar,
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None,
+                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow,
                     "nascar_next_delay_min": self.next_delay_s // 60}
 
 
