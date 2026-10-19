@@ -48,6 +48,7 @@ NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
+PACE_CAR_KMH = 100              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -62,6 +63,10 @@ class RaceControl:
         self.nascar: Nascar | None = None
         self.caution: Caution | None = None   # the procedures of the caution being run (only with NASCAR armed), see app/live/caution.py
         self.watch = Watch()   # contacts and stopped cars: the proposal of a caution, and who is involved in one (app/live/incidents.py)
+        self.pace_guid = ""                # whose car it is: if the slot is somebody else's later, it is not the pace car any more (see app/racecontrol.py)
+        self.pace_car: int | None = None   # the slot of the pace car (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
+        self.pace_car_kmh = PACE_CAR_KMH
+        self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.auto_yellow = False   # the director asked for the yellow to come out by itself on a pile-up or a stopped car (otherwise it is only proposed)
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
@@ -110,13 +115,40 @@ class RaceControl:
             self._bump()
             return actions
 
+    def without_pace_car(self, progress: dict) -> dict:
+        """The pace car is not a competitor: out of the order, the free pass, the passing judgement and the restart."""
+        return {c: v for c, v in progress.items() if c != self.pace_car} if self.pace_car is not None else progress
+
+    def pace_car_state(self) -> dict | None:
+        """What the pace car's own hub reads: wait in the pits / lead the field / come in."""
+        if self.pace_car is None:
+            return None
+        mode = "wait"
+        if self.flag in CAUTION:
+            mode = "in" if self.pace_car_in else "lead"
+        return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
+
+    def set_pace_car(self, car: int | None, kmh: int = PACE_CAR_KMH, guid: str = "") -> None:
+        if car is not None and not PACE_MIN <= kmh <= PACE_MAX:
+            raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
+        with _lock:
+            self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid if car is not None else ""
+            self.pace_car_in = False
+            if car is not None and self.caution:
+                self.caution.remove(car)   # (named during a caution: it was in the frozen order)
+            self._bump()
+
     def contact(self, now: float, car: int, other: int | None, speed: float) -> None:
         with _lock:
+            if self.pace_car is not None and self.pace_car in (car, other):
+                return   # the pace car is not a competitor: a touch with it makes nobody 'involved' and is no part of a pile-up
             self.watch.on_contact(now, car, other, speed)
 
     def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
+            self.pace_car_in = False   # a new caution: the pace car comes out again
+            progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
             self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits)
@@ -190,7 +222,7 @@ class RaceControl:
         with _lock:
             racing = bool(self.nascar and self.nascar.phase in ("racing", "ot_run") and self.nascar.laps >= 1 and self.flag in ("green", "white"))
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
-            prop = self.watch.step(now, speeds, in_pit, racing)
+            prop = self.watch.step(now, {c: v for c, v in speeds.items() if c != self.pace_car}, in_pit, racing)
             if not prop:
                 return None, []
             actions: list[tuple] = []
@@ -205,7 +237,8 @@ class RaceControl:
         with _lock:
             if not self.caution:
                 return None
-            plan = self.caution.call_restart(progress)
+            plan = self.caution.call_restart(self.without_pace_car(progress))
+            self.pace_car_in = True   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
             return plan
 
@@ -219,7 +252,7 @@ class RaceControl:
             if c.free_pass is not None and c.free_pass in c.pitted:
                 out.append(("no_free_pass", c.void_free_pass()))
             exempt = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
-            for car in c.check(progress, speeds, now, exempt):
+            for car in c.check(self.without_pace_car(progress), speeds, now, exempt):
                 self.add_penalty(car, VIOLATION_LAPS)
                 out.append(("violation", car))
             if out:
@@ -279,7 +312,7 @@ class RaceControl:
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None,
-                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow,
+                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(),
                     "nascar_next_delay_min": self.next_delay_s // 60}
 
 
@@ -291,11 +324,13 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
     with _lock:
         rc = _states.get(server_id)
         if rc and (not running or rc.session_ref is not session_ref):
-            _states.pop(server_id, None)
+            _old = _states.pop(server_id, None)
             rc = None
             if running and session_ref is not None:   # a session change: tell the hub clients (rev moves on) that the old flag is gone
                 fresh = RaceControl(session_ref)
                 fresh.rev = 1
+                old = _old
+                fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid   # (the director's choices outlive the session)
                 _states[server_id] = fresh
                 return fresh
         if rc is None and create and running:

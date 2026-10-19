@@ -383,9 +383,11 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
         elif t == "lap_completed":
-            from app.live.racecontrol import on_lap
+            from app.live.racecontrol import on_lap, state_of
             from app.racecontrol import nascar_actions  # adapter owns ACSP I/O, like timeline above
-            leader_laps = max((row["laps"] for row in event["leaderboard"]), default=0)
+            rc0 = state_of(self.server_id, True, self.session)
+            pace = rc0.pace_car if rc0 else None   # (the pace car runs laps too: it is not the leader of anything)
+            leader_laps = max((row["laps"] for row in event["leaderboard"] if row["car_id"] != pace), default=0)
             rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
             if actions:
                 nascar_actions(self.server_id, rc, actions, event["car_id"])

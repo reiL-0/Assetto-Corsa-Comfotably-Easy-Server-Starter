@@ -406,7 +406,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'pacecar', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -675,3 +675,66 @@ def test_a_restart_call_with_a_full_field_keeps_every_cars_instruction(live):
     r = _client('steward').post(f'{V}/servers/{sid}/race-control/restart', json={'to_go': 2})
     mine = [n for n in r.json()['notices'] if n['text'].startswith('REINICIO')]
     assert len(mine) == 30 and {n['to'] for n in mine} == set(range(30)), 'nobody loses their place to the cap of notices'
+
+
+def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_competitor(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))
+    client.cars[9] = {'driver_name': 'Safety Car'}
+    client.field.update(9, 0.60, 12)   # it runs ahead of everybody, a "leader" on paper
+    steward = _client('steward')
+    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 77}).status_code == 409, 'not on the server'
+    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 9, 'kmh': 5}).status_code == 422
+    r = steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 9, 'kmh': 110})
+    assert r.json()['pacecar'] == {'car': 9, 'kmh': 110, 'mode': 'wait'}
+    r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    assert r.json()['pacecar']['mode'] == 'lead'
+    assert rc.caution.leader == 3 and 9 not in rc.caution.frozen and rc.caution.free_pass == 5, 'the pace car is not the leader nor in the order'
+    r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={})
+    assert r.json()['pacecar']['mode'] == 'in' and 9 not in r.json()['caution']['restart']
+    r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
+    assert r.json()['pacecar']['mode'] == 'wait'
+    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={}).json()['pacecar'] is None
+
+
+def test_the_pace_car_is_not_a_leader_not_a_contact_and_stops_being_one_when_the_slot_changes_hands(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.board.drivers = [Driver(3), Driver(9)]
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
+    rc.set_pace_car(9, 100, '76561190000000009')
+    client._apply({'type': 'lap_completed', 'car_id': 3, 'laptime_ms': 1000, 'cuts': 0,
+                   'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}, {'car_id': 9, 'laps': 40, 'laptime_ms': 1000}]})
+    assert rc.nascar.laps == 4, 'the pace car has run more laps than the race: it is not the leader of anything'
+    rc.contact(100.0, 3, 9, 90.0)
+    rc.contact(100.0, 9, 3, 90.0)
+    assert not rc.watch.involved and not rc.watch.contacts, 'a touch with the pace car makes nobody involved'
+    adapter.pace_car_check()
+    assert rc.pace_car == 9, 'same driver in the slot'
+    client.cars[9] = {'driver_name': 'Otro', 'driver_guid': '76561190000000010'}
+    adapter.pace_car_check()
+    assert rc.pace_car is None and rc.snapshot()['pacecar'] is None, 'somebody else took the slot: not the pace car any more'
+
+
+def test_the_directors_choices_outlive_the_session_and_a_pace_car_named_under_caution_leaves_the_order(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))
+    client.cars[9] = {'driver_name': 'Safety Car'}
+    client.field.update(9, 0.60, 12)
+    rc.set_flag('yellow', field=client.field)
+    assert 9 in rc.caution.frozen and rc.caution.leader == 9
+    rc.set_pace_car(9, 100, 'g9')
+    assert 9 not in rc.caution.frozen and rc.caution.leader == 3
+    rc.auto_yellow = True
+    client.session = {'session_index': 1}   # the next session
+    fresh = live_rc.state_of(sid, True, client.session)
+    assert fresh is not rc and fresh.auto_yellow is True and fresh.pace_car == 9 and fresh.pace_guid == 'g9' and fresh.flag == 'green'

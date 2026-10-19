@@ -111,6 +111,18 @@ class Caution:
     def allow(self, *cars: int) -> None:
         self.allowed.update(cars)
 
+    def remove(self, car: int) -> None:
+        """A car that is not a competitor (it was named the pace car during the caution): out of the order, the lapped list and every set. Its free pass is not given to the next one."""
+        self.p0.pop(car, None)
+        self.frozen = [c for c in self.frozen if c != car]
+        for group in (self.involved, self.pitted, self.penalised, self.allowed, self.violators):
+            group.discard(car)
+        self.waved, self.restart = [c for c in self.waved if c != car], [c for c in self.restart if c != car]
+        if self.free_pass == car:
+            self.free_pass = None
+        if self.leader == car:
+            self.leader = self.frozen[0] if self.frozen else None
+
     def void_free_pass(self) -> int | None:
         """The free pass car went to the pits: no free pass (and no permission to pass). Returns that car."""
         car, self.free_pass = self.free_pass, None

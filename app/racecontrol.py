@@ -33,7 +33,7 @@ from app.auth import require, require_any
 from app.db import SessionDep
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, VIOLATION_LAPS, _lock, speed_kmh, state_of, tick
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -90,6 +90,16 @@ def caution_tick(now: float) -> None:
             nascar_actions(inst.server_id, rc, actions)
 
 
+def pace_car_check() -> None:
+    """The pace car stops being one when its driver leaves or somebody else takes the slot (the guid it was named with is not in that slot any more)."""
+    for inst in supervisor.live():
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        if rc and rc.pace_car is not None:
+            car = inst.acsp.cars.get(rc.pace_car)
+            if not car or (car.get("driver_guid") or "") != rc.pace_guid:
+                rc.set_pace_car(None)
+
+
 def incident_tick(now: float) -> None:
     """Contacts and stopped cars of every server racing under NASCAR: a proposal for the director, or the yellow itself when the director asked for that."""
     for inst in supervisor.live():
@@ -115,7 +125,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": False, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": False, "pacecar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -263,6 +273,24 @@ def auto_yellow(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+class PaceCarIn(BaseModel):
+    car_id: int | None = Field(default=None, ge=0, le=255)   # None: no pace car
+    kmh: int = Field(default=100, ge=PACE_MIN, le=PACE_MAX)
+
+
+@control_router.post("/pace-car")
+def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
+    """Which connected car is the pace car (a client running the hub script that drives it on autopilot) and its pace. It leads under every NASCAR caution and goes in on 'to go'."""
+    inst, rc = _control(server_id, sess)
+    if body.car_id is not None and body.car_id not in inst.acsp.cars:
+        raise HTTPException(409, "that car is not on the server")
+    try:
+        rc.set_pace_car(body.car_id, body.kmh, (inst.acsp.cars.get(body.car_id) or {}).get("driver_guid") or "")
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return rc.snapshot()
+
+
 class RestartIn(BaseModel):
     to_go: Literal[1, 2] = 1   # "one to go" / "two to go" (the rulebook's choose can come with either)
 
@@ -325,6 +353,7 @@ async def monitor_forever() -> None:
             finish_nascar(now)
             caution_tick(now)
             incident_tick(now)
+            pace_car_check()
             for server_id, violations in tick(now, live):
                 announce(server_id, violations)
         except Exception:   # a bug here must not stop the loop: the next tick tries again

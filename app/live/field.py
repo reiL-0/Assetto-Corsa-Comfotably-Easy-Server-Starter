@@ -7,7 +7,6 @@ being crossed (the spline jumps from ~1 to ~0) adds a few metres instead of a wh
 
 from __future__ import annotations
 
-
 JUMP = 0.15   # of a lap: a car does not move this far between two updates (~5 Hz); a bigger step is a teleport
 
 
