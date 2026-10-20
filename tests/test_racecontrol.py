@@ -290,3 +290,12 @@ def test_notices_expire_are_capped_and_never_carry_quotes():
     rev = rc.rev
     rc.notify("x", "info", 5, now=202.0)
     assert rc.rev == rev + 1 and rc.snapshot(now=202.5)["notices"][-1]["to"] == 5
+
+
+def test_the_probe_goes_only_to_the_servers_named_in_the_setting(monkeypatch):
+    assert "opr_rc_probe" not in csp.extra_for(2, "")   # off by default
+    monkeypatch.setattr(settings, "csp_probe_servers", "2, 3")
+    on = csp.extra_for(2, "")
+    assert on.count("opr_hub.lua") == 1 and "[SCRIPT_101]\nSCRIPT = \"https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua\"" in on
+    assert "opr_rc_probe" not in csp.extra_for(7, "")   # another server: only the hub
+    assert csp.extra_for(3, '[SCRIPT_100]\nSCRIPT = "mine.lua"').count("[SCRIPT_") == 3   # the admin's script, the hub (101) and the probe (102) all stay

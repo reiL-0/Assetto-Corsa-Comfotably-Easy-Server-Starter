@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     csp_hub: bool = True
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
     csp_hub_version: str = "11"
+    # Probe of the in-game race-control plugin (static/csp/opr_rc_probe.lua): sent as one more default script, only to the servers listed in ACM_CSP_PROBE_SERVERS ("2" or "2,3"; empty = nobody).
+    csp_probe_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua"
+    csp_probe_servers: str = ""
 
     host: str = "127.0.0.1"
     port: int = 8080
