@@ -243,6 +243,12 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
 def auto_green(server_id: int, rc, car: int) -> None:
     """The restart leader crossed the line after "to go": the green flag, as the director would send it."""
     inst = _live(server_id)
+    if inst and rc.formation:   # a rolling start: the green when the pace car is in the pits and a competitor crosses the line (alone: when it arrives)
+        if rc.formation_green(car, set(inst.acsp.cars) <= {rc.pace_car}):
+            _say(rc, SAY["green"], "flag")
+        elif rc.take_blocked_warning():
+            _say(rc, "El pace car no ha entrado a boxes: la bandera verde es manual", "flag")
+        return
     actions = rc.green_if_due(car, field=inst.acsp.field) if inst else None
     if actions is None:
         if rc.take_blocked_warning():
@@ -329,10 +335,21 @@ def call_restart(server_id: int, body: RestartIn, sess: SessionDep) -> dict:
     return _restart(inst, rc, body.to_go)
 
 
+def rolling_start(rc, cars: dict) -> None:
+    """A NASCAR race begins with its pace car connected: the rolling start (one formation lap behind it, then the 'one to go'). Without it the standing start goes on."""
+    car = cars.get(rc.pace_car) if rc.pace_car is not None else None
+    if car and (car.get("driver_guid") or "") == rc.pace_guid and rc.start_formation():
+        _say(rc, "ROLLING START: una vuelta de formación detrás del pace car", "flag")
+
+
 def auto_caution(server_id: int, rc, car: int) -> None:
     """A car crossed the line under a caution: after the pace car's third lap with the track clear the 'to go' comes out by itself; at the sixth, if it is not clear, the director is told (the 'to go' is theirs)."""
     inst = _live(server_id)
     if not inst:
+        return
+    if rc.formation:
+        if rc.formation_lap(car):
+            _say(rc, "VUELTA DE FORMACIÓN COMPLETA: UNA PARA VERDE", "flag")
         return
     speeds = {i: v for i, c in inst.acsp.cars.items() if (v := speed_kmh(c)) is not None}
     with _lock:   # (the decision and the restart as one step: a director's 'to go' cannot slip in between and be overwritten)

@@ -51,6 +51,7 @@ INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a cauti
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
+FORMATION_LAPS = 1                # laps the pace car leads in a rolling start (counted after the first crossing, which is a part of a lap)
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -72,6 +73,8 @@ class RaceControl:
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
+        self.formation = False             # a rolling start is being run: the race begins under yellow behind the pace car (no Caution procedures, the NASCAR engine does not hear of it)
+        self.lap_base = self.leader_laps_seen = 0   # leader laps run in the formation: the engine counts the race from the green
         self.caution_laps = -1             # laps the pace car (the leader when there is none) has done under this caution; -1 = the first crossing is still to come
         self.caution_notified = False      # the director was told that the track did not clear: the 'to go' is theirs
         self.finish_wait: set[int] | None = None
@@ -108,6 +111,9 @@ class RaceControl:
                 raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
             pen = {"kind": given["kind"], "laps": given.get("laps", 0) if given["kind"] == "pits" else 0}
         with _lock:
+            if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
+                self._end_formation()
+                self.flag = "green"
             was_caution = self.flag in CAUTION
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
@@ -115,7 +121,7 @@ class RaceControl:
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
-            actions = self.nascar.on_flag(flag) if self.nascar and source != "nascar" else []
+            actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if self.nascar and field is not None:
                 actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
             self._bump()
@@ -131,6 +137,47 @@ class RaceControl:
             return None
         mode = "in" if self.pace_car_in else ("lead" if self.flag in CAUTION else "wait")   # after "to go" it stays «in» through the green (it still has to park); a new caution or a new pace car resets it
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
+
+    def _end_formation(self) -> None:
+        self.formation = False
+        self.lap_base = self.leader_laps_seen   # (the laps of the formation are not race laps)
+
+    def start_formation(self) -> bool:
+        """The race begins: a rolling start behind the pace car. Only with NASCAR armed, a pace car and nothing run yet; otherwise the standing start goes on as always."""
+        with _lock:
+            if not (self.nascar and self.pace_car is not None and self.flag == "green" and self.nascar.laps == 0 and not self.formation):
+                return False
+            self.formation = True
+            self.caution_laps, self.pace_car_in, self.pace_car_pitted = -1, False, False
+            self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
+            return True
+
+    def formation_lap(self, car: int) -> bool:
+        """The pace car crossed the line in the formation: the first crossing is a part of a lap, the second closes the formation lap -> True, the 'one to go' (the pace car goes in) comes out."""
+        with _lock:
+            if not self.formation or self.pace_car_in or car != self.pace_car:
+                return False
+            self.caution_laps += 1
+            if self.caution_laps < FORMATION_LAPS:
+                return False
+            self.pace_car_in, self.pace_car_pitted = True, False
+            self._bump()
+            return True
+
+    def formation_green(self, car: int, alone: bool) -> bool:
+        """After the 'one to go' of the formation: the green when the pace car is in the pit lane and a competitor crosses the line (alone on the track: when the pace car arrives)."""
+        with _lock:
+            if not (self.formation and self.pace_car_in):
+                return False
+            if (car == self.pace_car) != alone:
+                return False
+            if not self.pace_car_pitted:
+                if not alone:
+                    self.blocked_crossings += 1   # (a competitor crossed and the pace car is not in the pits: after two the director is told)
+                return False
+            self._end_formation()
+            self.set_flag("green", source="formation")
+            return True
 
     def green_if_due(self, car: int, field=None) -> list[tuple] | None:
         """"To go" was called under our caution: the green comes out by itself (None = not due) once the pace car is in the pit lane (its hub said so) and the car that takes the restart crosses the line
@@ -186,6 +233,9 @@ class RaceControl:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid if car is not None else ""
             self.pace_car_in = self.pace_car_pitted = False
             self.blocked_crossings = 0
+            if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
+                self._end_formation()
+                self.set_flag("green", source="formation")
             if car is not None and self.caution:
                 self.caution.remove(car)   # (named during a caution: it was in the frozen order)
             self._bump()
@@ -423,8 +473,11 @@ def on_lap(server_id: int, leader_laps: int, car_id: int | None = None) -> tuple
         if rc.finish_wait is not None and car_id in rc.finish_wait:
             rc.finish_wait.remove(car_id)
             rc._bump()
+        rc.leader_laps_seen = max(rc.leader_laps_seen, leader_laps)
+        if rc.formation:
+            return rc, []   # (the formation lap is not a lap of the race)
         before = rc.nascar.snapshot()
-        actions = rc.nascar.on_leader_lap(leader_laps)
+        actions = rc.nascar.on_leader_lap(max(0, leader_laps - rc.lap_base))
         if before != rc.nascar.snapshot():
             rc._bump()
         return rc, actions

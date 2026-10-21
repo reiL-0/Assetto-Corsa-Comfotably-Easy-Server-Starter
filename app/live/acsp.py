@@ -375,6 +375,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                         rc.configure_nascar(nascar["total"], None, tuple(nascar["shares"]) if nascar.get("shares") is not None else None)
                     except (ValueError, OverflowError) as e:
                         log.warning("NASCAR preset could not arm server %s: %s", self.server_id, e)
+                    else:
+                        from app.racecontrol import rolling_start
+                        rolling_start(rc, self.cars)
             if event.get("session_type") == 2:
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
@@ -394,7 +397,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             if rc and rc.pace_car_in:
                 from app.racecontrol import auto_green
                 auto_green(self.server_id, rc, event["car_id"])
-            if rc and rc.caution:
+            if rc and (rc.caution or rc.formation):
                 from app.racecontrol import auto_caution
                 auto_caution(self.server_id, rc, event["car_id"])
         elif t == "new_connection":

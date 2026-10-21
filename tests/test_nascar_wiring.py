@@ -859,3 +859,81 @@ def test_the_automatic_to_go_ignores_the_pace_car_in_the_pit_lane_and_survives_t
     for _ in range(4):
         lap(other)
     assert rc.pace_car_in, 'the leader left: the other car\'s laps count and the "to go" came out'
+
+
+def _rolling(live, monkeypatch, with_pace_car=True):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars[3] = {'driver_name': 'A', 'velocity': [30.0, 0.0, 0.0]}
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': 'g9'}
+    if with_pace_car:
+        rc.set_pace_car(9, 120, 'g9')
+    lap = lambda car, laps: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}]})
+    return sid, client, rc, lap
+
+
+def test_a_rolling_start_runs_one_formation_lap_then_the_one_to_go_and_the_green_without_touching_the_engine(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    assert rc.formation and rc.flag == 'yellow' and rc.caution is None and rc.pace_car_state()['mode'] == 'lead'
+    assert rc.nascar.cautions_in_stage == 0 and rc.nascar.flag == 'green', 'the engine does not hear of the formation yellow'
+    lap(3, 1)
+    assert rc.nascar.laps == 0, 'the formation lap is not a lap of the race'
+    lap(9, 1)
+    assert rc.formation and not rc.pace_car_in, 'the first crossing is a part of a lap'
+    lap(9, 1)
+    assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the formation lap is done: the one to go'
+    lap(3, 1)
+    assert rc.flag == 'yellow', 'the pace car is not in the pits yet'
+    lap(3, 1)
+    assert rc.flag == 'yellow' and rc.blocked_crossings == 3, 'two blocked crossings: the director was told (once)'
+    rc.report_pit(9, True)
+    lap(9, 1)
+    assert rc.flag == 'yellow', 'the pace car crossing is not the green when there are competitors'
+    lap(3, 1)
+    assert rc.flag == 'green' and not rc.formation and rc.nascar.cautions_in_stage == 0
+    lap(3, 2)
+    assert rc.nascar.laps == 1, 'the race counts from the green: the formation lap is out'
+
+
+def test_a_rolling_start_needs_the_pace_car_and_alone_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch, with_pace_car=False)
+    adapter.rolling_start(rc, client.cars)
+    assert rc.flag == 'green' and not rc.formation, 'no pace car: the standing start'
+    rc.set_pace_car(9, 120, 'g9')
+    del client.cars[3]
+    adapter.rolling_start(rc, client.cars)
+    assert rc.formation
+    lap(9, 0); lap(9, 0)
+    assert rc.pace_car_in
+    rc.report_pit(9, True)
+    adapter.auto_green(sid, rc, 9)
+    assert rc.flag == 'green' and not rc.formation
+
+
+def test_the_formation_ends_with_the_green_when_the_pace_car_leaves_or_the_director_acts(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    rc.set_pace_car(None)
+    assert rc.flag == 'green' and not rc.formation, 'nobody leads the field any more'
+    rc.set_pace_car(9, 120, 'g9')
+    adapter.rolling_start(rc, client.cars)
+    assert rc.formation
+    lap(3, 1)
+    rc.set_flag('green', field=client.field)
+    assert rc.flag == 'green' and not rc.formation and rc.lap_base == 1, 'the director\'s green ends the formation and the formation lap is not counted'
+    lap(3, 2)
+    assert rc.nascar.laps == 1, 'the race counts from the director\'s green'
+
+
+def test_a_directors_yellow_in_the_formation_is_a_real_caution(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    _field(client, c3=(0.50, 1))
+    rc.set_flag('yellow', field=client.field)
+    assert not rc.formation and rc.caution is not None and rc.nascar.cautions_in_stage == 1, 'it starts a caution with its procedures'
