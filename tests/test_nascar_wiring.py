@@ -761,7 +761,34 @@ def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_lin
     lap(4)
     assert rc.flag == 'yellow', 'only the car that takes the restart brings the green'
     lap(3)
-    assert rc.flag == 'green', 'the restart leader crossed the line after "to go"'
+    assert rc.flag == 'yellow', 'the pace car is not in the pit lane yet: the line crossing alone brings no green'
+    rc.restart_plan(client.field.snapshot())
+    assert not rc.pace_car_pitted, 'a second "to go" changes nothing'
+    assert rc.blocked_crossings == 1
+    lap(3)
+    assert rc.flag == 'yellow' and rc.blocked_crossings == 3 and rc.take_blocked_warning() is False, 'the second blocked crossing told the director (once): the green is manual'
+    rc.report_pit(9, True)
+    rc.restart_plan(client.field.snapshot())
+    assert rc.pace_car_pitted, 'a second "to go" does not forget that it pitted'
+    lap(3)
+    assert rc.flag == 'green', 'the pace car is in the pits and the restart leader crossed the line'
     assert rc.pace_car_state()['mode'] == 'in', 'the green does not stop the pace car parking'
     rc.set_flag('yellow', field=client.field)
     assert rc.pace_car_state()['mode'] == 'lead', 'a new caution brings it out again'
+
+
+def test_alone_on_the_track_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': 'g9'}
+    _field(client, c9=(0.50, 9))
+    rc.set_pace_car(9, 120, 'g9')
+    rc.set_flag('yellow', field=client.field)
+    rc.restart_plan(client.field.snapshot())
+    adapter.auto_green(sid, rc, 9)
+    assert rc.flag == 'yellow', 'to go was called but the pace car is still on the track'
+    rc.report_pit(9, True)
+    adapter.auto_green(sid, rc, 9)
+    assert rc.flag == 'green' and rc.pace_car_state()['mode'] == 'in'

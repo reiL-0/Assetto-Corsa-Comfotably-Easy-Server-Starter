@@ -139,6 +139,8 @@ def report_pit(server_id: int, body: PitIn, sess: SessionDep) -> None:
     rc = state_of(server_id, True, inst.acsp.session)
     if rc:
         rc.report_pit(body.car_id, body.pit)
+        if body.pit and rc.pace_car_in and body.car_id == rc.pace_car:
+            auto_green(server_id, rc, body.car_id)   # (alone on the track the pace car IS the restart: its arrival in the pits brings the green)
 
 
 def _control(server_id: int, sess: SessionDep):
@@ -243,6 +245,8 @@ def auto_green(server_id: int, rc, car: int) -> None:
     inst = _live(server_id)
     actions = rc.green_if_due(car, field=inst.acsp.field) if inst else None
     if actions is None:
+        if rc.take_blocked_warning():
+            _say(rc, "El pace car no ha entrado a boxes: la bandera verde es manual", "flag")
         return
     _say(rc, SAY["green"], "flag")
     nascar_actions(server_id, rc, actions)

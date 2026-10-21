@@ -67,6 +67,8 @@ class RaceControl:
         self.pace_car: int | None = None   # the slot of the pace car (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
         self.pace_car_kmh = PACE_CAR_KMH
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
+        self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
+        self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = False   # the director asked for the yellow to come out by itself on a pile-up or a stopped car (otherwise it is only proposed)
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
@@ -127,21 +129,35 @@ class RaceControl:
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
 
     def green_if_due(self, car: int, field=None) -> list[tuple] | None:
-        """"To go" was called under our caution and `car` crossed the line: the green comes out by itself (None = not due). The car that takes the restart is the first of the restart order; with nobody
-        to restart, the pace car. Checked and set under one lock: a director's checkered or a new pace car cannot slip in between."""
+        """"To go" was called under our caution: the green comes out by itself (None = not due) once the pace car is in the pit lane (its hub said so) and the car that takes the restart crosses the line
+        (the first of the restart order; with nobody to restart, the pace car reporting from the pits). Without a pace car, the restart leader crossing is enough. Checked and set under one lock:
+        a director's checkered or a new pace car cannot slip in between."""
         with _lock:
             if not (self.pace_car_in and self.flag in CAUTION and self.caution):
                 return None
             if car != (self.caution.restart[0] if self.caution.restart else self.pace_car):
                 return None
+            if self.pace_car is not None and not self.pace_car_pitted:
+                if self.caution.restart:
+                    self.blocked_crossings += 1
+                return None
             return self.set_flag("green", field=field)
+
+    def take_blocked_warning(self) -> bool:
+        """True once, at the second restart-leader crossing that found the pace car not in the pits (its hub may not be reporting): the green has to be sent by hand."""
+        with _lock:
+            if self.blocked_crossings == 2:
+                self.blocked_crossings = 3
+                return True
+            return False
 
     def set_pace_car(self, car: int | None, kmh: int = PACE_CAR_KMH, guid: str = "") -> None:
         if car is not None and not PACE_MIN <= kmh <= PACE_MAX:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
         with _lock:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid if car is not None else ""
-            self.pace_car_in = False
+            self.pace_car_in = self.pace_car_pitted = False
+            self.blocked_crossings = 0
             if car is not None and self.caution:
                 self.caution.remove(car)   # (named during a caution: it was in the frozen order)
             self._bump()
@@ -155,7 +171,8 @@ class RaceControl:
     def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
-            self.pace_car_in = False   # a new caution: the pace car comes out again
+            self.blocked_crossings = 0
+            self.pace_car_in = self.pace_car_pitted = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
@@ -222,6 +239,8 @@ class RaceControl:
         if in_pit:
             with _lock:
                 self._pit_seen[car_id] = time.time() if now is None else now
+                if car_id == self.pace_car and self.pace_car_in:
+                    self.pace_car_pitted = True
                 if self.caution:
                     self.caution.pitted.add(car_id)   # (in the pits during a caution: out of the free pass, to the pit group of the restart)
 
@@ -246,7 +265,8 @@ class RaceControl:
             if not self.caution:
                 return None
             plan = self.caution.call_restart(self.without_pace_car(progress))
-            self.pace_car_in = True   # "to go": the pace car goes into the pits and the leader controls the restart
+            if not self.pace_car_in:   # (a second "to go" does not forget that the pace car already pitted)
+                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
             return plan
 
