@@ -635,6 +635,8 @@ def test_a_pileup_is_proposed_to_the_director_or_puts_the_yellow_out_by_itself(l
     sid, client, _ = live
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
+    assert rc.auto_yellow is True, 'the yellow by incident is on by default'
+    rc.auto_yellow = False   # (the director turned it off: then it is only a proposal)
     rc.nascar.laps = 5
     _field(client, c3=(0.50, 5), c4=(0.48, 5), c5=(0.46, 5))
     speeds = {3: 40.0, 4: 40.0, 5: 40.0}
@@ -734,10 +736,10 @@ def test_the_directors_choices_outlive_the_session_and_a_pace_car_named_under_ca
     assert 9 in rc.caution.frozen and rc.caution.leader == 9
     rc.set_pace_car(9, 100, 'g9')
     assert 9 not in rc.caution.frozen and rc.caution.leader == 3
-    rc.auto_yellow = True
+    rc.auto_yellow = False
     client.session = {'session_index': 1}   # the next session
     fresh = live_rc.state_of(sid, True, client.session)
-    assert fresh is not rc and fresh.auto_yellow is True and fresh.pace_car == 9 and fresh.pace_guid == 'g9' and fresh.flag == 'green'
+    assert fresh is not rc and fresh.auto_yellow is False and fresh.pace_car == 9 and fresh.pace_guid == 'g9' and fresh.flag == 'green'
 
 
 def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_line_and_the_pace_car_keeps_parking(live, monkeypatch):
@@ -792,3 +794,68 @@ def test_alone_on_the_track_the_pace_car_arriving_in_the_pits_brings_the_green(l
     rc.report_pit(9, True)
     adapter.auto_green(sid, rc, 9)
     assert rc.flag == 'green' and rc.pace_car_state()['mode'] == 'in'
+
+
+def test_a_caution_ends_by_itself_after_the_pace_cars_third_lap_when_the_track_is_clear_and_asks_the_director_after_six(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    client.board.drivers = [Driver(3), Driver(4)]
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': 'g9'}
+    client.cars[4] = {'driver_name': 'Parado', 'velocity': [0.0, 0.0, 0.0]}
+    rc.set_pace_car(9, 120, 'g9')
+    rc.set_flag('yellow', field=client.field)
+    lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
+    lap(3)
+    assert rc.caution_laps == -1, 'only the pace car\'s laps count'
+    lap(9); lap(9); lap(9)
+    assert not rc.pace_car_in and rc.caution_laps == 2, 'the first crossing is a part of a lap: two laps done'
+    lap(9)
+    assert not rc.pace_car_in and rc.caution_laps == 3, 'three laps, but car 4 is standing on the track: not clear'
+    lap(9); lap(9); lap(9)
+    assert not rc.pace_car_in and rc.caution_notified and rc.caution_laps == 6, 'six laps and not clear: said once, the "to go" is the director\'s'
+    msgs = [n['text'] for n in rc.snapshot()['notices']]
+    assert any('es manual' in m for m in msgs)
+    lap(9)
+    assert rc.caution_laps == 6, 'after the warning the automatic "to go" is out'
+    rc.set_flag('green', field=client.field); rc.set_flag('yellow', field=client.field)
+    assert rc.caution_laps == -1 and not rc.caution_notified, 'a new caution starts the count again'
+    client.cars[4]['velocity'] = [30.0, 0.0, 0.0]   # moving: the track is clear
+    lap(9); lap(9); lap(9)
+    assert not rc.pace_car_in
+    lap(9)
+    assert rc.pace_car_in and rc.caution_laps == 3, 'three laps and clear: the "to go" came out by itself'
+
+
+def test_the_automatic_to_go_ignores_the_pace_car_in_the_pit_lane_and_survives_the_leader_leaving(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    client.board.drivers = [Driver(3), Driver(4)]
+    client.cars[3] = {'driver_name': 'A', 'velocity': [30.0, 0.0, 0.0]}
+    client.cars[4] = {'driver_name': 'B', 'velocity': [30.0, 0.0, 0.0]}
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': 'g9'}
+    rc.set_pace_car(9, 120, 'g9')
+    rc.set_flag('yellow', field=client.field)
+    lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
+    rc.report_pit(9, True)
+    lap(9)
+    assert rc.caution_laps == -1, 'a crossing in the pit lane is not a lap on the track'
+    rc.set_pace_car(None)
+    rc.set_flag('green', field=client.field); rc.set_flag('yellow', field=client.field)
+    leader = rc.caution.leader
+    del client.cars[leader]
+    other = 4 if leader == 3 else 3
+    for _ in range(4):
+        lap(other)
+    assert rc.pace_car_in, 'the leader left: the other car\'s laps count and the "to go" came out'

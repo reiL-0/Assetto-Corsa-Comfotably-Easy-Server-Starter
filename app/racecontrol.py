@@ -125,7 +125,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": False, "pacecar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": True, "pacecar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -309,20 +309,41 @@ class RestartIn(BaseModel):
     to_go: Literal[1, 2] = 1   # "one to go" / "two to go" (the rulebook's choose can come with either)
 
 
-@control_router.post("/restart")
-def call_restart(server_id: int, body: RestartIn, sess: SessionDep) -> dict:
-    """'To go' under a NASCAR caution: the wave-around cars are told to pass, every car gets its place in the restart and who may choose a lane. The green flag is still the director's."""
-    inst, rc = _control(server_id, sess)
+def _restart(inst, rc, to_go: int) -> dict:
     plan = rc.restart_plan(inst.acsp.field.snapshot())
     if plan is None:
         raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
     order, waved, choosers = plan
-    _say(rc, ("UNA" if body.to_go == 1 else "DOS") + " PARA VERDE", "flag")
+    _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag")
     for car in waved:
         _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car)
     for i, car in enumerate(order, 1):
         _say(rc, f"REINICIO: P{i}" + (" · ELIGE CARRIL (interior o exterior)" if car in choosers else " · sin elección: al final de tu vuelta"), "race", car)
     return rc.snapshot()
+
+
+@control_router.post("/restart")
+def call_restart(server_id: int, body: RestartIn, sess: SessionDep) -> dict:
+    """'To go' under a NASCAR caution: the wave-around cars are told to pass, every car gets its place in the restart and who may choose a lane. The green flag is still the director's."""
+    inst, rc = _control(server_id, sess)
+    return _restart(inst, rc, body.to_go)
+
+
+def auto_caution(server_id: int, rc, car: int) -> None:
+    """A car crossed the line under a caution: after the pace car's third lap with the track clear the 'to go' comes out by itself; at the sixth, if it is not clear, the director is told (the 'to go' is theirs)."""
+    inst = _live(server_id)
+    if not inst:
+        return
+    speeds = {i: v for i, c in inst.acsp.cars.items() if (v := speed_kmh(c)) is not None}
+    with _lock:   # (the decision and the restart as one step: a director's 'to go' cannot slip in between and be overwritten)
+        verdict = rc.caution_lap(car, speeds, time.time(), set(inst.acsp.cars))
+        if verdict == "go":
+            try:
+                _restart(inst, rc, 1)
+            except HTTPException:
+                pass   # (the caution ended in between: nothing to restart)
+        elif verdict == "warn":
+            _say(rc, "La pista no se despeja tras 6 vueltas: el «to go» es manual", "flag")
 
 
 @control_router.post("/penalties", status_code=201)

@@ -50,6 +50,8 @@ VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
+CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
+PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
 
@@ -69,7 +71,9 @@ class RaceControl:
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
-        self.auto_yellow = False   # the director asked for the yellow to come out by itself on a pile-up or a stopped car (otherwise it is only proposed)
+        self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
+        self.caution_laps = -1             # laps the pace car (the leader when there is none) has done under this caution; -1 = the first crossing is still to come
+        self.caution_notified = False      # the director was told that the track did not clear: the 'to go' is theirs
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
         self.next_at: float | None = None
@@ -143,6 +147,30 @@ class RaceControl:
                 return None
             return self.set_flag("green", field=field)
 
+    def caution_lap(self, car: int, speeds: dict[int, float], now: float, connected: set[int] | None = None) -> str | None:
+        """A car crossed the line under our caution. Only the pace car's laps count (the leader's when there is no pace car); the first crossing is a part of a lap. -> 'go' (at least CAUTION_MIN_LAPS
+        done and the track is clear: the automatic 'to go'), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
+        with _lock:
+            c = self.caution
+            if not (c and self.flag in CAUTION and not self.pace_car_in and not self.caution_notified):
+                return None
+            if self.pace_car is not None:
+                if car != self.pace_car or now - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
+                    return None   # (the pace car crossing the line in the pit lane is not a lap on the track)
+            elif car != c.leader and (connected is None or c.leader in connected):
+                return None   # (the leader left the server: any car crossing counts, or the count would never move)
+            self.caution_laps += 1
+            if self.caution_laps < CAUTION_MIN_LAPS:
+                return None
+            pits = {i for i, t in self._pit_seen.items() if now - t < PIT_CLEAR}
+            stopped = [i for i, v in speeds.items() if i != self.pace_car and v < STANDING and i not in pits]
+            if not stopped and not self.watch.recent_involved(now, INVOLVED_FOR):
+                return "go"
+            if self.caution_laps >= CAUTION_MAX_LAPS:
+                self.caution_notified = True
+                return "warn"
+            return None
+
     def take_blocked_warning(self) -> bool:
         """True once, at the second restart-leader crossing that found the pace car not in the pits (its hub may not be reporting): the green has to be sent by hand."""
         with _lock:
@@ -171,7 +199,7 @@ class RaceControl:
     def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
-            self.blocked_crossings = 0
+            self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
             self.pace_car_in = self.pace_car_pitted = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
