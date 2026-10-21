@@ -37,6 +37,8 @@ def extra_for(server_id: int, extra: str) -> str:
     while re.search(rf"^\s*\[SCRIPT_{n}\]", extra, re.M | re.I):
         n += 1
     hub = f'[SCRIPT_{n}]\nSCRIPT = "{settings.csp_hub_url}?v={settings.csp_hub_version}"\nSERVER = {server_id}\n'
+    if str(server_id) in {x.strip() for x in settings.csp_probe_servers.split(",")}:   # (the race-control plugin's probe, for the servers named in the setting)
+        hub += f'\n[SCRIPT_{n + 1}]\nSCRIPT = "{settings.csp_probe_url}"\n'
     return (extra.strip() + "\n\n" if extra.strip() else "") + hub
 
 
