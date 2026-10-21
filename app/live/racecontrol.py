@@ -51,7 +51,7 @@ INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a cauti
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
-FORMATION_LAPS = 1                # laps the pace car leads in a rolling start (counted after the first crossing, which is a part of a lap)
+FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -153,7 +153,7 @@ class RaceControl:
             return True
 
     def formation_lap(self, car: int) -> bool:
-        """The pace car crossed the line in the formation: the first crossing is a part of a lap, the second closes the formation lap -> True, the 'one to go' (the pace car goes in) comes out."""
+        """The pace car crossed the line in the formation: the first crossing (from the grid) brings the 'one to go' -> True: the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing."""
         with _lock:
             if not self.formation or self.pace_car_in or car != self.pace_car:
                 return False

@@ -884,10 +884,9 @@ def test_a_rolling_start_runs_one_formation_lap_then_the_one_to_go_and_the_green
     assert rc.nascar.cautions_in_stage == 0 and rc.nascar.flag == 'green', 'the engine does not hear of the formation yellow'
     lap(3, 1)
     assert rc.nascar.laps == 0, 'the formation lap is not a lap of the race'
+    assert rc.formation and not rc.pace_car_in, 'no crossing of the pace car yet'
     lap(9, 1)
-    assert rc.formation and not rc.pace_car_in, 'the first crossing is a part of a lap'
-    lap(9, 1)
-    assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the formation lap is done: the one to go'
+    assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the first crossing brings the one to go: it pits at the end of the formation lap'
     lap(3, 1)
     assert rc.flag == 'yellow', 'the pace car is not in the pits yet'
     lap(3, 1)
@@ -909,7 +908,7 @@ def test_a_rolling_start_needs_the_pace_car_and_alone_the_pace_car_arriving_in_t
     del client.cars[3]
     adapter.rolling_start(rc, client.cars)
     assert rc.formation
-    lap(9, 0); lap(9, 0)
+    lap(9, 0)
     assert rc.pace_car_in
     rc.report_pit(9, True)
     adapter.auto_green(sid, rc, 9)
