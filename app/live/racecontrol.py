@@ -48,7 +48,7 @@ NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
-PACE_CAR_KMH = 100              # km/h the pace car leads at when nobody says otherwise
+PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 

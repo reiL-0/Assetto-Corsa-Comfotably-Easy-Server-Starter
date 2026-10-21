@@ -275,7 +275,7 @@ def auto_yellow(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
 
 class PaceCarIn(BaseModel):
     car_id: int | None = Field(default=None, ge=0, le=255)   # None: no pace car
-    kmh: int = Field(default=100, ge=PACE_MIN, le=PACE_MAX)
+    kmh: int = Field(default=120, ge=PACE_MIN, le=PACE_MAX)
 
 
 @control_router.post("/pace-car")
