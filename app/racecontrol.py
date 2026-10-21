@@ -238,6 +238,16 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
 
 
+def auto_green(server_id: int, rc, car: int) -> None:
+    """The restart leader crossed the line after "to go": the green flag, as the director would send it."""
+    inst = _live(server_id)
+    actions = rc.green_if_due(car, field=inst.acsp.field) if inst else None
+    if actions is None:
+        return
+    _say(rc, SAY["green"], "flag")
+    nascar_actions(server_id, rc, actions)
+
+
 def finish_nascar(now: float) -> None:
     """Capture the configured delay at done; later delay edits never move an existing `next_at`."""
     for inst in supervisor.live():

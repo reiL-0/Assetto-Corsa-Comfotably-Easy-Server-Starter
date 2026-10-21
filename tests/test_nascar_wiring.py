@@ -695,7 +695,7 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={})
     assert r.json()['pacecar']['mode'] == 'in' and 9 not in r.json()['caution']['restart']
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
-    assert r.json()['pacecar']['mode'] == 'wait'
+    assert r.json()['pacecar']['mode'] == 'in', 'after "to go" the green does not stop the pace car parking'
     assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={}).json()['pacecar'] is None
 
 
@@ -738,3 +738,30 @@ def test_the_directors_choices_outlive_the_session_and_a_pace_car_named_under_ca
     client.session = {'session_index': 1}   # the next session
     fresh = live_rc.state_of(sid, True, client.session)
     assert fresh is not rc and fresh.auto_yellow is True and fresh.pace_car == 9 and fresh.pace_guid == 'g9' and fresh.flag == 'green'
+
+
+def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_line_and_the_pace_car_keeps_parking(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    client.board.drivers = [Driver(3), Driver(4)]
+    rc.set_pace_car(9, 120, 'g9')
+    rc.set_flag('yellow', field=client.field)
+    assert rc.pace_car_state()['mode'] == 'lead'
+    lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
+    lap(3)
+    assert rc.flag == 'yellow', 'no "to go" yet: crossing the line is only a lap'
+    rc.restart_plan(client.field.snapshot())
+    assert rc.pace_car_state()['mode'] == 'in'
+    lap(4)
+    assert rc.flag == 'yellow', 'only the car that takes the restart brings the green'
+    lap(3)
+    assert rc.flag == 'green', 'the restart leader crossed the line after "to go"'
+    assert rc.pace_car_state()['mode'] == 'in', 'the green does not stop the pace car parking'
+    rc.set_flag('yellow', field=client.field)
+    assert rc.pace_car_state()['mode'] == 'lead', 'a new caution brings it out again'

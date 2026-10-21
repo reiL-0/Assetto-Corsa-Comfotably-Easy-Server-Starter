@@ -123,10 +123,18 @@ class RaceControl:
         """What the pace car's own hub reads: wait in the pits / lead the field / come in."""
         if self.pace_car is None:
             return None
-        mode = "wait"
-        if self.flag in CAUTION:
-            mode = "in" if self.pace_car_in else "lead"
+        mode = "in" if self.pace_car_in else ("lead" if self.flag in CAUTION else "wait")   # after "to go" it stays «in» through the green (it still has to park); a new caution or a new pace car resets it
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
+
+    def green_if_due(self, car: int, field=None) -> list[tuple] | None:
+        """"To go" was called under our caution and `car` crossed the line: the green comes out by itself (None = not due). The car that takes the restart is the first of the restart order; with nobody
+        to restart, the pace car. Checked and set under one lock: a director's checkered or a new pace car cannot slip in between."""
+        with _lock:
+            if not (self.pace_car_in and self.flag in CAUTION and self.caution):
+                return None
+            if car != (self.caution.restart[0] if self.caution.restart else self.pace_car):
+                return None
+            return self.set_flag("green", field=field)
 
     def set_pace_car(self, car: int | None, kmh: int = PACE_CAR_KMH, guid: str = "") -> None:
         if car is not None and not PACE_MIN <= kmh <= PACE_MAX:

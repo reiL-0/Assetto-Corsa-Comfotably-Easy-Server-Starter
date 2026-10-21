@@ -391,6 +391,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
             if actions:
                 nascar_actions(self.server_id, rc, actions, event["car_id"])
+            if rc and rc.pace_car_in:
+                from app.racecontrol import auto_green
+                auto_green(self.server_id, rc, event["car_id"])
         elif t == "new_connection":
             self.field.drop(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
