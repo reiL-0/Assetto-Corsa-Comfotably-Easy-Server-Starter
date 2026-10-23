@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # Probe of the in-game race-control plugin (static/csp/opr_rc_probe.lua): sent as one more default script, only to the servers listed in ACM_CSP_PROBE_SERVERS ("2" or "2,3"; empty = nobody).
     csp_probe_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua"
     csp_probe_servers: str = ""
+    # The lap trainer (static/csp/opr_trainer.lua: braking-point bar, live delta, corner summaries, practice and qualifying only): same rule, only the servers in ACM_CSP_TRAINER_SERVERS.
+    # `csp_trainer_version` goes in the URL like the hub's: raise it whenever the script changes.
+    csp_trainer_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua"
+    csp_trainer_version: str = "1"
+    csp_trainer_servers: str = ""
 
     host: str = "127.0.0.1"
     port: int = 8080

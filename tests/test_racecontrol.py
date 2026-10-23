@@ -299,3 +299,14 @@ def test_the_probe_goes_only_to_the_servers_named_in_the_setting(monkeypatch):
     assert on.count("opr_hub.lua") == 1 and "[SCRIPT_101]\nSCRIPT = \"https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua\"" in on
     assert "opr_rc_probe" not in csp.extra_for(7, "")   # another server: only the hub
     assert csp.extra_for(3, '[SCRIPT_100]\nSCRIPT = "mine.lua"').count("[SCRIPT_") == 3   # the admin's script, the hub (101) and the probe (102) all stay
+
+
+def test_the_trainer_goes_only_to_the_servers_named_in_its_setting(monkeypatch):
+    assert "opr_trainer" not in csp.extra_for(2, "")   # off by default
+    monkeypatch.setattr(settings, "csp_trainer_servers", "2")
+    on = csp.extra_for(2, "")
+    assert on.count("opr_hub.lua") == 1 and '[SCRIPT_101]\nSCRIPT = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua?v=' in on
+    assert "opr_trainer" not in csp.extra_for(7, "")   # another server: only the hub
+    monkeypatch.setattr(settings, "csp_probe_servers", "2")
+    both = csp.extra_for(2, "")
+    assert "[SCRIPT_101]\nSCRIPT = \"https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua\"" in both and "[SCRIPT_102]" in both and both.index("opr_rc_probe") < both.index("opr_trainer")
