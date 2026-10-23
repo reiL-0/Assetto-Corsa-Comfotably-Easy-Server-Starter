@@ -137,3 +137,24 @@ class _EchoProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:
         self.sink.append(data)
+
+
+def test_the_claim_probe_greets_each_car_alone_and_only_on_probe_servers(monkeypatch, caplog):
+    import logging
+    from app.config import settings
+    sent = []
+    client = acsp.ACSPClient(2)
+    client.send = sent.append
+    client.datagram_received(bytes([acsp.CLIENT_LOADED, 4]), ("127.0.0.1", 0))
+    assert sent == []   # not a probe server: nothing is sent
+    monkeypatch.setattr(settings, "csp_probe_servers", "2")
+    with caplog.at_level(logging.INFO, logger="acmanager.acsp"):
+        client.datagram_received(bytes([acsp.CLIENT_LOADED, 4]), ("127.0.0.1", 0))
+        client.datagram_received(bytes([acsp.CLIENT_LOADED, 5]), ("127.0.0.1", 0))
+        client.datagram_received(bytes([acsp.CHAT, 5]) + acsp._write_string("OPRPROBE abc"), ("127.0.0.1", 0))
+        client.datagram_received(bytes([acsp.CHAT, 6]) + acsp._write_string("hello"), ("127.0.0.1", 0))
+    assert [p[0] for p in sent] == [acsp.SEND_CHAT, acsp.SEND_CHAT] and sent[0][1] == 4 and sent[1][1] == 5   # one unicast per car, to that car's slot
+    assert sent[0] != sent[1]   # each car its own code
+    logs = [r.getMessage() for r in caplog.records]
+    assert any("sent code 2-4-" in m and "to car 4 only" in m for m in logs) and any("chat from car 5" in m and "OPRPROBE abc" in m for m in logs)
+    assert not any("hello" in m for m in logs)   # only the probe's chat is logged

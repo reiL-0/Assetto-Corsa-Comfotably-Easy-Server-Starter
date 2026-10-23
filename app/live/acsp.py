@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import struct
 import time
 from collections import deque
@@ -412,8 +413,12 @@ class ACSPClient(asyncio.DatagramProtocol):
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
             self.field.drop(event["car_id"])
-        elif t == "client_loaded" and self.on_client_loaded:
-            self.on_client_loaded(event["car_id"])
+        elif t == "client_loaded":
+            if self.on_client_loaded:
+                self.on_client_loaded(event["car_id"])
+            self._claim_probe_greet(event["car_id"])
+        elif t == "chat" and event["message"].startswith("OPRPROBE") and self._claim_probe_on():
+            log.info("claim probe: server %s saw chat from car %s (slot stamped by acServer): %r", self.server_id, event["car_id"], event["message"][:80])
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
             # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
             joined = {**event, "type": "new_connection"}
@@ -431,6 +436,21 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.trail.setdefault(event["car_id"], deque(maxlen=TRAIL)).append((time.time(), event["pos"], event["velocity"]))
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)
+
+    def _claim_probe_on(self) -> bool:
+        from app.config import settings   # (late, like the others here)
+        return str(self.server_id) in {x.strip() for x in settings.csp_probe_servers.split(",")}
+
+    def _claim_probe_greet(self, car_id: int) -> None:
+        """TEMPORARY, only on the servers of ACM_CSP_PROBE_SERVERS: answers three questions about the automatic telemetry token before it is built (the token would travel
+        by this channel). Sends each car that finishes loading its OWN random code as a hidden chat message to that car alone, and logs it; the probe script
+        (static/csp/opr_rc_probe.lua) reports what its client received and sends a chat of its own, which `_apply` logs with the slot acServer stamped on it.
+        Compare the logs of two clients: each should have received only its code (private), and the slot of the chat must be the sender's."""
+        if not self._claim_probe_on():
+            return
+        code = f"{self.server_id}-{car_id}-{secrets.token_hex(3)}"
+        self.send(encode_send_chat(car_id, "\t\t\t\t$OPRPROBE:" + code))
+        log.info("claim probe: server %s sent code %s to car %s only", self.server_id, code, car_id)
 
     def _kick_qualy_banned(self, cars: list[dict]) -> None:
         """The league keeps some drivers from qualifying (app/league.py): they are kicked while the server is in qualifying and can come
