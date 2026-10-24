@@ -419,6 +419,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             self._claim_probe_greet(event["car_id"])
         elif t == "chat" and event["message"].startswith("OPRPROBE") and self._claim_probe_on():
             log.info("claim probe: server %s saw chat from car %s (slot stamped by acServer): %r", self.server_id, event["car_id"], event["message"][:80])
+            self._claim_probe_greet(event["car_id"])   # the script listens now: answer with a private code (the one sent at client_loaded arrives before the script runs)
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
             # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
             joined = {**event, "type": "new_connection"}

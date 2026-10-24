@@ -153,8 +153,8 @@ def test_the_claim_probe_greets_each_car_alone_and_only_on_probe_servers(monkeyp
         client.datagram_received(bytes([acsp.CLIENT_LOADED, 5]), ("127.0.0.1", 0))
         client.datagram_received(bytes([acsp.CHAT, 5]) + acsp._write_string("OPRPROBE abc"), ("127.0.0.1", 0))
         client.datagram_received(bytes([acsp.CHAT, 6]) + acsp._write_string("hello"), ("127.0.0.1", 0))
-    assert [p[0] for p in sent] == [acsp.SEND_CHAT, acsp.SEND_CHAT] and sent[0][1] == 4 and sent[1][1] == 5   # one unicast per car, to that car's slot
-    assert sent[0] != sent[1]   # each car its own code
+    assert [p[0] for p in sent] == [acsp.SEND_CHAT] * 3 and [p[1] for p in sent] == [4, 5, 5]   # one unicast per loaded car, and another to the car whose probe chat arrived (the "hello" chat gets none)
+    assert len({bytes(p) for p in sent}) == 3   # every message its own code
     logs = [r.getMessage() for r in caplog.records]
     assert any("sent code 2-4-" in m and "to car 4 only" in m for m in logs) and any("chat from car 5" in m and "OPRPROBE abc" in m for m in logs)
     assert not any("hello" in m for m in logs)   # only the probe's chat is logged
