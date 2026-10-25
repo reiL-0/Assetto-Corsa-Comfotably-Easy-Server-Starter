@@ -320,6 +320,7 @@ def _restart(inst, rc, to_go: int) -> dict:
     if plan is None:
         raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
     order, waved, choosers = plan
+    log.info("restart called: %s to go", to_go)
     _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag")
     for car in waved:
         _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car)

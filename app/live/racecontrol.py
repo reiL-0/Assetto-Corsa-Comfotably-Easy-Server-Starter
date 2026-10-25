@@ -18,6 +18,7 @@ The finish monitor captures it in `next_at` when the field finishes; later delay
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 import statistics
 import threading
@@ -27,6 +28,8 @@ from collections import deque
 from app.live.caution import Caution
 from app.live.incidents import Watch
 from app.live.nascar import CAUTION, Nascar, STAGES_DEFAULT
+
+log = logging.getLogger("acmanager.nascar")
 
 # Penalty and VSC ids only ever rise, across sessions and manager restarts (they start at the clock): the hub applies each penalty id once, and a client that stays connected through a
 # session change must never see an id it has already used come back for something else.
@@ -125,6 +128,7 @@ class RaceControl:
             if self.nascar and field is not None:
                 actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
             self._bump()
+            log.info("flag %s source=%s was_caution=%s actions=%s", flag, source, was_caution, actions)
             return actions
 
     def without_pace_car(self, progress: dict) -> dict:
@@ -191,6 +195,7 @@ class RaceControl:
             if self.pace_car is not None and not self.pace_car_pitted:
                 if self.caution.restart:
                     self.blocked_crossings += 1
+                log.info("green held: restart leader %s crossed but the pace car %s has not reported the pit lane (blocked=%s)", car, self.pace_car, self.blocked_crossings)
                 return None
             return self.set_flag("green", field=field)
 
@@ -208,10 +213,13 @@ class RaceControl:
                 return None   # (the leader left the server: any car crossing counts, or the count would never move)
             self.caution_laps += 1
             if self.caution_laps < CAUTION_MIN_LAPS:
+                log.info("caution lap %s/%s counted (car %s): too early for the automatic to go", self.caution_laps, CAUTION_MIN_LAPS, car)
                 return None
             pits = {i for i, t in self._pit_seen.items() if now - t < PIT_CLEAR}
             stopped = [i for i, v in speeds.items() if i != self.pace_car and v < STANDING and i not in pits]
-            if not stopped and not self.watch.recent_involved(now, INVOLVED_FOR):
+            involved = self.watch.recent_involved(now, INVOLVED_FOR)
+            log.info("caution lap %s counted (car %s): stopped=%s recent_involved=%s", self.caution_laps, car, stopped, bool(involved))
+            if not stopped and not involved:
                 return "go"
             if self.caution_laps >= CAUTION_MAX_LAPS:
                 self.caution_notified = True
@@ -292,6 +300,7 @@ class RaceControl:
             n = {"id": next(_notice_ids), "kind": kind, "text": text.replace('"', "'").replace("\\", "/")[:160], "to": to, "until": now + ttl}
             self.notices = [x for x in self.notices if x["until"] > now][-(NOTICE_MAX - 1):] + [n]
             self._bump()
+            log.info("notice kind=%s to=%s: %s", kind, to, n["text"])
             return n
 
     def add_penalty(self, car_id: int, laps: int) -> dict:
@@ -318,6 +327,8 @@ class RaceControl:
             with _lock:
                 self._pit_seen[car_id] = time.time() if now is None else now
                 if car_id == self.pace_car and self.pace_car_in:
+                    if not self.pace_car_pitted:
+                        log.info("pace car %s reported the pit lane after to go", car_id)
                     self.pace_car_pitted = True
                 if self.caution:
                     self.caution.pitted.add(car_id)   # (in the pits during a caution: out of the free pass, to the pit group of the restart)
@@ -346,6 +357,7 @@ class RaceControl:
             if not self.pace_car_in:   # (a second "to go" does not forget that the pace car already pitted)
                 self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
+            log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)
             return plan
 
     def caution_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
