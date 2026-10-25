@@ -123,3 +123,18 @@ def test_a_slow_car_in_the_pit_lane_or_when_the_whole_field_is_slow_is_not_limpi
         w.step(t, {1: 200.0, 2: 200.0, 3: 200.0, 4: 200.0}, set(), True)
     for t in range(2, 40):
         assert w.step(float(t), {1: 50.0, 2: 60.0, 3: 55.0, 4: 58.0}, set(), True) is None, "everybody is slow (a hairpin, a start)"
+
+
+def test_the_pace_of_the_others_is_the_lower_median_and_a_limping_car_that_recovers_under_a_caution_can_be_proposed_again():
+    w = Watch()
+    for t in (0.0, 1.0):
+        w.step(t, {1: 200.0, 2: 30.0, 3: 31.0, 4: 150.0, 5: 150.0}, set(), True)
+    for t in range(2, 30):   # for car 1 the others are 30, 31, 150, 150: the lower median is 31 -- nowhere near a limp at 45 km/h
+        assert w.step(float(t), {1: 45.0, 2: 30.0, 3: 31.0, 4: 150.0, 5: 150.0}, set(), True) is None
+    w = Watch()
+    pack = {2: 200.0, 3: 200.0, 4: 200.0}
+    for t in (0.0, 1.0):
+        w.step(t, {1: 200.0, **pack}, set(), True)
+    assert any(w.step(float(t), {1: 60.0, **pack}, set(), True) for t in range(2, 20)), "limping"
+    w.step(30.0, {1: 200.0, **pack}, set(), False)   # (under a caution it is up to pace again)
+    assert any(w.step(float(t), {1: 60.0, **pack}, set(), True) for t in range(40, 60)), "and limping again after the restart"

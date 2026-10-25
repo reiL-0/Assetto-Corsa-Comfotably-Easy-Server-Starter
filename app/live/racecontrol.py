@@ -311,7 +311,9 @@ class RaceControl:
             if hold:
                 kind, ttl = "hold", HOLD_TTL
             n = {"id": next(_notice_ids), "kind": kind, "text": text.replace('"', "'").replace("\\", "/")[:160], "to": to, "until": now + ttl, "hold": hold}
-            self.notices = [x for x in self.notices if x["until"] > now and not (hold and x.get("hold") == hold)][-(NOTICE_MAX - 1):] + [n]
+            alive = [x for x in self.notices if x["until"] > now and not (hold and x.get("hold") == hold)]
+            held = [x for x in alive if x.get("hold")]   # (the held ones are not pushed out by the ephemeral ones)
+            self.notices = held + [x for x in alive if not x.get("hold")][-(NOTICE_MAX - 1 - len(held)):] + [n]
             self._bump()
             log.info("notice kind=%s to=%s: %s", kind, to, n["text"])
             return n

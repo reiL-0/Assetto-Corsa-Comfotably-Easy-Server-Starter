@@ -33,7 +33,7 @@ class Watch:
         self._limp: dict[int, float] = {}        # car id -> since when it has been far under the pace of the others
         self._limp_flagged: set[int] = set()     # limping cars already proposed (until they are up to pace again)
         self._heavy: tuple[float, list[int]] | None = None   # the last heavy contact not yet proposed (both events of a contact come: only the first counts)
-        self._heavy_t = -1e9
+        self._heavy_t: dict[tuple[int, int], float] = {}   # pair of cars -> when its last heavy contact was taken in
         self.proposal: dict | None = None
         self._next_id = 1
 
@@ -41,8 +41,9 @@ class Watch:
         if speed < CONTACT_KMH:
             return
         self.contacts.append((now, car, other))
-        if other is not None and speed >= HEAVY_KMH and now - self._heavy_t > PILEUP_S:
-            self._heavy, self._heavy_t = (now, sorted((car, other))), now
+        pair = (min(car, other), max(car, other)) if other is not None else None
+        if pair and speed >= HEAVY_KMH and now - self._heavy_t.get(pair, -1e9) > PILEUP_S:
+            self._heavy, self._heavy_t[pair] = (now, list(pair)), now
         for c in (car, other):
             if c is not None:
                 self.involved[c] = now
@@ -67,24 +68,23 @@ class Watch:
         for c in [c for c in self._limp if c not in speeds]:
             self._limp.pop(c)
         self._limp_flagged &= speeds.keys()
+        for c, v in speeds.items():   # (the pace of the others: the median -- the lower one -- of the cars racing, not in the pit lane, not stopped; kept up to date under a caution too, so a recovered car can be proposed again)
+            others = sorted(x for k, x in speeds.items() if k != c and k not in in_pit and x >= MOVING_KMH)
+            pace = others[(len(others) - 1) // 2] if len(others) >= SLOW_MIN_CARS else 0.0
+            if racing and c in self._moved and c not in in_pit and v > STOP_KMH and pace >= SLOW_REF_KMH and v < SLOW_FRAC * pace:
+                self._limp.setdefault(c, now)
+            else:
+                self._limp.pop(c, None)
+                if pace == 0.0 or v >= SLOW_FRAC * pace:
+                    self._limp_flagged.discard(c)
         if not racing:
             self._still.clear()   # (the formation lap and the cautions do not count: the six seconds start when the race is on)
-            self._limp.clear()
             self._heavy = None
             return None
         if self._heavy:
             _, cars = self._heavy
             self._heavy = None
             return self._propose(now, "heavy", cars, "Contacto fuerte")
-        for c, v in speeds.items():   # (the pace of the others: the median of the cars racing, not in the pit lane, not stopped)
-            others = [x for k, x in speeds.items() if k != c and k not in in_pit and x >= MOVING_KMH]
-            pace = sorted(others)[len(others) // 2] if len(others) >= SLOW_MIN_CARS else 0.0
-            if c in self._moved and c not in in_pit and v > STOP_KMH and pace >= SLOW_REF_KMH and v < SLOW_FRAC * pace:
-                self._limp.setdefault(c, now)
-            else:
-                self._limp.pop(c, None)
-                if pace == 0.0 or v >= SLOW_FRAC * pace:
-                    self._limp_flagged.discard(c)
         for c, since in self._limp.items():
             if now - since >= SLOW_LIMP_S and c not in self._limp_flagged:
                 self._limp_flagged.add(c)
