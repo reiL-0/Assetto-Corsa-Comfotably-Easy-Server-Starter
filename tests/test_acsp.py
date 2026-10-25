@@ -158,3 +158,42 @@ def test_the_claim_probe_greets_each_car_alone_and_only_on_probe_servers(monkeyp
     logs = [r.getMessage() for r in caplog.records]
     assert any("sent code 2-4-" in m and "to car 4 only" in m for m in logs) and any("chat from car 5" in m and "OPRPROBE abc" in m for m in logs)
     assert not any("hello" in m for m in logs)   # only the probe's chat is logged
+
+
+def test_the_automatic_token_code_goes_to_the_car_that_said_hello_and_only_if_the_website_took_it(monkeypatch):
+    import asyncio
+    from app.config import settings
+    posted, sent = [], []
+    monkeypatch.setattr(acsp, "_claim_post", lambda guid, code: posted.append((guid, code)) or accepted[0])
+    accepted = [True]
+
+    def hello(car_id, text="OPRHELLO", guid="76561198000000001"):
+        async def go():
+            client.cars[car_id] = {"car_id": car_id, "driver_guid": guid}
+            client.datagram_received(bytes([acsp.CHAT, car_id]) + acsp._write_string(text), ("127.0.0.1", 0))
+            await asyncio.gather(*list(client._claim_tasks))
+        asyncio.run(go())
+    client = acsp.ACSPClient(2)
+    client.send = sent.append
+    hello(3)
+    assert posted == [] and sent == []   # off: ACM_CSP_CLAIM_SERVERS and the secret are empty
+    monkeypatch.setattr(settings, "csp_claim_servers", "2"); hello(3)
+    assert posted == [] and sent == []   # a server listed but no shared secret: still off
+    monkeypatch.setattr(settings, "claim_secret", "s3cret"); hello(3, "hello there"); hello(3, "OPRPROBE")
+    assert posted == [] and sent == []   # other chat is not a request
+    hello(3, "\t\t\t\t$OPRHELLO")
+    assert [p[0] for p in posted] == ["76561198000000001"] and len(sent) == 1 and sent[0][0] == acsp.SEND_CHAT and sent[0][1] == 3   # the Steam ID of the CAR, the code to that car alone
+    assert posted[0][1].encode("utf-32-le") in sent[0] and 16 <= len(posted[0][1]) <= 64
+    hello(3); assert len(posted) == 1   # the same car again at once: no second code (CLAIM_PAUSE)
+    hello(4, guid="76561198000000002"); assert len(posted) == 2 and sent[1][1] == 4 and posted[1][1] != posted[0][1]   # another car, its own Steam ID and code
+    accepted[0] = False; hello(5)
+    assert len(posted) == 3 and len(sent) == 2   # the website refused: the code is not sent
+    client._claim_last.clear(); accepted[0] = True
+
+    async def swapped():   # the slot changes hands while the website is being told
+        client.cars[6] = {"car_id": 6, "driver_guid": "76561198000000001"}
+        client.datagram_received(bytes([acsp.CHAT, 6]) + acsp._write_string("OPRHELLO"), ("127.0.0.1", 0))
+        client.cars[6] = {"car_id": 6, "driver_guid": "76561198000000009"}
+        await asyncio.gather(*list(client._claim_tasks))
+    asyncio.run(swapped())
+    assert len(sent) == 2   # nothing for the new occupant

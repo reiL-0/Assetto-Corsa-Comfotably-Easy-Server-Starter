@@ -20,8 +20,14 @@ class Settings(BaseSettings):
     # The lap trainer (static/csp/opr_trainer.lua: braking-point bar, live delta, corner summaries, practice and qualifying only): same rule, only the servers in ACM_CSP_TRAINER_SERVERS.
     # `csp_trainer_version` goes in the URL like the hub's: raise it whenever the script changes.
     csp_trainer_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua"
-    csp_trainer_version: str = "2"
+    csp_trainer_version: str = "3"
     csp_trainer_servers: str = ""
+    # Automatic telemetry token (app/live/acsp.py `_claim_issue`): only the servers in ACM_CSP_CLAIM_SERVERS answer a driver's "OPRHELLO" chat with a private one-use code.
+    # Empty = nobody (it stays off until the private-chat probe has been checked with two clients). The website's issue endpoint and the secret it shares with the manager
+    # (the website's OPR_CLAIM_SECRET): ACM_CLAIM_URL, ACM_CLAIM_SECRET (empty secret = off).
+    csp_claim_servers: str = ""
+    claim_url: str = "http://127.0.0.1:5100/api/telemetry/claim/issue"
+    claim_secret: str = ""
 
     host: str = "127.0.0.1"
     port: int = 8080

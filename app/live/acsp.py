@@ -8,10 +8,12 @@ bytes — the server serializes its wchar_t buffers naively over the wire.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import struct
 import time
+import urllib.request
 from collections import deque
 
 from app import metrics
@@ -317,6 +319,21 @@ def encode_realtime_pos_interval(interval_ms: int) -> bytes:
     return _cmd(REALTIMEPOS_INTERVAL, struct.pack("<H", interval_ms))
 
 
+CLAIM_PAUSE = 15.0   # s between two answers to the same car's OPRHELLO
+
+
+def _claim_post(guid: str, code: str) -> bool:
+    """Tell the website (blocking: run it in a thread) that `code` may be redeemed for `guid`'s telemetry token. False on any failure."""
+    from app.config import settings   # (late, like the others here)
+    req = urllib.request.Request(settings.claim_url, data=json.dumps({"guid": guid, "code": code}).encode(), method="POST",
+                                 headers={"Authorization": "Bearer " + settings.claim_secret, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status == 204
+    except OSError:   # (URLError and HTTPError are OSErrors; a refusal is as good as an outage here)
+        return False
+
+
 class ACSPClient(asyncio.DatagramProtocol):
     """One UDP endpoint per running server: parses events, sends commands.
 
@@ -339,6 +356,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
         self.transport: asyncio.DatagramTransport | None = None
         self._hello: asyncio.Task | None = None
+        self._claim_last: dict[int, float] = {}  # car_id -> monotonic time of the last automatic-token request answered (see `_claim_issue`)
+        self._claim_tasks: set[asyncio.Task] = set()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -417,6 +436,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             if self.on_client_loaded:
                 self.on_client_loaded(event["car_id"])
             self._claim_probe_greet(event["car_id"])
+        elif t == "chat" and event["message"].lstrip("\t$ ").startswith("OPRHELLO"):
+            self._claim_issue(event["car_id"])
         elif t == "chat" and event["message"].startswith("OPRPROBE") and self._claim_probe_on():
             log.info("claim probe: server %s saw chat from car %s (slot stamped by acServer): %r", self.server_id, event["car_id"], event["message"][:80])
             self._claim_probe_greet(event["car_id"])   # the script listens now: answer with a private code (the one sent at client_loaded arrives before the script runs)
@@ -452,6 +473,31 @@ class ACSPClient(asyncio.DatagramProtocol):
         code = f"{self.server_id}-{car_id}-{secrets.token_hex(3)}"
         self.send(encode_send_chat(car_id, "\t\t\t\t$OPRPROBE:" + code))
         log.info("claim probe: server %s sent code %s to car %s only", self.server_id, code, car_id)
+
+    def _claim_issue(self, car_id: int) -> None:
+        """Automatic telemetry token, step 2 (the website's app/telemetry_claim.py explains the whole flow). A driver's script said OPRHELLO in the chat; `car_id` is the number the
+        acServer stamped on it, so `self.cars[car_id]["driver_guid"]` is who really is in that car, whatever the script claims. Only on servers of ACM_CSP_CLAIM_SERVERS, at most one
+        answer per car every CLAIM_PAUSE s. The website is told {guid, code} first; only when it accepted is the code sent to THAT car alone, and only if the same Steam ID
+        still sits in the car (a slot that changed hands meanwhile gets nothing). The code is never logged."""
+        from app.config import settings   # (late, like the others here)
+        if str(self.server_id) not in {x.strip() for x in settings.csp_claim_servers.split(",")} or not settings.claim_secret:
+            return
+        guid, now = (self.cars.get(car_id) or {}).get("driver_guid"), time.monotonic()
+        if not guid or now - self._claim_last.get(car_id, float("-inf")) < CLAIM_PAUSE:
+            return
+        self._claim_last[car_id] = now
+        code = secrets.token_urlsafe(12)
+        task = asyncio.ensure_future(self._claim_deliver(car_id, str(guid), code))
+        self._claim_tasks.add(task)
+        task.add_done_callback(self._claim_tasks.discard)
+
+    async def _claim_deliver(self, car_id: int, guid: str, code: str) -> None:
+        if not await asyncio.to_thread(_claim_post, guid, code):
+            log.warning("claim: server %s: the website did not take the code for car %s", self.server_id, car_id)
+            return
+        if str((self.cars.get(car_id) or {}).get("driver_guid")) != guid:
+            return
+        self.send(encode_send_chat(car_id, "\t\t\t\t$OPRCLAIM:" + code))
 
     def _kick_qualy_banned(self, cars: list[dict]) -> None:
         """The league keeps some drivers from qualifying (app/league.py): they are kicked while the server is in qualifying and can come
