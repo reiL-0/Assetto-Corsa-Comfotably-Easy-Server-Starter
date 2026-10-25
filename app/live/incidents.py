@@ -1,8 +1,10 @@
 """Does the race need a caution? Looks at the contacts and the stopped cars and makes a PROPOSAL for the director (or, when the director asked for it, the yellow itself).
 
-Plain state, no I/O (`ACSPClient` feeds the contacts, the monitor calls `step`). Two things call for a caution:
+Plain state, no I/O (`ACSPClient` feeds the contacts, the monitor calls `step`). Four things call for a caution:
   * a PILE-UP: PILEUP_CARS different cars in a contact within PILEUP_S seconds of each other;
   * a car STOPPED on the track: it was moving (so it is racing, not a spectator or a car in the garage), it has been under STOP_KMH for STOP_S seconds and it is not in the pit lane.
+  * a HEAVY contact between two cars (HEAVY_KMH or more: in the contacts of server 3 on 2026-10-25 the median was 28 and 15 of ~370 passed 150), even if both keep going;
+  * a LIMPING car: it keeps moving but under SLOW_FRAC of the pace of the others (their median, at least SLOW_REF_KMH) for SLOW_LIMP_S seconds, outside the pit lane (a damaged car).
 A single hard contact is not enough by itself: the car either keeps going (nothing to wait for) or stops (it becomes a stopped car). The cars in a contact are `involved`: they are the ones the
 free pass skips and that restart at the tail (app/live/caution.py). The speed unit of the contact events is not verified against a real server (km/h assumed, like app/stewards/detectors.py),
 and a contact is reported 1.5-2.5 s late: these numbers are first guesses to tune with real races.
@@ -16,6 +18,8 @@ CONTACT_KMH = 20.0   # a contact slower than this does not make a car 'involved'
 PILEUP_CARS, PILEUP_S = 3, 10.0
 STOP_KMH, STOP_S = 5.0, 6.0
 MOVING_KMH = 30.0    # a car that has been this fast is racing: the one that never was (a spectator, a car in the garage) is not a stopped car
+HEAVY_KMH = 150.0    # a contact between two cars this hard calls for a caution by itself
+SLOW_FRAC, SLOW_REF_KMH, SLOW_LIMP_S, SLOW_MIN_CARS = 0.4, 100.0, 12.0, 3   # a limping car: under 40 % of the median of the others (which must be doing 100+, at least 3 of them) for 12 s
 PROPOSAL_FOR = 60.0  # s a proposal stays up if nobody acts on it
 
 
@@ -26,6 +30,10 @@ class Watch:
         self._moved: set[int] = set()
         self._still: dict[int, float] = {}       # car id -> since when it has been (nearly) stopped
         self._flagged: set[int] = set()          # stopped cars already proposed (until they move again)
+        self._limp: dict[int, float] = {}        # car id -> since when it has been far under the pace of the others
+        self._limp_flagged: set[int] = set()     # limping cars already proposed (until they are up to pace again)
+        self._heavy: tuple[float, list[int]] | None = None   # the last heavy contact not yet proposed (both events of a contact come: only the first counts)
+        self._heavy_t = -1e9
         self.proposal: dict | None = None
         self._next_id = 1
 
@@ -33,6 +41,8 @@ class Watch:
         if speed < CONTACT_KMH:
             return
         self.contacts.append((now, car, other))
+        if other is not None and speed >= HEAVY_KMH and now - self._heavy_t > PILEUP_S:
+            self._heavy, self._heavy_t = (now, sorted((car, other))), now
         for c in (car, other):
             if c is not None:
                 self.involved[c] = now
@@ -54,9 +64,31 @@ class Watch:
             self._moved.discard(c)
             self._flagged.discard(c)
             self._still.pop(c, None)
+        for c in [c for c in self._limp if c not in speeds]:
+            self._limp.pop(c)
+        self._limp_flagged &= speeds.keys()
         if not racing:
             self._still.clear()   # (the formation lap and the cautions do not count: the six seconds start when the race is on)
+            self._limp.clear()
+            self._heavy = None
             return None
+        if self._heavy:
+            _, cars = self._heavy
+            self._heavy = None
+            return self._propose(now, "heavy", cars, "Contacto fuerte")
+        for c, v in speeds.items():   # (the pace of the others: the median of the cars racing, not in the pit lane, not stopped)
+            others = [x for k, x in speeds.items() if k != c and k not in in_pit and x >= MOVING_KMH]
+            pace = sorted(others)[len(others) // 2] if len(others) >= SLOW_MIN_CARS else 0.0
+            if c in self._moved and c not in in_pit and v > STOP_KMH and pace >= SLOW_REF_KMH and v < SLOW_FRAC * pace:
+                self._limp.setdefault(c, now)
+            else:
+                self._limp.pop(c, None)
+                if pace == 0.0 or v >= SLOW_FRAC * pace:
+                    self._limp_flagged.discard(c)
+        for c, since in self._limp.items():
+            if now - since >= SLOW_LIMP_S and c not in self._limp_flagged:
+                self._limp_flagged.add(c)
+                return self._propose(now, "limping", [c], "Coche lento en pista")
         recent = {x for t, a, b in self.contacts if now - t <= PILEUP_S for x in (a, b) if x is not None}
         if len(recent) >= PILEUP_CARS and not (self.proposal and self.proposal["kind"] == "pileup"):
             self.contacts.clear()
@@ -77,6 +109,8 @@ class Watch:
         self.proposal = None
         self.contacts.clear()
         self._flagged.update(self._still)
+        self._heavy = None
+        self._limp_flagged.update(self._limp)
 
     def recent_involved(self, now: float, within: float) -> set[int]:
         return {c for c, t in self.involved.items() if now - t < within}

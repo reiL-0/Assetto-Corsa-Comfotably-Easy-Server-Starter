@@ -1,6 +1,6 @@
 """Incident watch (app/live/incidents.py): a pile-up or a stopped car on the track calls for a caution."""
 
-from app.live.incidents import PILEUP_CARS, STOP_S, Watch
+from app.live.incidents import HEAVY_KMH, PILEUP_CARS, SLOW_LIMP_S, STOP_S, Watch
 
 
 def moving(w, cars, t=0.0):
@@ -80,3 +80,46 @@ def test_stopped_time_before_the_race_does_not_count_and_a_reused_slot_starts_fr
     w2.step(1.0, {}, set(), True)   # car 7 left
     w2.step(2.0, {7: 0.0}, set(), True)   # somebody else sits in slot 7 and never moves
     assert w2.step(20.0, {7: 0.0}, set(), True) is None
+
+
+def test_a_heavy_contact_of_two_cars_is_proposed_once_even_if_both_keep_going():
+    w = Watch()
+    w.on_contact(100.0, 1, 2, HEAVY_KMH - 1)
+    assert w.step(101.0, {1: 200.0, 2: 200.0}, set(), True) is None, "a contact under the limit is nothing by itself"
+    w.on_contact(102.0, 1, 2, HEAVY_KMH + 10)
+    w.on_contact(102.1, 2, 1, HEAVY_KMH + 10)   # (the same contact, seen from the other car)
+    p = w.step(103.0, {1: 200.0, 2: 200.0}, set(), True)
+    assert p and p["kind"] == "heavy" and p["cars"] == [1, 2]
+    assert w.step(104.0, {1: 200.0, 2: 200.0}, set(), True) is None, "once"
+    w.on_contact(130.0, 1, None, HEAVY_KMH + 10)
+    assert w.step(131.0, {1: 200.0}, set(), True) is None, "a wall is not a contact between two cars"
+
+
+def test_a_car_far_under_the_pace_of_the_others_for_a_while_is_a_limping_car_proposed_once():
+    w = Watch()
+    pack = {1: 80.0, 2: 200.0, 3: 200.0, 4: 200.0}   # car 1 moves at 80 km/h: 40 % of the others' 200 is the limit (80 is not under it)
+    for t in (0.0, 1.0):
+        w.step(t, {**pack, 1: 200.0}, set(), True)   # (it was racing)
+    pack[1] = 79.0
+    p = None
+    for t in range(2, 2 + int(SLOW_LIMP_S) - 1):
+        assert w.step(float(t), pack, set(), True) is None, "not long enough yet"
+    p = w.step(2.0 + SLOW_LIMP_S, pack, set(), True)
+    assert p and p["kind"] == "limping" and p["cars"] == [1]
+    assert w.step(40.0, pack, set(), True) is None, "once, until it is up to pace again"
+    w.step(41.0, {**pack, 1: 200.0}, set(), True)
+    w.step(42.0, pack, set(), True)
+    assert w.step(42.0 + SLOW_LIMP_S, pack, set(), True)["cars"] == [1], "proposed again after it recovered"
+
+
+def test_a_slow_car_in_the_pit_lane_or_when_the_whole_field_is_slow_is_not_limping():
+    w = Watch()
+    for t in (0.0, 1.0):
+        w.step(t, {1: 200.0, 2: 200.0, 3: 200.0, 4: 200.0}, set(), True)
+    for t in range(2, 40):
+        assert w.step(float(t), {1: 50.0, 2: 200.0, 3: 200.0, 4: 200.0}, {1}, True) is None, "in the pit lane"
+    w = Watch()
+    for t in (0.0, 1.0):
+        w.step(t, {1: 200.0, 2: 200.0, 3: 200.0, 4: 200.0}, set(), True)
+    for t in range(2, 40):
+        assert w.step(float(t), {1: 50.0, 2: 60.0, 3: 55.0, 4: 58.0}, set(), True) is None, "everybody is slow (a hairpin, a start)"

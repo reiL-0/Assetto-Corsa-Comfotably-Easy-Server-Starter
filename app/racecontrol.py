@@ -114,9 +114,9 @@ def incident_tick(now: float) -> None:
             nascar_actions(inst.server_id, rc, actions)
 
 
-def _say(rc, text: str, kind: str = "info", to: int = -1) -> None:
+def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
     """What used to go to the chat now goes on the screen of every hub (race-state `notices`): it arrives with the flag itself, so it can never come before it."""
-    rc.notify(text, kind, to)
+    rc.notify(text, kind, to, hold=hold)
 
 
 @state_router.get("/race-state")
@@ -229,12 +229,13 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
             if action[1] is not None:
-                _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race")
-                _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1])
+                _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race", hold="freepass")
+                _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1], hold="freepass-car")
             else:
-                _say(rc, "SIN FREE PASS", "race")
+                _say(rc, "SIN FREE PASS", "race", hold="freepass")
         elif action[0] == "no_free_pass":
-            _say(rc, f"FREE PASS anulado: {_name(inst, action[1])} entró a boxes", "race")
+            rc.drop_hold("freepass-car")
+            _say(rc, f"FREE PASS anulado: {_name(inst, action[1])} entró a boxes", "race", hold="freepass")
         elif action[0] == "violation":
             _say(rc, f"{_name(inst, action[1])}: adelantó bajo amarilla · DRIVE-THROUGH", "penalty")
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
@@ -321,11 +322,11 @@ def _restart(inst, rc, to_go: int) -> dict:
         raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
     order, waved, choosers = plan
     log.info("restart called: %s to go", to_go)
-    _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag")
+    _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag", hold="togo")
     for car in waved:
-        _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car)
+        _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car, hold=f"wave-{car}")
     for i, car in enumerate(order, 1):
-        _say(rc, f"REINICIO: P{i}" + (" · ELIGE CARRIL (interior o exterior)" if car in choosers else " · sin elección: al final de tu vuelta"), "race", car)
+        _say(rc, f"REINICIO: P{i}" + (" · ELIGE CARRIL (interior o exterior)" if car in choosers else " · sin elección: al final de tu vuelta"), "race", car, hold=f"restart-{car}")
     return rc.snapshot()
 
 
@@ -361,7 +362,7 @@ def auto_caution(server_id: int, rc, car: int) -> None:
             except HTTPException:
                 pass   # (the caution ended in between: nothing to restart)
         elif verdict == "one":
-            _say(rc, "UNA PARA VERDE", "flag")
+            _say(rc, "UNA PARA VERDE", "flag", hold="togo")
         elif verdict == "warn":
             _say(rc, "La pista no se despeja tras 6 vueltas: el «to go» es manual", "flag")
 

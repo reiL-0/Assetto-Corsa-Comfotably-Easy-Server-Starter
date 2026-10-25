@@ -49,6 +49,7 @@ JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
+HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart call...) stays on screen the whole caution: it is dropped when the flag leaves the cautions or when its tag is replaced (the TTL is only a ceiling)
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
@@ -122,6 +123,8 @@ class RaceControl:
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
+            if flag not in CAUTION:
+                self.notices = [x for x in self.notices if not x.get("hold")]   # (the caution is over: what was held on the screen goes with it)
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
@@ -300,15 +303,23 @@ class RaceControl:
             self._bump()
             return actions
 
-    def notify(self, text: str, kind: str = "info", to: int = -1, ttl: int = NOTICE_TTL, now: float | None = None) -> dict:
-        """A message for the hub's banner (it replaces the chat line). The text is kept free of quotes and backslashes: the hub reads the JSON with patterns."""
+    def notify(self, text: str, kind: str = "info", to: int = -1, ttl: int = NOTICE_TTL, now: float | None = None, hold: str | None = None) -> dict:
+        """A message for the hub's banner (it replaces the chat line). The text is kept free of quotes and backslashes: the hub reads the JSON with patterns.
+        `hold` = a tag: the message stays (kind "hold", the hub draws it every frame from the state) until the caution ends or another notice takes the same tag."""
         now = time.time() if now is None else now
         with _lock:
-            n = {"id": next(_notice_ids), "kind": kind, "text": text.replace('"', "'").replace("\\", "/")[:160], "to": to, "until": now + ttl}
-            self.notices = [x for x in self.notices if x["until"] > now][-(NOTICE_MAX - 1):] + [n]
+            if hold:
+                kind, ttl = "hold", HOLD_TTL
+            n = {"id": next(_notice_ids), "kind": kind, "text": text.replace('"', "'").replace("\\", "/")[:160], "to": to, "until": now + ttl, "hold": hold}
+            self.notices = [x for x in self.notices if x["until"] > now and not (hold and x.get("hold") == hold)][-(NOTICE_MAX - 1):] + [n]
             self._bump()
             log.info("notice kind=%s to=%s: %s", kind, to, n["text"])
             return n
+
+    def drop_hold(self, tag: str) -> None:
+        with _lock:
+            self.notices = [x for x in self.notices if x.get("hold") != tag]
+            self._bump()
 
     def add_penalty(self, car_id: int, laps: int) -> dict:
         if not 1 <= laps <= LAPS_MAX:

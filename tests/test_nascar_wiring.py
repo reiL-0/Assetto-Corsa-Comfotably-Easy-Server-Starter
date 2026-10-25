@@ -257,7 +257,7 @@ def test_session_without_nascar_keeps_legacy_behavior(session_events, previous):
 
 def test_leader_and_flag_do_not_reenter(live, monkeypatch):
     sid, client, _ = live
-    def say(*args):
+    def say(*args, **kw):
         assert not live_rc._lock._is_owned()
     monkeypatch.setattr(adapter, '_say', say)
     rc = live_rc.state_of(sid, True, client.session, create=True)
@@ -291,7 +291,7 @@ def test_pending_stage_yellow_does_not_overwrite_director_green(live, monkeypatc
     state, actions = live_rc.on_lap(sid, 21, 3)
     assert rc.nascar.phase == 'break' and ('flag', 'yellow') in actions
 
-    def director_restarts(*args):
+    def director_restarts(*args, **kw):
         assert not live_rc._lock._is_owned()
         rc.set_flag('green')
 
@@ -961,3 +961,19 @@ def test_a_directors_yellow_in_the_formation_is_a_real_caution(live, monkeypatch
     _field(client, c3=(0.50, 1))
     rc.set_flag('yellow', field=client.field)
     assert not rc.formation and rc.caution is not None and rc.nascar.cautions_in_stage == 1, 'it starts a caution with its procedures'
+
+
+def test_held_notices_stay_through_the_caution_are_replaced_by_their_tag_and_go_with_the_green(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))   # 5 is two laps down: the free pass
+    adapter.nascar_actions(sid, rc, rc.set_flag('yellow', field=client.field))
+    texts = lambda: [(n['text'], n['kind'], n['to']) for n in rc.snapshot()['notices']]
+    assert ('FREE PASS: Cleo', 'hold', -1) in texts() and any(t.startswith('FREE PASS: pasa') and k == 'hold' and to == 5 for t, k, to in texts())
+    left = {n['text']: n['left_s'] for n in rc.snapshot()['notices'] if n['kind'] == 'hold'}
+    assert min(left.values()) > 600, 'a held notice does not run out in seconds'
+    rc.notify('UNA PARA VERDE', 'flag', hold='togo'); rc.notify('DOS PARA VERDE', 'flag', hold='togo')
+    assert [t for t, k, _ in texts() if k == 'hold' and 'PARA VERDE' in t] == ['DOS PARA VERDE'], 'the same tag replaces the old one'
+    rc.set_flag('green', field=client.field)
+    assert not [t for t in texts() if t[1] == 'hold'], 'the green takes the held notices away'
