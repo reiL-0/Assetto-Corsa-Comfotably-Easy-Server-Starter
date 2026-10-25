@@ -327,10 +327,6 @@ def pit_ok(server_id: int, body: PitOkIn, sess: SessionDep) -> dict:
     _, rc = _control(server_id, sess)
     if not rc.pit_exception(body.car_id, body.allowed):
         raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
-    if body.allowed:
-        _say(rc, "BOXES: tienes permiso para entrar", "race", body.car_id, hold=f"pitok-{body.car_id}")
-    else:
-        rc.drop_hold(f"pitok-{body.car_id}")
     return rc.snapshot()
 
 

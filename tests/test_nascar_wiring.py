@@ -994,3 +994,15 @@ def test_a_car_entering_the_closed_pit_lane_gets_a_drive_through_and_the_directo
     assert 'Ana: entró a boxes cerrados · DRIVE-THROUGH' in [n['text'] for n in rc.snapshot()['notices']]
     rc.set_flag('green', field=client.field)
     assert not rc.pit_exception(4, True), 'no caution: nothing to let in'
+
+
+def test_the_directors_permission_comes_with_its_notice_and_goes_with_the_caution(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    rc.set_flag('yellow', field=client.field)
+    assert rc.pit_exception(4, True)
+    assert [n['to'] for n in rc.snapshot()['notices'] if n['text'].startswith('BOXES: tienes')] == [4]
+    rc.set_flag('green', field=client.field)
+    assert not [n for n in rc.snapshot()['notices'] if n['kind'] == 'hold']

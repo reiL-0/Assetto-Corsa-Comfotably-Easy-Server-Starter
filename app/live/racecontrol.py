@@ -412,6 +412,10 @@ class RaceControl:
             if not self.caution:
                 return False
             self.caution.pit_allow(car, allowed)
+            if allowed:   # (the notice in the same step: a green cannot come between the permission and its notice and leave the notice behind)
+                self.notify("BOXES: tienes permiso para entrar", "race", car, hold=f"pitok-{car}")
+            else:
+                self.drop_hold(f"pitok-{car}")
             self._bump()
             return True
 
