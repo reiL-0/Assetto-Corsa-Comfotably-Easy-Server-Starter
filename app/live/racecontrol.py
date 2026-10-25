@@ -73,6 +73,7 @@ class RaceControl:
         self.pace_car: int | None = None   # the slot of the pace car (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
         self.pace_car_kmh = PACE_CAR_KMH
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
+        self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
@@ -152,7 +153,7 @@ class RaceControl:
             if not (self.nascar and self.pace_car is not None and self.flag == "green" and self.nascar.laps == 0 and not self.formation):
                 return False
             self.formation = True
-            self.caution_laps, self.pace_car_in, self.pace_car_pitted = -1, False, False
+            self.caution_laps, self.pace_car_in, self.pace_car_pitted, self.one_more = -1, False, False, False
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
             return True
 
@@ -204,13 +205,19 @@ class RaceControl:
         done and the track is clear: the automatic 'to go'), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
         with _lock:
             c = self.caution
-            if not (c and self.flag in CAUTION and not self.pace_car_in and not self.caution_notified):
+            if not (c and self.flag in CAUTION and not self.pace_car_in and (self.one_more or not self.caution_notified)):   # (after the six-lap warning only a pending "two to go" still counts)
                 return None
             if self.pace_car is not None:
                 if car != self.pace_car or now - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                     return None   # (the pace car crossing the line in the pit lane is not a lap on the track)
             elif car != c.leader and (connected is None or c.leader in connected):
                 return None   # (the leader left the server: any car crossing counts, or the count would never move)
+            if self.one_more:   # "two to go" was called: this crossing is the "one to go"
+                self.one_more = False
+                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0
+                self._bump()
+                log.info("two to go became one to go at the crossing of car %s", car)
+                return "one"
             self.caution_laps += 1
             if self.caution_laps < CAUTION_MIN_LAPS:
                 log.info("caution lap %s/%s counted (car %s): too early for the automatic to go", self.caution_laps, CAUTION_MIN_LAPS, car)
@@ -239,7 +246,7 @@ class RaceControl:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
         with _lock:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid if car is not None else ""
-            self.pace_car_in = self.pace_car_pitted = False
+            self.pace_car_in = self.pace_car_pitted = self.one_more = False
             self.blocked_crossings = 0
             if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
                 self._end_formation()
@@ -258,7 +265,7 @@ class RaceControl:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
             self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
-            self.pace_car_in = self.pace_car_pitted = False   # a new caution: the pace car comes out again
+            self.pace_car_in = self.pace_car_pitted = self.one_more = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
@@ -348,13 +355,16 @@ class RaceControl:
                 self._bump()
             return prop, actions
 
-    def restart_plan(self, progress: dict[int, float]) -> tuple[list[int], list[int], set[int]] | None:
+    def restart_plan(self, progress: dict[int, float], to_go: int = 1) -> tuple[list[int], list[int], set[int]] | None:
         """The director calls 'to go': see Caution.call_restart. None when no caution of ours is being run."""
         with _lock:
             if not self.caution:
                 return None
             plan = self.caution.call_restart(self.without_pace_car(progress))
-            if not self.pace_car_in:   # (a second "to go" does not forget that the pace car already pitted)
+            if to_go == 2 and not self.pace_car_in:   # one more lap behind the pace car: caution_lap makes it the "one to go"
+                self.one_more = True
+            elif not self.pace_car_in:   # (a second "to go" does not forget that the pace car already pitted)
+                self.one_more = False
                 self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
             log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)

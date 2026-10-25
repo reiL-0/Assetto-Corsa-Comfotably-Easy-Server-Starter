@@ -316,7 +316,7 @@ class RestartIn(BaseModel):
 
 
 def _restart(inst, rc, to_go: int) -> dict:
-    plan = rc.restart_plan(inst.acsp.field.snapshot())
+    plan = rc.restart_plan(inst.acsp.field.snapshot(), to_go)
     if plan is None:
         raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
     order, waved, choosers = plan
@@ -360,6 +360,8 @@ def auto_caution(server_id: int, rc, car: int) -> None:
                 _restart(inst, rc, 1)
             except HTTPException:
                 pass   # (the caution ended in between: nothing to restart)
+        elif verdict == "one":
+            _say(rc, "UNA PARA VERDE", "flag")
         elif verdict == "warn":
             _say(rc, "La pista no se despeja tras 6 vueltas: el «to go» es manual", "flag")
 
