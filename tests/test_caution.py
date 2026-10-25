@@ -1,6 +1,6 @@
 """Caution procedures (app/live/caution.py) and the progress they read (app/live/field.py): pure state fed with numbers."""
 
-from app.live.caution import PASS_HOLD, Caution
+from app.live.caution import PASS_HOLD, PIT_GRACE, Caution
 from app.live.field import Field, ring
 
 
@@ -51,9 +51,21 @@ def test_a_pass_that_lasts_is_a_violation_once_and_a_short_swap_is_not():
     swapped = field(5.20, 5.215, 5.18)   # car 2 is now in front of car 1 by 0.015
     assert run(c, [(1.0, start), (1.5, swapped), (2.0, swapped)]) == [], "less than PASS_HOLD"
     assert run(c, [(2.2, start)]) == [] and run(c, [(3.0, swapped)]) == [], "it went back: the timer restarted"
-    assert run(c, [(3.5, swapped), (3.0 + PASS_HOLD + 0.1, swapped)]) == [2]
+    t = 3.0 + PASS_HOLD + 0.1
+    assert run(c, [(3.5, swapped), (t, swapped)]) == [], "held, but the passed car may still reach the pit lane"
+    assert run(c, [(t + PIT_GRACE + 0.1, swapped)]) == [2]
     assert run(c, [(9.0, swapped), (12.0, swapped)]) == [], "once per caution"
     assert c.violators == {2}
+
+
+def test_giving_the_place_back_within_the_hold_is_no_violation_and_a_passed_car_that_reaches_the_pit_lane_clears_the_passer():
+    start = field(5.20, 5.19)
+    swapped = field(5.20, 5.215)
+    c = Caution(start, 0.0)
+    assert run(c, [(1.0, swapped), (1.0 + PASS_HOLD - 0.5, swapped), (1.0 + PASS_HOLD - 0.4, start), (20.0, start)]) == [], "passed and gave it back inside PASS_HOLD"
+    c = Caution(start, 0.0)   # the pack goes by a car that is heading to the pits: it reports the pit lane while the pass is pending
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)])
+    assert run(c, [(1.0 + PASS_HOLD + 2.0, swapped)], exempt={1}) == [] and run(c, [(30.0, swapped)]) == [] and not c.violators
 
 
 def test_passing_a_stopped_car_a_car_in_the_pits_or_one_directed_to_pass_is_not_a_violation():

@@ -586,7 +586,7 @@ def test_a_yellow_freezes_the_order_names_the_free_pass_and_a_pass_under_it_cost
     client.cars[3]['velocity'] = client.cars[4]['velocity'] = [0, 0, 16.7]
     adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60, 5: 60}, 100.0))
     client.field.update(4, 0.52, 9)   # now in front of car 3 by 0.02
-    for t in (101.0, 104.0):
+    for t in (101.0, 106.0, 115.0):   # swapped at 101, held PASS_HOLD at 106, still not in the pit lane PIT_GRACE later
         adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60, 5: 60}, t))
     assert [p['car_id'] for p in rc.penalties] == [4] and rc.penalties[0]['laps'] == 3
     assert 'Beto: adelantó bajo amarilla · DRIVE-THROUGH' in [n['text'] for n in rc.snapshot()['notices']]

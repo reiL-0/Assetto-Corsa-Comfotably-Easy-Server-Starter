@@ -19,7 +19,8 @@ from app.live.field import ring
 
 CLOSE = 0.05          # of a lap: two cars further apart than this are not compared
 PASS_MARGIN = 0.005   # of a lap: how far in front a car has to be to count as having passed (on a 4 km track: 20 m)
-PASS_HOLD = 2.0       # s the swapped order has to last
+PASS_HOLD = 5.0       # s the swapped order has to last: a car that passes and gives the place back within this time is not a violator
+PIT_GRACE = 8.0       # s after a pass is confirmed during which the car that was passed may still report the pit lane (it was heading to the pits, the pack went by): then nobody is judged
 SLOW_KMH = 15.0       # the car that is passed is this slow or slower: it is stopped, passing it is not a violation
 PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader when it is not known (the virtual one)
 
@@ -33,6 +34,7 @@ class Caution:
         self.involved, self.pitted, self.penalised = set(involved), set(pitted), set(penalised)
         self.allowed: set[int] = set()    # cars directed to pass (free pass, wave-around): not violators
         self.violators: set[int] = set()
+        self._pending: dict[tuple[int, int], float] = {}   # (passer, the car it passed) -> when the passer becomes a violator unless the passed car reached the pit lane first
         self.waved: list[int] = []        # the wave-around cars once the restart has been called ("to go")
         self.restart: list[int] = []      # the restart order once it has been called
         self._signs: dict[tuple[int, int], int] = {}
@@ -117,6 +119,7 @@ class Caution:
         self.frozen = [c for c in self.frozen if c != car]
         for group in (self.involved, self.pitted, self.penalised, self.allowed, self.violators):
             group.discard(car)
+        self._pending = {k: t for k, t in self._pending.items() if car not in k}
         self.waved, self.restart = [c for c in self.waved if c != car], [c for c in self.restart if c != car]
         if self.free_pass == car:
             self.free_pass = None
@@ -154,10 +157,16 @@ class Caution:
                 self._since.pop(key, None)
                 self._signs[key] = sign
                 passer, passed = (a, b) if s > 0 else (b, a)
-                if passer in self.violators or passer in self.allowed or passer in exempt or passed in exempt:
+                if passer in self.violators or (passer, passed) in self._pending or passer in self.allowed or passer in exempt or passed in exempt:
                     continue
                 if speeds.get(passed, 0.0) <= SLOW_KMH:   # (stopped, or its speed is not known: not judged)
                     continue
+                self._pending[passer, passed] = now + PIT_GRACE
+        for (passer, passed), due in list(self._pending.items()):
+            if passer in self.violators or passer in self.gone or passed in self.gone or passer in self.allowed or passer in exempt or passed in exempt:
+                del self._pending[passer, passed]   # (the passed car reached the pit lane, or one of them left, or the passer was directed to pass: nobody is judged)
+            elif now >= due:
+                del self._pending[passer, passed]
                 self.violators.add(passer)
                 out.append(passer)
         return out
