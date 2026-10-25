@@ -606,7 +606,7 @@ def test_a_free_pass_car_that_pits_loses_it_and_there_is_no_caution_without_nasc
     assert ('caution', 5) in actions
     rc.report_pit(5, True, now=50.0)
     out = rc.caution_tick(dict(client.field.progress), {}, 51.0)
-    assert out == [('no_free_pass', 5)] and rc.caution.free_pass is None
+    assert out == [('no_free_pass', 5), ('pit_violation', 5)] and rc.caution.free_pass is None, 'the pits are closed: it loses the free pass and is judged for entering'
 
 
 def test_to_go_tells_the_wave_around_the_restart_place_and_who_may_choose(live):
@@ -977,3 +977,20 @@ def test_held_notices_stay_through_the_caution_are_replaced_by_their_tag_and_go_
     assert [t for t, k, _ in texts() if k == 'hold' and 'PARA VERDE' in t] == ['DOS PARA VERDE'], 'the same tag replaces the old one'
     rc.set_flag('green', field=client.field)
     assert not [t for t in texts() if t[1] == 'hold'], 'the green takes the held notices away'
+
+
+def test_a_car_entering_the_closed_pit_lane_gets_a_drive_through_and_the_directors_permission_prevents_it(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))
+    adapter.nascar_actions(sid, rc, rc.set_flag('yellow', field=client.field))
+    assert any(n['text'].startswith('BOXES CERRADOS') and n['kind'] == 'hold' for n in rc.snapshot()['notices'])
+    assert rc.pit_exception(4, True)
+    rc.report_pit(4, True)   # let in
+    rc.report_pit(3, True)   # not
+    adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60, 5: 60}, 100.0))
+    assert [p['car_id'] for p in rc.penalties] == [3] and rc.penalties[0]['laps'] == 3
+    assert 'Ana: entró a boxes cerrados · DRIVE-THROUGH' in [n['text'] for n in rc.snapshot()['notices']]
+    rc.set_flag('green', field=client.field)
+    assert not rc.pit_exception(4, True), 'no caution: nothing to let in'

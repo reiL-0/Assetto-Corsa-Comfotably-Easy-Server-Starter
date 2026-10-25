@@ -141,3 +141,17 @@ def test_the_pass_of_a_car_whose_speed_is_unknown_is_not_judged_and_a_voided_fre
     c = Caution(p, 0.0)
     assert c.free_pass == 2 and 2 in c.allowed
     assert c.void_free_pass() == 2 and c.free_pass is None and 2 not in c.allowed
+
+
+def test_closed_pits_cost_a_drive_through_unless_there_before_involved_serving_or_let_in_and_only_once():
+    p = field(5.20, 5.19, 5.18, 5.17, 5.16)
+    c = Caution(p, 0.0, involved=[2], pitted=[3])
+    for car in (1, 2, 3, 4, 5):
+        c.pit_enter(car)
+    c.pit_allow(5, True)
+    c.pit_enter(5)
+    assert c.pit_breakers(serving={4}) == [1], "2 is involved, 3 was in the pits, 4 serves a drive-through, 5 was let in"
+    c.pit_enter(1)
+    assert c.pit_breakers() == [] and 1 in c.violators, "once per caution; it restarts at the tail"
+    c.pit_allow(4, False); c.pit_enter(4)
+    assert c.pit_breakers() == [4], "no permission, nothing to serve: judged"

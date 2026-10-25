@@ -228,6 +228,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, action[1], "race")
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
+            _say(rc, "BOXES CERRADOS: solo con permiso del director", "flag", hold="pits")
             if action[1] is not None:
                 _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race", hold="freepass")
                 _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1], hold="freepass-car")
@@ -236,6 +237,9 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
         elif action[0] == "no_free_pass":
             rc.drop_hold("freepass-car")
             _say(rc, f"FREE PASS anulado: {_name(inst, action[1])} entró a boxes", "race", hold="freepass")
+        elif action[0] == "pit_violation":
+            _say(rc, f"{_name(inst, action[1])}: entró a boxes cerrados · DRIVE-THROUGH", "penalty")
+            _say(rc, "DRIVE-THROUGH: boxes cerrados bajo amarilla", "penalty", action[1])
         elif action[0] == "violation":
             _say(rc, f"{_name(inst, action[1])}: adelantó bajo amarilla · DRIVE-THROUGH", "penalty")
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
@@ -309,6 +313,24 @@ def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
         rc.set_pace_car(body.car_id, body.kmh, (inst.acsp.cars.get(body.car_id) or {}).get("driver_guid") or "")
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    return rc.snapshot()
+
+
+class PitOkIn(BaseModel):
+    car_id: int = Field(ge=0, le=255)
+    allowed: bool = True
+
+
+@control_router.post("/pit-ok")
+def pit_ok(server_id: int, body: PitOkIn, sess: SessionDep) -> dict:
+    """The pits are closed under a NASCAR caution: the director lets one car in (or takes the permission back). A car already judged for entering stays judged: clear its penalty by hand."""
+    _, rc = _control(server_id, sess)
+    if not rc.pit_exception(body.car_id, body.allowed):
+        raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
+    if body.allowed:
+        _say(rc, "BOXES: tienes permiso para entrar", "race", body.car_id, hold=f"pitok-{body.car_id}")
+    else:
+        rc.drop_hold(f"pitok-{body.car_id}")
     return rc.snapshot()
 
 

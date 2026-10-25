@@ -352,6 +352,8 @@ class RaceControl:
                     self.pace_car_pitted = True
                 if self.caution:
                     self.caution.pitted.add(car_id)   # (in the pits during a caution: out of the free pass, to the pit group of the restart)
+                    if car_id != self.pace_car:
+                        self.caution.pit_enter(car_id)
 
     def incident_step(self, speeds: dict[int, float], field, now: float) -> tuple[dict | None, list[tuple]]:
         """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
@@ -396,9 +398,22 @@ class RaceControl:
             for car in c.check(self.without_pace_car(progress), speeds, now, exempt):
                 self.add_penalty(car, VIOLATION_LAPS)
                 out.append(("violation", car))
+            serving = {p["car_id"] for p in self.penalties}
+            for car in c.pit_breakers(serving):
+                self.add_penalty(car, VIOLATION_LAPS)
+                out.append(("pit_violation", car))
             if out:
                 self._bump()
             return out
+
+    def pit_exception(self, car: int, allowed: bool) -> bool:
+        """The director lets a car into the closed pit lane (or not any more). False when no caution of ours is being run."""
+        with _lock:
+            if not self.caution:
+                return False
+            self.caution.pit_allow(car, allowed)
+            self._bump()
+            return True
 
     def sample(self, speeds: dict[int, float], now: float) -> None:
         """Speeds (km/h) of the cars now. Only the last seconds of the grace are kept."""
