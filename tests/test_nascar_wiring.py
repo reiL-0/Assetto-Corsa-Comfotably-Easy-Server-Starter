@@ -1006,3 +1006,15 @@ def test_the_directors_permission_comes_with_its_notice_and_goes_with_the_cautio
     assert [n['to'] for n in rc.snapshot()['notices'] if n['text'].startswith('BOXES: tienes')] == [4]
     rc.set_flag('green', field=client.field)
     assert not [n for n in rc.snapshot()['notices'] if n['kind'] == 'hold']
+
+
+def test_the_car_that_completes_the_distance_is_announced_as_the_winner(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(3, stages=[3])
+    _field(client, c3=(0.50, 3), c4=(0.48, 3))
+    state, actions = live_rc.on_lap(sid, 3, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    assert rc.flag == 'checkered'
+    won = [n for n in rc.snapshot()['notices'] if n['kind'] == 'winner']
+    assert [n['text'] for n in won] == ['GANADOR: Ana'] and won[0]['left_s'] > 60

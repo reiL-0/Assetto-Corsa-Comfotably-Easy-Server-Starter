@@ -226,6 +226,9 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
                 rc._bump()
         if action[0] == "say":
             _say(rc, action[1], "race")
+        elif action[0] == "finish" and crossing is not None:   # the checkered came with the lap of the first car to complete the distance: that car is the winner (AC ranks by laps, then by time)
+            log.info("winner: car %s (%s)", crossing, _name(inst, crossing))
+            rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", ttl=90)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
             _say(rc, "BOXES CERRADOS: solo con permiso del director", "flag", hold="pits")
