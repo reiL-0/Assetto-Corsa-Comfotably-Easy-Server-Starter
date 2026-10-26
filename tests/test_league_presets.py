@@ -86,6 +86,17 @@ def test_a_drivers_setup_beats_the_leagues_rule_which_beats_the_events():
         assert {e.guid: e.fixed_setup for e in session_for(s, ev, time.time()).entries}[B] == "event_rule"
 
 
+def test_the_pace_car_is_first_on_the_entry_list():
+    lid = _league()["id"]
+    _member(lid, A, car="bmw"); _member(lid, B, car="bmw")
+    _member(lid, "76561198000000099", car="bmw", non_racing=True, name="Zzz")   # last by name
+    with Session(engine) as s:
+        ev = Event(title="R1", league_id=lid, data={"name": "r1", "track": "spa", "cars": ["bmw"]})
+        s.add(ev); s.commit()
+        got = [e.guid for e in session_for(s, ev, time.time()).entries]
+    assert got[0] == "76561198000000099" and got[1:] == [A, B]
+
+
 def test_league_setup_rule_is_validated_and_protects_the_setup_from_deletion():
     _setup("rule_x"); _setup("pinned")
     lid = _league()["id"]
