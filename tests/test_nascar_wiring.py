@@ -1,5 +1,6 @@
 """NASCAR manager wiring, with isolated UDP, chat and clock."""
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1018,3 +1019,28 @@ def test_the_car_that_completes_the_distance_is_announced_as_the_winner(live):
     assert rc.flag == 'checkered'
     won = [n for n in rc.snapshot()['notices'] if n['kind'] == 'winner']
     assert [n['text'] for n in won] == ['GANADOR: Ana'] and won[0]['left_s'] > 60
+
+
+def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the_time(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(client, '_record', lambda e: None)
+    from app.stewards import engine
+    monkeypatch.setattr(engine, 'on_event', lambda *args: None)
+    _field(client, c3=(0.50, 2), c4=(0.48, 2))
+    lap = lambda car, laps: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps - 1, 'laptime_ms': 1000}] if car == 3 else [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps, 'laptime_ms': 1000}]})
+    winners = lambda: [n['text'] for n in live_rc.state_of(sid, True, client.session, create=True).snapshot()['notices'] if n['kind'] == 'winner']
+    client.session = {'session_type': 3, 'laps': 3, 'time_min': 0}; client.winner_done = False
+    lap(3, 2)
+    assert winners() == [], 'two laps of three'
+    lap(3, 3); lap(4, 3)
+    assert winners() == ['GANADOR: Ana'], 'the first to complete the distance, once'
+    client.session = {'session_type': 3, 'laps': 0, 'time_min': 10}; client.winner_done = False; client.session_t0 = time.time() - 30
+    live_rc._states.clear()
+    lap(4, 5)
+    assert winners() == [], 'ten minutes have not passed'
+    client.session_t0 = time.time() - 601
+    lap(4, 6)
+    assert winners() == ['GANADOR: Beto'], 'a timed race: the first to cross after the time'
+    client.session = {'session_type': 2, 'laps': 0, 'time_min': 10}; client.winner_done = False; live_rc._states.clear()
+    lap(4, 7)
+    assert winners() == [], 'only a race has a winner'

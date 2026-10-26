@@ -248,6 +248,23 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
 
 
+def plain_winner(client, event: dict) -> None:
+    """A race without NASCAR: the winner is the first car to cross the line after the end (the distance in laps, or the time of a timed race), as AC itself ranks it (laps, then time)."""
+    s = client.session
+    if s.get("session_type") != 3 or client.winner_done:
+        return
+    row = next((r for r in event["leaderboard"] if r["car_id"] == event["car_id"]), None)
+    goal = s.get("laps") or 0
+    over = (row is not None and row["laps"] >= goal) if goal else (bool(s.get("time_min")) and time.time() - client.session_t0 >= s["time_min"] * 60)
+    if not over:
+        return
+    client.winner_done = True
+    rc = state_of(client.server_id, True, s, create=True)
+    name = client.cars.get(event["car_id"], {}).get("driver_name") or f"#{event['car_id']}"
+    log.info("winner: car %s (%s)", event["car_id"], name)
+    rc.notify(f"GANADOR: {name}", "winner", ttl=90)
+
+
 def auto_green(server_id: int, rc, car: int) -> None:
     """The restart leader crossed the line after "to go": the green flag, as the director would send it."""
     inst = _live(server_id)

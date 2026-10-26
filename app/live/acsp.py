@@ -352,6 +352,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.trail: dict[int, deque] = {}  # car_id -> last TRAIL (time, pos, velocity) samples: a contact is reported 1.5-2.5 s late, app/stewards looks back in here
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
+        self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
+        self.winner_done = False   # the winner of this race has been announced
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
         self.transport: asyncio.DatagramTransport | None = None
@@ -389,6 +391,8 @@ class ACSPClient(asyncio.DatagramProtocol):
                 else:
                     self.session = event
                     self.field.clear()
+                    self.winner_done = False
+                self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None)
                 if nascar is not None:
                     try:
@@ -414,6 +418,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
             if actions:
                 nascar_actions(self.server_id, rc, actions, event["car_id"])
+            if not (rc and rc.nascar):
+                from app.racecontrol import plain_winner
+                plain_winner(self, event)   # (any other race: the first car to finish is the winner too)
             if rc and rc.pace_car_in:
                 from app.racecontrol import auto_green
                 auto_green(self.server_id, rc, event["car_id"])
