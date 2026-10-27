@@ -107,6 +107,7 @@ def test_director_and_caster_take_a_spectator_slot_not_a_grid_place():
         ev = Event(title="R1", league_id=lid, data={"name": "r1", "track": "spa", "cars": ["bmw"]})
         s.add(ev); s.commit()
         got = {e.guid: e.spectator for e in session_for(s, ev, time.time()).entries}
+    assert _member(lid, "76561198000000098", car="bmw", non_racing=True).json()["in_pits"] is True   # a panel that does not send it keeps it
     assert got == {A: False, B: False, "76561198000000098": True, "76561198000000099": False}
 
 

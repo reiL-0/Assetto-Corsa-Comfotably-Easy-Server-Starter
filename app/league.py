@@ -51,7 +51,7 @@ class MemberIn(BaseModel):
     car: str = Field(default="", max_length=80)
     exempt: bool = False
     non_racing: bool = False  # safety car, race director, caster: on the entry list, but not racing
-    in_pits: bool = False  # with non_racing: director / caster, spectator slot (start in the pits, not on the grid); False = the pace car, in front
+    in_pits: bool | None = None   # with non_racing: director / caster, spectator slot (start in the pits, not on the grid); False = the pace car, in front; None = keep what is saved (an older panel does not send it)
     skin: str | None = Field(default=None, max_length=80)   # None = keep what is saved (an older panel does not send it); "" = clear it
     fixed_setup: str | None = Field(default=None, max_length=80)   # same: None keeps, "" clears
 
@@ -60,6 +60,7 @@ class MemberIn(BaseModel):
 
 
 class MemberOut(MemberIn):
+    in_pits: bool = False
     skin: str = ""
     fixed_setup: str = ""
     laps: int  # valid laps in the practice window, now
@@ -110,9 +111,9 @@ def add_member(championship_id: int, body: MemberIn, sess: SessionDep) -> Member
     """Add a driver or update the one with that Steam ID."""
     c = _league(sess, championship_id, writing=True)
     fields, old = body.model_dump(), sess.get(LeagueMember, (championship_id, body.guid))
-    for k in ("skin", "fixed_setup"):   # not sent = what was saved stays
+    for k, empty in (("skin", ""), ("fixed_setup", ""), ("in_pits", False)):   # not sent = what was saved stays
         if fields[k] is None:
-            fields[k] = getattr(old, k) if old else ""
+            fields[k] = getattr(old, k) if old else empty
     if fields["fixed_setup"] and not (content.setups_dir() / f"{fields['fixed_setup']}.ini").is_file():
         raise HTTPException(400, f"setup not uploaded: {fields['fixed_setup']}")
     m = sess.merge(LeagueMember(championship_id=championship_id, **fields))
