@@ -335,6 +335,7 @@ class LeagueMember(SQLModel, table=True):
     fixed_setup: str = ""  # an uploaded setup (/content/setups, name without .ini) locked for this driver; "" = the league's rule for the car (Championship.car_setups)
     exempt: bool = False  # an admin lets this driver in whatever the practice requirement says
     non_racing: bool = False  # a car that is on the server but does not race (safety car, race director, caster): ignored by the grid penalty, the practice requirement and the standings
+    in_pits: bool = False  # with non_racing: race director / caster, who are not on the track (spectator slot, they start in the pits); False = the pace car, which starts in front of the grid
 
 
 class LeagueSuspension(SQLModel, table=True):

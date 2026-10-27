@@ -57,7 +57,7 @@ def test_old_servers_keep_rows_and_get_the_domain_values(tmp_path, monkeypatch):
     db.init_db()
     rows = _q(path, "SELECT id, name, base_port, wake, integrity, stewards FROM servers ORDER BY id")
     assert rows == [(1, "a", 9600, "always", "warn", "off"), (2, "b", 9610, "always", "warn", "off"), (3, "c", 9620, "always", "warn", "off")]
-    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
+    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
 
 
 def test_upgraded_and_fresh_databases_have_the_same_indexes(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_fresh_database_is_not_backed_up(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{tmp_path / 'new.db'}"))
     db.init_db()
     assert not (tmp_path / "backups").exists()
-    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
+    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
 
 
 def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path, monkeypatch):

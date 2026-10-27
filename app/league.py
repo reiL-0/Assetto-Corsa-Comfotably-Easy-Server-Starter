@@ -51,6 +51,7 @@ class MemberIn(BaseModel):
     car: str = Field(default="", max_length=80)
     exempt: bool = False
     non_racing: bool = False  # safety car, race director, caster: on the entry list, but not racing
+    in_pits: bool = False  # with non_racing: director / caster, spectator slot (start in the pits, not on the grid); False = the pace car, in front
     skin: str | None = Field(default=None, max_length=80)   # None = keep what is saved (an older panel does not send it); "" = clear it
     fixed_setup: str | None = Field(default=None, max_length=80)   # same: None keeps, "" clears
 
@@ -92,7 +93,7 @@ def _league(sess: Session, championship_id: int, writing: bool = False) -> Champ
 
 def _status(sess: Session, c: Championship, m: LeagueMember, at: float) -> MemberOut:
     laps = valid_laps(sess, m.guid, at - c.practice_days * 86400, at)
-    return MemberOut(guid=m.guid, name=m.name, team=m.team, car=m.car, skin=m.skin, fixed_setup=m.fixed_setup, exempt=m.exempt, non_racing=m.non_racing, laps=laps, eligible=is_eligible(c, m, laps))
+    return MemberOut(guid=m.guid, name=m.name, team=m.team, car=m.car, skin=m.skin, fixed_setup=m.fixed_setup, exempt=m.exempt, non_racing=m.non_racing, in_pits=m.in_pits, laps=laps, eligible=is_eligible(c, m, laps))
 
 
 @router.get("", response_model=list[MemberOut])
@@ -164,7 +165,7 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     for m in ok:   # the driver's own setup, else the league's rule for the car, else the event's
         model = m.car if m.car in cars else cars[0]
         setup = m.fixed_setup or (c.car_setups or {}).get(model) or s.car_setups.get(model, "")
-        entries.append(EntryIn(model=model, driver_name=m.name, team=m.team, guid=m.guid, skin=m.skin if model == m.car else "", fixed_setup=setup))   # a skin belongs to the driver's own car
+        entries.append(EntryIn(model=model, driver_name=m.name, team=m.team, guid=m.guid, skin=m.skin if model == m.car else "", fixed_setup=setup, spectator=m.non_racing and m.in_pits))   # a skin belongs to the driver's own car
     return s.model_copy(update={"entries": entries, "locked": True, "pickup": False, "cars": cars})
 
 

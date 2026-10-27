@@ -35,7 +35,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:6])
     db.init_db()
     con = sqlite3.connect(path)   # a deployed database before 007
-    for table, cols in (("championships", ("car_setups", "requirements")), ("league_members", ("skin", "fixed_setup"))):
+    for table, cols in (("championships", ("car_setups", "requirements")), ("league_members", ("skin", "fixed_setup", "in_pits"))):
         for col in cols:
             con.execute(f'ALTER TABLE {table} DROP COLUMN {col}')
     con.execute("INSERT INTO championships (id, name, points_system, practice_required, practice_laps, practice_days, created_at, archived_by) VALUES (1, 'Vieja', '[25]', 0, 5, 7, '2026-01-01', '')")
@@ -95,6 +95,19 @@ def test_the_pace_car_is_first_on_the_entry_list():
         s.add(ev); s.commit()
         got = [e.guid for e in session_for(s, ev, time.time()).entries]
     assert got[0] == "76561198000000099" and got[1:] == [A, B]
+
+
+def test_director_and_caster_take_a_spectator_slot_not_a_grid_place():
+    lid = _league()["id"]
+    _member(lid, A, car="bmw")
+    _member(lid, "76561198000000098", car="bmw", non_racing=True, in_pits=True)    # director
+    _member(lid, "76561198000000099", car="bmw", non_racing=True)                  # pace car
+    _member(lid, B, car="bmw", in_pits=True)                                       # (in_pits alone does nothing: it races)
+    with Session(engine) as s:
+        ev = Event(title="R1", league_id=lid, data={"name": "r1", "track": "spa", "cars": ["bmw"]})
+        s.add(ev); s.commit()
+        got = {e.guid: e.spectator for e in session_for(s, ev, time.time()).entries}
+    assert got == {A: False, B: False, "76561198000000098": True, "76561198000000099": False}
 
 
 def test_league_setup_rule_is_validated_and_protects_the_setup_from_deletion():

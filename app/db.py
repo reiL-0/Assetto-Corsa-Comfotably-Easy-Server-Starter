@@ -175,6 +175,12 @@ def _m008_wake_always(con: sqlite3.Connection) -> None:
     con.execute("UPDATE servers SET wake = 'always'")
 
 
+def _m009_member_in_pits(con: sqlite3.Connection) -> None:
+    """`league_members.in_pits` (0 = the car starts on the grid / in front, as every existing member does)."""
+    if "in_pits" not in {row[1] for row in con.execute('PRAGMA table_info("league_members")')}:
+        con.execute('ALTER TABLE "league_members" ADD COLUMN "in_pits" BOOLEAN NOT NULL DEFAULT 0')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -184,6 +190,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (6, _m006_rulebook),
     (7, _m007_league_presets),
     (8, _m008_wake_always),
+    (9, _m009_member_in_pits),
 ]
 
 
