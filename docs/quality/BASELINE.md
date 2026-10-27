@@ -90,6 +90,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/servers/{server_id}/race-control/pit` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/pit-ok` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/restart` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/winner-test` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/race-state` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/restart_session` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/results` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

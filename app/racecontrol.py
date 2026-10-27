@@ -350,6 +350,19 @@ def pit_ok(server_id: int, body: PitOkIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+class WinnerTestIn(BaseModel):
+    name: str = Field(default="Piloto de prueba", min_length=1, max_length=40, pattern=r"^[^\"\\\x00-\x1f]+$")   # (the hub reads notices with a regex: no quotes or backslashes)
+
+
+@control_router.post("/winner-test")
+def winner_test(server_id: int, body: WinnerTestIn, sess: SessionDep) -> dict:
+    """A FAKE winner notice (15 s) to see the hub's winner banner without finishing a race. Changes nothing else."""
+    _, rc = _control(server_id, sess)
+    rc.notify(f"GANADOR: {body.name}", "winner", ttl=15)
+    log.info("winner-test: %s", body.name)
+    return rc.snapshot()
+
+
 class RestartIn(BaseModel):
     to_go: Literal[1, 2] = 1   # "one to go" / "two to go" (the rulebook's choose can come with either)
 

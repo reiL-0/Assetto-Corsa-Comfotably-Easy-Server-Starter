@@ -1021,6 +1021,16 @@ def test_the_car_that_completes_the_distance_is_announced_as_the_winner(live):
     assert [n['text'] for n in won] == ['GANADOR: Ana'] and won[0]['left_s'] > 60
 
 
+def test_the_director_can_launch_a_fake_winner_notice_to_see_the_banner(live):
+    sid, client, _ = live
+    url = f'{V}/servers/{sid}/race-control/winner-test'
+    r = _client('steward').post(url, json={'name': 'Sofia Rios'})
+    won = [n for n in r.json()['notices'] if n['kind'] == 'winner']
+    assert r.status_code == 200 and [n['text'] for n in won] == ['GANADOR: Sofia Rios'] and won[0]['left_s'] <= 15
+    assert _client('steward').post(url, json={'name': 'a"b'}).status_code == 422   # (the hub reads notices with a regex)
+    assert _client('steward').post(url, json={'name': ''}).status_code == 422
+
+
 def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the_time(live, monkeypatch):
     sid, client, _ = live
     monkeypatch.setattr(client, '_record', lambda e: None)
