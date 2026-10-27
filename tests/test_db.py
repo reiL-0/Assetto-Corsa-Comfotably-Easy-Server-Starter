@@ -151,7 +151,7 @@ def test_migration_003_removes_only_the_old_scan_repeats_and_adds_the_indexes(tm
     assert len(rows) == 2 + 1 + 1 + 1 + 1 + 1 and len(scan_upload) == 4   # h1+h2 once each, the other detail, the post-fix repeat
     assert {r[1]: r[0] for r in scan_upload if r[2] in ("car a (3 files, 9 bytes)", "car b (1 files, 2 bytes)") and r[5] < "2026-10-08"} == first   # the FIRST of each survives
     assert {(r[3], r[4]) for r in rows} == {("scan", "upload"), ("upload", "upload"), ("scan", "scan"), ("admin", "source")}
-    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     names = {r[0] for r in _q(path, "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert {"ux_content_holders_hash_holder", "ix_catalog_events_hash_id", "ix_activity_server_ts", "ix_incidents_server_ts"} <= names
     plan = " ".join(str(r) for r in _q(path, "EXPLAIN QUERY PLAN SELECT * FROM catalog_events WHERE hash = 'h1' ORDER BY id DESC LIMIT 5"))
@@ -241,7 +241,7 @@ def test_migration_004_adds_the_archive_columns_and_keeps_every_running_league_r
     assert _q(path, "SELECT id, name, archived_at, archived_by FROM championships") == [(1, "Vieja", None, "")], "an existing league must stay running"
     assert _q(path, "SELECT name FROM sqlite_master WHERE name = 'championship_archive'") == [("championship_archive",)]
     stamp = _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version")
-    assert [r[0] for r in stamp] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [r[0] for r in stamp] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     db.init_db()   # rerun
     assert _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version") == stamp
 
@@ -273,4 +273,4 @@ def test_migration_005_keeps_old_penalties_manual_and_allows_one_automatic_per_d
     con.close()
     assert _q(path, "SELECT auto_rules FROM championships") == []
     db.init_db()   # rerun
-    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9]

@@ -48,7 +48,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     con = sqlite3.connect(path)
     assert con.execute("SELECT skin, fixed_setup FROM league_members").fetchall() == [("", "")]
     assert con.execute("SELECT car_setups, requirements FROM championships").fetchall() == [(None, None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     db.init_db()   # a rerun changes nothing
     con.close()
 
