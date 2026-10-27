@@ -48,7 +48,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     con = sqlite3.connect(path)
     assert con.execute("SELECT skin, fixed_setup FROM league_members").fetchall() == [("", "")]
     assert con.execute("SELECT car_setups, requirements FROM championships").fetchall() == [(None, None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8]
     db.init_db()   # a rerun changes nothing
     con.close()
 
@@ -251,3 +251,21 @@ def test_skins_can_come_through_the_chunked_upload_and_the_entry_list_refuses_un
     sid = _server()
     bad = {"model": "bmw", "driver_name": "Ana", "skin": "red\nFIXED_SETUP=x"}
     assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": [bad]}).status_code == 422
+
+
+def test_migration_008_puts_every_existing_server_on_wake_always(tmp_path, monkeypatch):
+    path = tmp_path / "v7.db"
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:7])
+    db.init_db()
+    con = sqlite3.connect(path)
+    con.execute("INSERT INTO servers (id, name, base_port, config, entry_list, welcome, csp_extra, integrity, integrity_extras, stewards, wake, created_at, updated_at) "
+                "VALUES (1, 'S', 9600, '{}', '[]', '', '', 'warn', 0, 'off', 'window', '2026-01-01', '2026-01-01')")
+    con.commit()
+    con.close()
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    db.init_db()
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT wake FROM servers").fetchall() == [("always",)]
+    con.close()

@@ -55,7 +55,7 @@ class Server(SQLModel, table=True):
     cpu_limit: int | None = None  # CPU quota of this server in % of one core (100 = one core); None = unlimited (supervisor.limit_prefix)
     mem_limit_mb: int | None = None  # RAM cap in MB (the kernel kills the server above it); None = unlimited
     stewards: str = "off"  # off | shadow: the automatic stewards (app/stewards) only record incidents, they never punish (phase 0)
-    wake: str = "window"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
+    wake: str = "always"  # when a player trying to join a stopped server starts it: off | window (inside an event's window) | always
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

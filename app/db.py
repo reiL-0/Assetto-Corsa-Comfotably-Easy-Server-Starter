@@ -170,6 +170,11 @@ def _m007_league_presets(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE "championships" ADD COLUMN "{col}" JSON')
 
 
+def _m008_wake_always(con: sqlite3.Connection) -> None:
+    """Every server answers the lobby (and wakes on a join) even outside an event window: /live and /sessions must always list it."""
+    con.execute("UPDATE servers SET wake = 'always'")
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -178,6 +183,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (5, _m005_auto_penalties),
     (6, _m006_rulebook),
     (7, _m007_league_presets),
+    (8, _m008_wake_always),
 ]
 
 

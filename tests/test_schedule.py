@@ -17,6 +17,7 @@ client = TestClient(app, headers=ADMIN)
 
 def _setup(start_in: float, reminders=(60, 10), duration=None):
     sid = client.post("/api/v1/servers", json={"name": "SchedServer"}).json()["id"]
+    client.put(f"/api/v1/servers/{sid}/wake", json={"mode": "window"})   # new servers default to always
     eid = client.post("/api/v1/events", json={"title": "Endurance R5", "session": {"name": "x", "track": "spa", "cars": ["bmw"]}}).json()["id"]
     r = client.post("/api/v1/schedules", json={"event_id": eid, "server_id": sid, "start_at": time.time() + start_in,
                                                "reminders": list(reminders), "duration_min": duration})

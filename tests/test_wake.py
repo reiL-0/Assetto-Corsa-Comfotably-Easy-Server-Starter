@@ -45,6 +45,7 @@ def _set_port(sid: int) -> int:
 def _server_with_window(start_in: float):
     sid = client.post("/api/v1/servers", json={"name": "WakeServer"}).json()["id"]
     port = _set_port(sid)
+    client.put(f"/api/v1/servers/{sid}/wake", json={"mode": "window"})   # new servers default to always
     eid = client.post("/api/v1/events", json={"title": "Wake R1", "session": {"name": "x", "track": "spa", "cars": ["bmw"]}}).json()["id"]
     r = client.post("/api/v1/schedules", json={"event_id": eid, "server_id": sid, "start_at": time.time() + start_in, "reminders": [], "duration_min": 60})
     assert r.status_code == 201

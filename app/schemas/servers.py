@@ -45,7 +45,7 @@ class ServerOut(BaseModel):
     ports: dict[str, int]
     config: dict[str, dict[str, Scalar]]
     entry_list: list[dict[str, Scalar]]
-    wake: str = "window"
+    wake: str = "always"
     stewards: str = "off"
     limits: dict = {}  # {cpu_percent, mem_mb, enforced}: caps of this server, applied the next time it starts (supervisor.limit_prefix)
     integrity: str = "warn"
