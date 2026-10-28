@@ -5,7 +5,7 @@ website's /api/csp/state). The manager is the only authority: the client shows t
 here is a sanction by itself (the penalties of the result stay in app/penalties.py).
 
 A yellow flag is only a flag. A VSC (power cut smoothly by the hub from the start, throttle only, no brake) and an FCY (full course yellow: controls untouched during the grace, braked gradually
-after it) are the two things that limit speed, and are judged the same way: every driver first gets `grace_s` seconds (10 by default) to slow to `pace_kmh` by themselves; when the grace ends,
+after it) are the two things that limit speed, and are judged the same way: every driver first gets `grace_s` seconds (20 by default) to slow to `pace_kmh` by themselves; when the grace ends,
 anybody still over `pace_kmh + tolerance_kmh` -- judged by the MEDIAN of the manager's own speed samples of the last 1.5 s of the grace (ACSP, ~5 Hz, so one lost packet does not decide it)
 -- gets the penalty set for this VSC (none or a drive-through of N laps), once per VSC; the hub then brings every car down to the pace gradually and keeps it there. A car the hub says
 is in the pit lane is exempt: only a "yes" counts and it lasts a few seconds, so nobody can cancel another driver's exemption (the hub is untrusted: a liar only escapes the penalty, the
@@ -41,7 +41,7 @@ _lock = threading.RLock()   # the API runs in worker threads and the monitor in 
 FLAGS = ("green", "yellow", "vsc", "fcy", "white", "checkered")
 SLOWING = ("vsc", "fcy")   # the flags with a pace, a grace and a judgement: a VSC cuts the power smoothly from the start, an FCY (full course yellow) brakes the car once the grace is over
 PACE_MIN, PACE_MAX = 30, 250     # km/h a VSC may ask for
-GRACE_MIN, GRACE_MAX, GRACE_DEFAULT = 3, 60, 10
+GRACE_MIN, GRACE_MAX, GRACE_DEFAULT = 3, 60, 20
 TOL_MAX, TOL_DEFAULT = 30, 5     # km/h over the pace that are still forgiven when the grace ends
 LAPS_MAX = 5                     # laps a car gets to serve a drive-through (the game enforces it: pit-lane pass clears it, running out sends the car to the pits)
 JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples decide (median)
