@@ -70,8 +70,8 @@ class RaceControl:
         self.nascar: Nascar | None = None
         self.caution: Caution | None = None   # the procedures of the caution being run (only with NASCAR armed), see app/live/caution.py
         self.watch = Watch()   # contacts and stopped cars: the proposal of a caution, and who is involved in one (app/live/incidents.py)
-        self.pace_guid = ""                # whose car it is: if the slot is somebody else's later, it is not the pace car any more (see app/racecontrol.py)
-        self.pace_car: int | None = None   # the slot of the pace car (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
+        self.pace_guid = ""                # the SteamID of the pace car's DRIVER: who it is, whatever slot he connects in (the director names a driver, not a car id; see app/racecontrol.py)
+        self.pace_car: int | None = None   # the slot where that driver sits now (None while he is not on the server) (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
         self.pace_car_kmh = PACE_CAR_KMH
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
@@ -245,10 +245,10 @@ class RaceControl:
             return False
 
     def set_pace_car(self, car: int | None, kmh: int = PACE_CAR_KMH, guid: str = "") -> None:
-        if car is not None and not PACE_MIN <= kmh <= PACE_MAX:
+        if (car is not None or guid) and not PACE_MIN <= kmh <= PACE_MAX:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
         with _lock:
-            self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid if car is not None else ""
+            self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid   # (a driver named but not connected: no slot yet, the guid stays)
             self.pace_car_in = self.pace_car_pitted = self.one_more = False
             self.blocked_crossings = 0
             if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
@@ -257,6 +257,13 @@ class RaceControl:
             if car is not None and self.caution:
                 self.caution.remove(car)   # (named during a caution: it was in the frozen order)
             self._bump()
+
+    def follow_pace_driver(self, car: int | None) -> None:
+        """The pace car is a DRIVER (`pace_guid`, the SteamID); its slot changes when it connects or reconnects. `car` is where that driver sits now (None: not on the server): the driver stays named."""
+        with _lock:
+            if car == self.pace_car or not self.pace_guid:
+                return
+            self.set_pace_car(car, self.pace_car_kmh, self.pace_guid)
 
     def contact(self, now: float, car: int, other: int | None, speed: float) -> None:
         with _lock:
@@ -472,7 +479,7 @@ class RaceControl:
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None,
-                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(),
+                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60}
 
 

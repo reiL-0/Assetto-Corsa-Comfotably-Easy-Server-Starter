@@ -407,7 +407,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'pacecar', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -689,7 +689,7 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
     _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))
-    client.cars[9] = {'driver_name': 'Safety Car'}
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
     client.field.update(9, 0.60, 12)   # it runs ahead of everybody, a "leader" on paper
     steward = _client('steward')
     assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 77}).status_code == 409, 'not on the server'
@@ -703,7 +703,7 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     assert r.json()['pacecar']['mode'] == 'in' and 9 not in r.json()['caution']['restart']
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
     assert r.json()['pacecar']['mode'] == 'in', 'after "to go" the green does not stop the pace car parking'
-    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={}).json()['pacecar'] is None
+    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'steam_id': None}).json()['pacecar'] is None
 
 
 def test_the_pace_car_is_not_a_leader_not_a_contact_and_stops_being_one_when_the_slot_changes_hands(live, monkeypatch):
@@ -728,6 +728,31 @@ def test_the_pace_car_is_not_a_leader_not_a_contact_and_stops_being_one_when_the
     client.cars[9] = {'driver_name': 'Otro', 'driver_guid': '76561190000000010'}
     adapter.pace_car_check()
     assert rc.pace_car is None and rc.snapshot()['pacecar'] is None, 'somebody else took the slot: not the pace car any more'
+    assert rc.pace_guid == '76561190000000009' and rc.snapshot()['pace_steam_id'] == '76561190000000009', 'but the driver stays named'
+    client.cars[4] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}   # he reconnects in another slot
+    adapter.pace_car_check()
+    assert rc.pace_car == 4 and rc.snapshot()['pacecar'] == {'car': 4, 'kmh': 100, 'mode': 'wait'}, 'the pace car follows the driver, not the slot'
+
+
+def test_the_pace_car_is_named_by_steam_id_even_before_he_connects_and_the_old_car_id_still_works(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    steward, url = _client('steward'), f'{V}/servers/{sid}/race-control/pace-car'
+    for bad in ({}, {'steam_id': '1234'}, {'steam_id': '７６５６１１９００００００００９'}, {'steam_id': '76561190000000009', 'car_id': 9}, {'steam_id': 'x' * 17}):
+        assert steward.post(url, json=bad).status_code == 422, bad
+    r = steward.post(url, json={'steam_id': '76561190000000009', 'kmh': 110})
+    assert r.status_code == 200 and r.json()['pace_steam_id'] == '76561190000000009' and r.json()['pacecar'] is None, 'named, not connected yet'
+    client.cars[6] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
+    adapter.pace_car_check()
+    assert rc.pace_car == 6 and rc.pace_car_kmh == 110
+    client.cars[7] = {'driver_name': 'Sin guid'}
+    assert steward.post(url, json={'car_id': 7}).status_code == 409, 'a car without SteamID'
+    client.cars[7] = {'driver_name': 'Otro', 'driver_guid': '76561190000000007'}
+    r = steward.post(url, json={'car_id': 7})
+    assert r.json()['pace_steam_id'] == '76561190000000007' and r.json()['pacecar']['car'] == 7, 'car_id (older panels) becomes its driver'
+    assert steward.post(url, json={'car_id': None}).json()['pace_steam_id'] == ''
 
 
 def test_the_directors_choices_outlive_the_session_and_a_pace_car_named_under_caution_leaves_the_order(live):

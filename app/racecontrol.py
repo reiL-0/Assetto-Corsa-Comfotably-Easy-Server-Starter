@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Annotated, Literal
 
@@ -90,14 +91,17 @@ def caution_tick(now: float) -> None:
             nascar_actions(inst.server_id, rc, actions)
 
 
+def slot_of(cars: dict, steam_id: str) -> int | None:
+    """Where the driver with that SteamID sits (None: not on the server)."""
+    return next((i for i, c in cars.items() if steam_id and (c.get("driver_guid") or "") == steam_id), None)
+
+
 def pace_car_check() -> None:
-    """The pace car stops being one when its driver leaves or somebody else takes the slot (the guid it was named with is not in that slot any more)."""
+    """The pace car is a driver: its slot follows him when he connects or reconnects, and it is empty while he is away (he stays named, so he is the pace car again when he comes back)."""
     for inst in supervisor.live():
         rc = state_of(inst.server_id, True, inst.acsp.session)
-        if rc and rc.pace_car is not None:
-            car = inst.acsp.cars.get(rc.pace_car)
-            if not car or (car.get("driver_guid") or "") != rc.pace_guid:
-                rc.set_pace_car(None)
+        if rc and rc.pace_guid:
+            rc.follow_pace_driver(slot_of(inst.acsp.cars, rc.pace_guid))
 
 
 def incident_tick(now: float) -> None:
@@ -125,7 +129,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": True, "pacecar": None, "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -319,18 +323,32 @@ def auto_yellow(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
 
 
 class PaceCarIn(BaseModel):
-    car_id: int | None = Field(default=None, ge=0, le=255)   # None: no pace car
+    steam_id: str | None = Field(default=None, pattern=r"^[0-9]{17}$")   # the pace car's driver; null: no pace car
+    car_id: int | None = Field(default=None, ge=0, le=255)               # older panels: the car now in that slot, turned into its driver's SteamID; null: no pace car
     kmh: int = Field(default=120, ge=PACE_MIN, le=PACE_MAX)
 
 
 @control_router.post("/pace-car")
 def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
-    """Which connected car is the pace car (a client running the hub script that drives it on autopilot) and its pace. It leads under every NASCAR caution and goes in on 'to go'."""
+    """Which DRIVER is the pace car (by SteamID; his client runs the hub script that drives the car on autopilot) and its pace. It leads under every NASCAR caution and goes in on 'to go'.
+    `steam_id` or `car_id` (one of them, `null` removes the pace car); he does not have to be connected yet: his slot is found whenever he joins."""
     inst, rc = _control(server_id, sess)
-    if body.car_id is not None and body.car_id not in inst.acsp.cars:
-        raise HTTPException(409, "that car is not on the server")
+    given = body.model_fields_set & {"steam_id", "car_id"}
+    if len(given) != 1:
+        raise HTTPException(422, "send steam_id or car_id (null removes the pace car)")
+    steam_id = body.steam_id
+    if "car_id" in given and body.car_id is not None:
+        car = inst.acsp.cars.get(body.car_id)
+        if not car:
+            raise HTTPException(409, "that car is not on the server")
+        steam_id = car.get("driver_guid") or ""
+        if not re.fullmatch(r"[0-9]{17}", steam_id):
+            raise HTTPException(409, "that car has no SteamID")
     try:
-        rc.set_pace_car(body.car_id, body.kmh, (inst.acsp.cars.get(body.car_id) or {}).get("driver_guid") or "")
+        if steam_id is None:
+            rc.set_pace_car(None)
+        else:
+            rc.set_pace_car(slot_of(inst.acsp.cars, steam_id), body.kmh, steam_id)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     return rc.snapshot()
@@ -390,8 +408,8 @@ def call_restart(server_id: int, body: RestartIn, sess: SessionDep) -> dict:
 
 def rolling_start(rc, cars: dict) -> None:
     """A NASCAR race begins with its pace car connected: the rolling start (one formation lap behind it, then the 'one to go'). Without it the standing start goes on."""
-    car = cars.get(rc.pace_car) if rc.pace_car is not None else None
-    if car and (car.get("driver_guid") or "") == rc.pace_guid and rc.start_formation():
+    rc.follow_pace_driver(slot_of(cars, rc.pace_guid))   # (he may have connected since the last check)
+    if rc.pace_car is not None and rc.start_formation():
         _say(rc, "ROLLING START: una vuelta de formación detrás del pace car", "flag")
 
 
