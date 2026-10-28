@@ -1,20 +1,18 @@
-"""Incident watch (app/live/incidents.py): a pile-up or a stopped car on the track calls for a caution."""
+"""Incident watch (app/live/incidents.py): a stopped or limping car on the track calls for a caution; a contact never does."""
 
-from app.live.incidents import HEAVY_KMH, PILEUP_CARS, SLOW_LIMP_S, STOP_S, Watch
+from app.live.incidents import SLOW_LIMP_S, STOP_S, Watch
 
 
 def moving(w, cars, t=0.0):
     w.step(t, {c: 200.0 for c in cars}, set(), True)
 
 
-def test_three_cars_in_contacts_within_ten_seconds_are_a_pileup_and_two_are_not():
+def test_contacts_alone_never_call_for_a_caution_however_hard_or_many():
     w = Watch()
-    w.on_contact(100.0, 1, 2, 80.0)
-    assert w.step(101.0, {1: 50.0, 2: 50.0, 3: 50.0}, set(), True) is None, "two cars are a contact, not a pile-up"
-    w.on_contact(104.0, 3, None, 60.0)   # car 3 hits the wall
-    p = w.step(105.0, {1: 50.0, 2: 50.0, 3: 50.0}, set(), True)
-    assert p and p["kind"] == "pileup" and p["cars"] == [1, 2, 3] and PILEUP_CARS == 3
-    assert w.step(106.0, {}, set(), True) is None, "the same pile-up is not proposed twice"
+    for t, (a, b) in enumerate(((1, 2), (2, 3), (3, None), (1, 3))):
+        w.on_contact(100.0 + t, a, b, 250.0)
+    assert w.step(105.0, {1: 200.0, 2: 200.0, 3: 200.0}, set(), True) is None, "NASCAR: cars touch; only a car that stops or limps is an incident"
+    assert w.recent_involved(105.0, 15.0) == {1, 2, 3}, "but they are still 'involved' (no free pass)"
 
 
 def test_slow_touches_and_old_contacts_do_not_count():
@@ -24,7 +22,7 @@ def test_slow_touches_and_old_contacts_do_not_count():
     assert not w.involved and w.step(101.0, {}, set(), True) is None
     w.on_contact(100.0, 1, 2, 80.0)
     w.on_contact(105.0, 3, 4, 80.0)
-    assert w.step(120.0, {}, set(), True) is None, "the first contact is older than the window by the time of the third car"
+    assert w.step(120.0, {}, set(), True) is None
     assert w.recent_involved(120.0, 15.0) == set() and w.recent_involved(110.0, 15.0) == {1, 2, 3, 4}
 
 
@@ -80,19 +78,6 @@ def test_stopped_time_before_the_race_does_not_count_and_a_reused_slot_starts_fr
     w2.step(1.0, {}, set(), True)   # car 7 left
     w2.step(2.0, {7: 0.0}, set(), True)   # somebody else sits in slot 7 and never moves
     assert w2.step(20.0, {7: 0.0}, set(), True) is None
-
-
-def test_a_heavy_contact_of_two_cars_is_proposed_once_even_if_both_keep_going():
-    w = Watch()
-    w.on_contact(100.0, 1, 2, HEAVY_KMH - 1)
-    assert w.step(101.0, {1: 200.0, 2: 200.0}, set(), True) is None, "a contact under the limit is nothing by itself"
-    w.on_contact(102.0, 1, 2, HEAVY_KMH + 10)
-    w.on_contact(102.1, 2, 1, HEAVY_KMH + 10)   # (the same contact, seen from the other car)
-    p = w.step(103.0, {1: 200.0, 2: 200.0}, set(), True)
-    assert p and p["kind"] == "heavy" and p["cars"] == [1, 2]
-    assert w.step(104.0, {1: 200.0, 2: 200.0}, set(), True) is None, "once"
-    w.on_contact(130.0, 1, None, HEAVY_KMH + 10)
-    assert w.step(131.0, {1: 200.0}, set(), True) is None, "a wall is not a contact between two cars"
 
 
 def test_a_car_far_under_the_pace_of_the_others_for_a_while_is_a_limping_car_proposed_once():

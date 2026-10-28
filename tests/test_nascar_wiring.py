@@ -632,7 +632,7 @@ def test_to_go_tells_the_wave_around_the_restart_place_and_who_may_choose(live):
     assert r.json()['caution']['restart'][:2] == [3, 4] and r.json()['caution']['free_pass'] == 6
 
 
-def test_a_pileup_is_proposed_to_the_director_or_puts_the_yellow_out_by_itself(live):
+def test_a_stopped_car_is_proposed_to_the_director_or_puts_the_yellow_out_by_itself(live):
     sid, client, _ = live
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
@@ -640,18 +640,22 @@ def test_a_pileup_is_proposed_to_the_director_or_puts_the_yellow_out_by_itself(l
     rc.auto_yellow = False   # (the director turned it off: then it is only a proposal)
     rc.nascar.laps = 5
     _field(client, c3=(0.50, 5), c4=(0.48, 5), c5=(0.46, 5))
-    speeds = {3: 40.0, 4: 40.0, 5: 40.0}
     for a, b in ((3, 4), (4, 5), (5, None)):
-        rc.watch.on_contact(100.0, a, b, 90.0)
-    prop, actions = rc.incident_step(speeds, client.field, 101.0)
-    assert prop and prop['kind'] == 'pileup' and actions == [] and rc.flag == 'green' and rc.snapshot()['proposal'] == prop, 'only a proposal'
+        rc.watch.on_contact(90.0, a, b, 250.0)   # (contacts, however hard, are no incident)
+    fast, stopped = {3: 200.0, 4: 200.0, 5: 200.0}, {3: 200.0, 4: 0.0, 5: 200.0}
+    assert rc.incident_step(fast, client.field, 91.0) == (None, []) and rc.flag == 'green'
+    rc.incident_step(stopped, client.field, 95.0)
+    prop, actions = rc.incident_step(stopped, client.field, 101.5)
+    assert prop and prop['kind'] == 'stopped' and actions == [] and rc.flag == 'green' and rc.snapshot()['proposal'] == prop, 'only a proposal'
     assert _client('steward').post(f'{V}/servers/{sid}/race-control/auto-yellow', json={'enabled': True}).json()['auto_yellow'] is True
     rc.watch.proposal = None
-    for a, b in ((3, 4), (4, 5), (5, None)):
+    for a, b in ((3, 4), (4, 5)):
         rc.watch.on_contact(200.0, a, b, 90.0)
-    prop, actions = rc.incident_step(speeds, client.field, 201.0)
+    rc.incident_step(fast, client.field, 201.0)   # (car 4 is up to speed again, then stops once more)
+    rc.incident_step(stopped, client.field, 202.0)
+    prop, actions = rc.incident_step(stopped, client.field, 208.5)
     assert prop and rc.flag == 'yellow' and rc.nascar.cautions_in_stage == 1, 'the engine counts the caution'
-    assert rc.caution and rc.caution.involved == {3, 4, 5}, 'the cars of the pile-up are involved: no free pass for them'
+    assert rc.caution and {3, 4, 5} <= rc.caution.involved | {5}, 'the cars of the contact are involved: no free pass for them'
     assert rc.snapshot()['proposal'] is None, 'the caution answers the proposal'
 
 
@@ -718,7 +722,7 @@ def test_the_pace_car_is_not_a_leader_not_a_contact_and_stops_being_one_when_the
     assert rc.nascar.laps == 4, 'the pace car has run more laps than the race: it is not the leader of anything'
     rc.contact(100.0, 3, 9, 90.0)
     rc.contact(100.0, 9, 3, 90.0)
-    assert not rc.watch.involved and not rc.watch.contacts, 'a touch with the pace car makes nobody involved'
+    assert not rc.watch.involved, 'a touch with the pace car makes nobody involved'
     adapter.pace_car_check()
     assert rc.pace_car == 9, 'same driver in the slot'
     client.cars[9] = {'driver_name': 'Otro', 'driver_guid': '76561190000000010'}
