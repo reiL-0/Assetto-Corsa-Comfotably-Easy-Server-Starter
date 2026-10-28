@@ -28,10 +28,12 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import Session, select
 
 from app import supervisor
 from app.auth import require, require_any
-from app.db import SessionDep
+from app.db import SessionDep, engine
+from app.models import LeagueMember
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
@@ -104,13 +106,29 @@ def pace_car_check() -> None:
             rc.follow_pace_driver(slot_of(inst.acsp.cars, rc.pace_guid))
 
 
+_NR: dict = {"t": -1e9, "guids": frozenset()}
+
+
+def _non_racing_guids(now: float) -> frozenset:
+    """SteamIDs of every league's cars that do not race (director, caster, pace car), read at most every 30 s."""
+    if now - _NR["t"] > 30:
+        try:
+            with Session(engine) as db:
+                _NR["guids"] = frozenset(db.exec(select(LeagueMember.guid).where(LeagueMember.non_racing)).all())
+        except SQLAlchemyError:
+            log.exception("non-racing roster")
+        _NR["t"] = now
+    return _NR["guids"]
+
+
 def incident_tick(now: float) -> None:
     """Contacts and stopped cars of every server racing under NASCAR: a proposal for the director, or the yellow itself when the director asked for that."""
     for inst in supervisor.live():
         rc = state_of(inst.server_id, True, inst.acsp.session)
         if not rc or not rc.nascar:
             continue
-        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None}
+        out = _non_racing_guids(now)   # (the director and the caster are not racing: their stops are no incident)
+        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out}
         prop, actions = rc.incident_step(speeds, inst.acsp.field, now)
         if prop:
             who = ", ".join(_name(inst, c) for c in prop["cars"])

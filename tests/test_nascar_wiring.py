@@ -659,6 +659,26 @@ def test_a_stopped_car_is_proposed_to_the_director_or_puts_the_yellow_out_by_its
     assert rc.snapshot()['proposal'] is None, 'the caution answers the proposal'
 
 
+def test_the_cars_that_do_not_race_are_never_an_incident(live, monkeypatch):
+    sid, client, _ = live
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    monkeypatch.setattr(adapter, '_non_racing_guids', lambda now: frozenset({'76561190000000004'}))
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    rc.auto_yellow = False
+    rc.nascar.laps = 5
+    _field(client, c3=(0.50, 5), c4=(0.48, 5))
+    client.cars[3] = {'driver_guid': '76561190000000003'}
+    client.cars[4] = {'driver_guid': '76561190000000004'}   # the caster
+    moving, still = [30.0, 0.0, 0.0], [0.0, 0.0, 0.0]   # (m/s)
+    client.cars[3]['velocity'] = client.cars[4]['velocity'] = moving
+    adapter.incident_tick(100.0)
+    client.cars[3]['velocity'] = client.cars[4]['velocity'] = still
+    adapter.incident_tick(101.0)
+    adapter.incident_tick(108.0)
+    assert [p['cars'] for p in [rc.watch.proposal] if p] == [[3]], 'the racing car stopped; the caster did not count'
+
+
 def test_a_stage_break_yellow_of_the_engine_also_freezes_the_order_and_names_the_free_pass(live):
     sid, client, _ = live
     rc = live_rc.state_of(sid, True, client.session, create=True)

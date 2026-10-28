@@ -123,3 +123,36 @@ def test_the_pace_of_the_others_is_the_lower_median_and_a_limping_car_that_recov
     assert any(w.step(float(t), {1: 60.0, **pack}, set(), True) for t in range(2, 20)), "limping"
     w.step(30.0, {1: 200.0, **pack}, set(), False)   # (under a caution it is up to pace again)
     assert any(w.step(float(t), {1: 60.0, **pack}, set(), True) for t in range(40, 60)), "and limping again after the restart"
+
+
+def test_two_cars_braking_from_speed_to_a_near_stop_together_are_a_mass_stop_but_one_the_pits_or_a_slow_field_are_not():
+    from app.live.incidents import DROP_S
+    w = Watch()
+    w.step(0.0, {1: 200.0, 2: 200.0, 3: 200.0}, set(), True)
+    w.step(1.0, {1: 10.0, 2: 200.0, 3: 200.0}, set(), True)
+    assert w.step(1.0 + DROP_S + 0.1, {1: 10.0, 2: 200.0, 3: 200.0}, set(), True) is None, "one car slowing is a stopped/limping car at most"
+    w.step(5.0, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)   # (car 2 was fast 5 s ago? no: 200 at t=1.0 -> it is within the window)
+    p = w.step(5.0 + DROP_S + 0.1, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)
+    assert p and p["kind"] == "mass_stop" and p["cars"] == [1, 2]
+    assert w.step(20.0, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True) is None, "once"
+    w = Watch()
+    w.step(0.0, {1: 200.0, 2: 200.0}, set(), True)
+    w.step(1.0, {1: 10.0, 2: 10.0}, {1, 2}, True)
+    assert w.step(10.0, {1: 10.0, 2: 10.0}, {1, 2}, True) is None, "in the pit lane"
+    w = Watch()
+    for t in (0.0, 1.0):
+        w.step(t, {1: 50.0, 2: 60.0}, set(), True)
+    w.step(2.0, {1: 10.0, 2: 10.0}, set(), True)
+    assert w.step(10.0, {1: 10.0, 2: 10.0}, set(), True) is None, "never fast: a slow field (a hairpin) is not a wreck"
+    w = Watch()
+    w.step(0.0, {1: 200.0, 2: 200.0}, set(), True)
+    w.step(1.0, {1: 10.0, 2: 10.0}, set(), False)
+    assert w.step(10.0, {1: 10.0, 2: 10.0}, set(), False) is None, "under a caution nothing is proposed"
+
+
+
+def test_cars_that_braked_before_the_race_went_green_are_not_a_mass_stop():
+    w = Watch()
+    w.step(0.0, {1: 200.0, 2: 200.0}, set(), False)   # (fast, but the race is not on)
+    w.step(1.0, {1: 10.0, 2: 10.0}, set(), True)
+    assert w.step(10.0, {1: 10.0, 2: 10.0}, set(), True) is None
