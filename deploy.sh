@@ -60,7 +60,7 @@ fi
 
 echo "2/5 copia de lo que corre ahora"
 PREV=$(cat "$APP/DEPLOYED" 2>/dev/null || echo desconocida)
-if [ -d "$APP/app" ]; then
+if [ -f "$APP/pyproject.toml" ]; then
   tar czf "$REL/before-$REV-$(date +%Y%m%d-%H%M%S).tgz" --exclude=__pycache__ --exclude=static -C "$APP" app pyproject.toml
 else echo "(primer despliegue: no hay nada que guardar ni a lo que volver)"; fi
 ls -1t "$REL"/*.tgz | tail -n +6 | xargs -r rm -f
