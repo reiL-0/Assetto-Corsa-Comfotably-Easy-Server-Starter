@@ -32,7 +32,8 @@ BACKUP_MAX_AGE_H = 36
 
 def get(url, timeout=5):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        # a name of our own: the site answers 403 to urllib's default one (Cloudflare), which made a healthy site look down
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "opr-watchdog/1"}), timeout=timeout) as r:
             return None if r.status == 200 else f"HTTP {r.status}"
     except Exception as e:  # noqa: BLE001 - whatever it is, the thing is not answering
         return str(getattr(e, "reason", e))[:120] or type(e).__name__

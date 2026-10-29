@@ -217,6 +217,24 @@ def test_http_double(watchdog, monkeypatch):
     assert watchdog.get("http://example.test") == "HTTP 502"
 
 
+def test_http_check_names_itself(watchdog, monkeypatch):
+    """The league's site answers 403 to urllib's default User-Agent (Cloudflare): the web check would report a healthy site as down."""
+    seen = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(watchdog.urllib.request, "urlopen", lambda req, **kw: seen.append(req) or Response())
+    assert watchdog.get("http://example.test") is None
+    assert seen[0].get_header("User-agent") == "opr-watchdog/1"
+
+
 def test_recovery_delivery_is_retried(watchdog, monkeypatch, tmp_path):
     path = tmp_path / "state.json"
     path.write_text(json.dumps({"disk": {"fails": 2, "since": 100, "last": 220}}))
