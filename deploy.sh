@@ -31,7 +31,7 @@ if [ "$ENV" = prod ] && [ "${DEPLOY_SKIP_STAGING:-}" != 1 ]; then
   [ "$RAN" = "$TREEH" ] || { echo "Staging no ha corrido este árbol (staging: ${RAN:-nada}, esto: $TREEH). Despliega primero con DEPLOY_ENV=staging, o DEPLOY_SKIP_STAGING=1 para un hotfix." >&2; exit 1; }
 fi
 STAGE=$(ssh "$HOST" 'mktemp -d /tmp/stage-acm.XXXXXX')   # one folder per run
-git archive $TREE app pyproject.toml | ssh "$HOST" "tar -x -C $STAGE"
+git archive $TREEH app pyproject.toml | ssh "$HOST" "tar -x -C $STAGE"   # the hash computed above, not HEAD again: what is sent is what is recorded
 ssh "$HOST" ENV="$ENV" REV="$REV" STAGE="$STAGE" TREEH="$TREEH" FORCE_PLAYERS="${DEPLOY_FORCE_PLAYERS:-0}" bash -s <<'REMOTE'
 set -euo pipefail
 if [ "$ENV" = prod ]; then ROOT=/opt/acm; UNIT=acm; PORT=8080; else ROOT=/opt/acm-staging; UNIT=acm-staging; PORT=8081; fi
@@ -53,7 +53,7 @@ cmp -s pyproject.toml "$APP/pyproject.toml" || echo "AVISO: pyproject.toml cambi
 if [ "$ENV" = prod ]; then
   if [ "$FORCE_PLAYERS" = 1 ]; then echo "AVISO: DEPLOY_FORCE_PLAYERS=1, no se comprueba si hay pilotos conectados" >&2
   else
-    ( set -a; . /opt/oprweb/.env; set +a; /opt/oprweb/app/.venv/bin/python /opt/oprweb/app/ops/players_gate.py --live ) \
+    ( set -a; . /opt/oprweb/.env && set +a && /opt/oprweb/app/.venv/bin/python /opt/oprweb/app/ops/players_gate.py --live ) \
       || { echo "Despliegue cancelado: hay gente conectada o el gestor no responde (DEPLOY_FORCE_PLAYERS=1 para saltarlo)." >&2; exit 1; }
   fi
 fi
@@ -63,7 +63,7 @@ PREV=$(cat "$APP/DEPLOYED" 2>/dev/null || echo desconocida)
 if [ -f "$APP/pyproject.toml" ]; then
   tar czf "$REL/before-$REV-$(date +%Y%m%d-%H%M%S).tgz" --exclude=__pycache__ --exclude=static -C "$APP" app pyproject.toml
 else echo "(primer despliegue: no hay nada que guardar ni a lo que volver)"; fi
-ls -1t "$REL"/*.tgz | tail -n +6 | xargs -r rm -f
+{ ls -1t "$REL"/*.tgz 2>/dev/null || true; } | tail -n +6 | xargs -r rm -f   # (no .tgz yet on a first deploy)
 
 echo "3/5 copiando"
 rsync -rlc --delete --exclude=static --exclude=__pycache__ --exclude='*.pyc' $STAGE/app/ "$APP/app/"
