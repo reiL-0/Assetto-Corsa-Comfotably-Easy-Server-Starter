@@ -41,3 +41,13 @@ UMask=0077
 
 Después ejecutar `systemctl daemon-reload` y reiniciar el manager para aplicar la máscara.
 No cambia los permisos de archivos existentes.
+
+## Staging del manager (misma VPS)
+
+`ops/staging_setup.sh` (una vez: `ssh root@<vps> 'STAGING_ALLOW_IP=<tu IP>' bash -s < ops/staging_setup.sh`, la IP es opcional) crea `/opt/acm-staging`: usuario `acm-staging`, servicio `acm-staging` en `127.0.0.1:8081`, su propia base de datos, una copia de `/opt/acserver` (sin `cfg` ni `logs`) y **puertos de juego 9800-9899** (HTTP interno 9900-9924). Producción usa 9600-9699 (9700-9724): no pueden coincidir (`tests/test_staging_ports.py`). Sin Discord, sin secreto de claim y sin scripts CSP: nada de lo que haga llega a los pilotos ni a la web de producción.
+
+- `DEPLOY_ENV=staging ./deploy.sh` sube el código a staging. Producción **solo** acepta un árbol que staging ya levantó (`DEPLOYED.tree`), nunca uno sin commit y nunca con pilotos conectados (`DEPLOY_SKIP_STAGING=1` / `DEPLOY_FORCE_PLAYERS=1` para un hotfix).
+- Reiniciar el manager de staging no mata sus `acServer` (mismo `KillMode=process` que producción): desplegar allí ensaya la re-adopción.
+- La base de staging empieza vacía (no se copia la de producción: traería servidores con los puertos 9600). El primer `POST /users` crea el administrador; su contraseña y la de la web de staging están en `/opt/acm-staging/admin-password` y `/opt/oprweb-staging/password` (solo root).
+- Para jugar contra staging: `ufw allow from <tu IP> to any port 9800:9899 proto tcp|udp` (lo hace `STAGING_ALLOW_IP`); quítalo con `ufw status numbered` + `ufw delete <n>`.
+
