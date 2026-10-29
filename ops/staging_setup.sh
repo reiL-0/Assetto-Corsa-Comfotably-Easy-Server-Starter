@@ -25,7 +25,13 @@ ACM_ACSERVER_CMD=$ROOT/acserver/acServer
 ACM_UPLOAD_PERMISSIVE=true
 ACM_PORT_RANGE_START=9800
 ACM_PORT_RANGE_END=9900
-ACM_CSP_HUB=false
+ACM_CSP_HUB=true
+ACM_CSP_HUB_URL=https://staging.oppenpaddockracing.site/static/csp/opr_hub.lua
+ACM_CSP_TRAINER_URL=https://staging.oppenpaddockracing.site/static/csp/opr_trainer.lua
+ACM_CSP_TRAINER_SERVERS=1
+ACM_CSP_CLAIM_SERVERS=1
+ACM_CLAIM_URL=http://127.0.0.1:5200/api/telemetry/claim/issue
+ACM_CLAIM_SECRET=$(sed -n 's/^OPR_CLAIM_SECRET=//p' /opt/oprweb-staging/.env 2>/dev/null)
 ENV
 chmod 640 "$ROOT/acm.env"; chown root:"$U" "$ROOT/acm.env"
 chown -R "$U:$U" "$ROOT/app" "$ROOT/data" "$ROOT/releases" "$ROOT/acserver"
