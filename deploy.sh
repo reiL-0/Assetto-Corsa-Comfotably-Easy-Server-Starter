@@ -30,7 +30,7 @@ if [ "$ENV" = prod ] && [ "${DEPLOY_SKIP_STAGING:-}" != 1 ]; then
   RAN=$(ssh "$HOST" 'cat /opt/acm-staging/app/DEPLOYED.tree 2>/dev/null || true')
   [ "$RAN" = "$TREEH" ] || { echo "Staging no ha corrido este árbol (staging: ${RAN:-nada}, esto: $TREEH). Despliega primero con DEPLOY_ENV=staging, o DEPLOY_SKIP_STAGING=1 para un hotfix." >&2; exit 1; }
 fi
-STAGE=$(ssh "$HOST" 'mktemp -d $STAGE.XXXXXX')   # one folder per run
+STAGE=$(ssh "$HOST" 'mktemp -d /tmp/stage-acm.XXXXXX')   # one folder per run
 git archive $TREE app pyproject.toml | ssh "$HOST" "tar -x -C $STAGE"
 ssh "$HOST" ENV="$ENV" REV="$REV" STAGE="$STAGE" TREEH="$TREEH" FORCE_PLAYERS="${DEPLOY_FORCE_PLAYERS:-0}" bash -s <<'REMOTE'
 set -euo pipefail
