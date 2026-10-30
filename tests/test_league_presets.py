@@ -35,7 +35,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:6])
     db.init_db()
     con = sqlite3.connect(path)   # a deployed database before 007
-    for table, cols in (("championships", ("car_setups", "requirements")), ("league_members", ("skin", "fixed_setup", "in_pits"))):
+    for table, cols in (("championships", ("car_setups", "requirements")), ("league_members", ("skin", "fixed_setup", "in_pits", "number"))):
         for col in cols:
             con.execute(f'ALTER TABLE {table} DROP COLUMN {col}')
     con.execute("INSERT INTO championships (id, name, points_system, practice_required, practice_laps, practice_days, created_at, archived_by) VALUES (1, 'Vieja', '[25]', 0, 5, 7, '2026-01-01', '')")
@@ -48,7 +48,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     con = sqlite3.connect(path)
     assert con.execute("SELECT skin, fixed_setup FROM league_members").fetchall() == [("", "")]
     assert con.execute("SELECT car_setups, requirements FROM championships").fetchall() == [(None, None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     db.init_db()   # a rerun changes nothing
     con.close()
 
@@ -293,4 +293,46 @@ def test_migration_008_puts_every_existing_server_on_wake_always(tmp_path, monke
     db.init_db()
     con = sqlite3.connect(path)
     assert con.execute("SELECT wake FROM servers").fetchall() == [("always",)]
+    con.close()
+
+
+def test_the_drivers_number_is_kept_as_text_cleared_only_by_an_empty_string_and_never_wiped_by_an_older_panel():
+    lid = _league()["id"]
+    for n in ("7", "07", "00", "0", "123"):   # "07" and "7" are different numbers; digits only, as text
+        assert _member(lid, A, number=n).json()["number"] == n
+    assert _member(lid, A, number="07").json()["number"] == "07"
+    assert _member(lid, A).json()["number"] == "07"                 # a panel that does not send it keeps it
+    assert _member(lid, A, number=None).json()["number"] == "07"    # null too
+    assert {m["guid"]: m["number"] for m in api.get(f"{V}/championships/{lid}/members").json()} == {A: "07"}
+    assert _member(lid, A, number="").json()["number"] == ""        # an empty string clears it
+    assert _member(lid, B).json()["number"] == ""                   # a new driver starts without one
+
+
+@pytest.mark.parametrize("bad", ["1234", "12a", " 7", "7 ", "12\n", "\u0662", "-1", "1.5", 7, ["7"]])
+def test_a_number_that_is_not_one_to_three_ascii_digits_is_refused_and_changes_nothing(bad):
+    lid = _league()["id"]
+    assert _member(lid, A, number="5").status_code == 200
+    assert _member(lid, A, number=bad).status_code == 422
+    assert api.get(f"{V}/championships/{lid}/members").json()[0]["number"] == "5"
+
+
+def test_migration_010_adds_the_number_column_to_every_member_empty(tmp_path, monkeypatch):
+    path = tmp_path / "v9.db"
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:9])
+    db.init_db()
+    con = sqlite3.connect(path)   # a deployed database before 010: no number column
+    con.execute("ALTER TABLE league_members DROP COLUMN number")
+    con.execute("INSERT INTO championships (id, name, points_system, practice_required, practice_laps, practice_days, created_at, archived_by) VALUES (1, 'Vieja', '[25]', 0, 5, 7, '2026-01-01', '')")
+    con.execute("INSERT INTO league_members (championship_id, guid, name, team, car, exempt, non_racing, skin, fixed_setup, in_pits) VALUES (1, '76561198000000099', 'Ana', '', 'bmw', 0, 0, '', '', 0)")
+    con.commit()
+    con.close()
+    monkeypatch.undo()
+    monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{path}"))
+    db.init_db()
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT name, number FROM league_members").fetchall() == [("Ana", "")]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")][-2:] == [9, 10]
+    db.init_db()   # a rerun changes nothing
+    assert con.execute("SELECT count(*) FROM league_members").fetchone() == (1,)
     con.close()
