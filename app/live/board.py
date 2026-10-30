@@ -24,6 +24,8 @@ class Driver:
     laps: int = 0
     total_ms: int = 0
     top_kmh: float = 0.0
+    valid_laps: int | None = None  # laps without cuts (None: this board does not know, as when it is read from the log); the best of them is `best_valid_ms` (0 = none)
+    best_valid_ms: int = 0
     pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     spline: float = 0.0
 
@@ -50,6 +52,7 @@ class LiveBoard:
                 for d in self.drivers:
                     d.best_ms = d.last_ms = d.laps = d.total_ms = 0
                     d.top_kmh = 0.0
+                    d.valid_laps, d.best_valid_ms = None, 0
         elif t == "new_connection":
             old = next((d for d in self.drivers if e["driver_guid"] and d.guid == e["driver_guid"]), None)
             d = old or Driver(car_id=e["car_id"])
@@ -72,6 +75,10 @@ class LiveBoard:
             if d:
                 d.last_ms, d.laps = e["laptime_ms"], d.laps + 1
                 d.total_ms += e["laptime_ms"]
+                valid = e.get("cuts", 0) == 0 and 0 < e["laptime_ms"] < NO_TIME
+                d.valid_laps = (d.valid_laps or 0) + valid
+                if valid:
+                    d.best_valid_ms = min(d.best_valid_ms or NO_TIME, e["laptime_ms"])
             for row in e["leaderboard"]:  # the server's own table: best lap and lap count of every car
                 r = self._by_car(row["car_id"])
                 if r:
@@ -98,6 +105,7 @@ class LiveBoard:
                 d.model: {
                     "BestLap": d.best_ms * NS, "LastLap": d.last_ms * NS, "NumLaps": d.laps,
                     "TotalLapTime": d.total_ms * NS, "BestLapSplits": {}, "TopSpeedBestLap": round(d.top_kmh),
+                    **({"ValidLaps": d.valid_laps, "BestValidLap": d.best_valid_ms * NS} if d.valid_laps is not None else {}),   # (ours, not ACSM's: the lobby page shows the valid laps and the quickest of them)
                 }
             },
             "LastPos": {"X": d.pos[0], "Y": d.pos[1], "Z": d.pos[2]},
