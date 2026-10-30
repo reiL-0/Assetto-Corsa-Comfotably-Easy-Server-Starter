@@ -1154,3 +1154,20 @@ def test_a_stage_break_behind_a_pace_car_opens_the_pits_but_does_not_promise_a_l
     adapter.nascar_actions(sid, state, actions, 3)
     texts = _break_notices(rc)
     assert rc.caution.pits_open and 'BOXES ABIERTOS: aprovecha para parar' in texts and not any(t.startswith('REINICIO: bandera verde') for t in texts)
+
+
+def test_the_pits_of_an_incident_caution_open_by_themselves_after_the_first_full_lap(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.46, 9))
+    assert _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'}).status_code == 200
+    assert not rc.caution.pits_open and 'BOXES CERRADOS: solo con permiso del director' in _break_notices(rc)
+    speeds, cars = {3: 200.0, 4: 200.0, 5: 200.0}, {3, 4, 5}
+    assert rc.caution_lap(3, speeds, 1000.0, cars) is None, 'the first crossing is only part of a lap'
+    rc.caution.pit_enter(4)
+    assert rc.caution.pit_breakers() == [4], 'closed until then'
+    assert rc.caution_lap(3, speeds, 1090.0, cars) == 'pits'
+    rc.caution.pit_enter(5)
+    assert rc.caution.pits_open and rc.caution.pit_breakers() == []
+    assert rc.caution_lap(3, speeds, 1180.0, cars) is None and rc.caution_laps == 2, 'then the lap count goes on to the automatic to go'

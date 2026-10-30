@@ -457,6 +457,8 @@ def auto_caution(server_id: int, rc, car: int) -> None:
                 _restart(inst, rc, 1)
             except HTTPException:
                 pass   # (the caution ended in between: nothing to restart)
+        elif verdict == "pits":
+            _say(rc, PITS_OPEN, "flag", hold="pits")
         elif verdict == "one":
             _say(rc, "UNA PARA VERDE", "flag", hold="togo")
         elif verdict == "warn":

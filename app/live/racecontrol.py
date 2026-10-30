@@ -54,6 +54,7 @@ VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
+PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
@@ -204,7 +205,7 @@ class RaceControl:
             return self.set_flag("green", field=field)
 
     def caution_lap(self, car: int, speeds: dict[int, float], now: float, connected: set[int] | None = None) -> str | None:
-        """A car crossed the line under our caution. Only the pace car's laps count (the leader's when there is no pace car); the first crossing is a part of a lap. -> 'go' (at least CAUTION_MIN_LAPS
+        """A car crossed the line under our caution. Only the pace car's laps count (the leader's when there is no pace car); the first crossing is a part of a lap. -> 'pits' (the first full lap is done: the pit lane opens), 'go' (at least CAUTION_MIN_LAPS
         done and the track is clear: the automatic 'to go'), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
         with _lock:
             c = self.caution
@@ -222,6 +223,11 @@ class RaceControl:
                 log.info("two to go became one to go at the crossing of car %s", car)
                 return "one"
             self.caution_laps += 1
+            if self.caution_laps == PITS_OPEN_LAP and not c.pits_open:
+                c.open_pits()
+                self._bump()
+                log.info("caution lap %s counted (car %s): the pit lane opens", self.caution_laps, car)
+                return "pits"
             if self.caution_laps < CAUTION_MIN_LAPS:
                 log.info("caution lap %s/%s counted (car %s): too early for the automatic to go", self.caution_laps, CAUTION_MIN_LAPS, car)
                 return None

@@ -10,7 +10,7 @@ Cup's in the parts that matter here:
   * the WAVE-AROUND: the lapped cars (but the free pass one) that are physically between the leader and the pace car, which can pass the pace car and unlap themselves.
   * the PITS ARE CLOSED while it lasts (this league's rule, not the rulebook's): a car that enters the pit lane is a violator, unless it was already there when the yellow came out, it is involved in a contact
     (damaged), it has a drive-through to serve (the pit lane is how it is served) or the director let it in (`pit_allow`). One violation per car, on the tail of the restart like a passer.
-    The STAGE BREAK is the exception: its pits are open to everybody (`open_pits`), so the cars can make their stops. A car that joins the server under the yellow starts in its box: never judged for it.
+    They open by themselves after the first full lap under the caution (`open_pits`, app/live/racecontrol.py `caution_lap`), and at once in a STAGE BREAK, so the cars can make their stops. A car that joins the server under the yellow starts in its box: never judged for it.
   * the RESTART ORDER (4.14.5): lead lap cars that did not pit, lead lap cars that pitted, lapped cars, the free pass car, involved cars and wave-around cars, penalty cars.
 """
 
@@ -140,8 +140,7 @@ class Caution:
             self.pit_entered.add(car)
 
     def open_pits(self) -> None:
-        self.pits_open = True
-        self.pit_entered.clear()
+        self.pits_open = True   # (an entry reported before is still judged: the pits were closed when it happened)
 
     def pit_allow(self, car: int, allowed: bool) -> None:
         """The director lets a car into the pit lane (or takes the permission back; a car already judged stays judged)."""

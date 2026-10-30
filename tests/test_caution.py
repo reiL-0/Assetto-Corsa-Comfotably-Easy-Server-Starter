@@ -164,6 +164,6 @@ def test_a_car_that_joined_after_the_yellow_and_anybody_in_an_open_pit_lane_are_
     assert c.pit_breakers() == [1], "a car of the field that enters the closed pit lane is still a violator"
     c = Caution(field(5.20, 5.10), 0.0)
     c.pit_enter(1)
-    c.open_pits()   # (the stage break opens the pits while a report is waiting: nobody is judged for it)
+    c.open_pits()
     c.pit_enter(2)
-    assert c.pit_breakers() == []
+    assert c.pit_breakers() == [1], "the entry before the pits opened is still judged, the one after is not"
