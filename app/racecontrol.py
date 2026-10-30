@@ -20,9 +20,11 @@ lifespan) watches a VSC: it samples the speeds and judges the drivers when the g
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,8 +34,10 @@ from sqlmodel import Session, select
 
 from app import supervisor
 from app.auth import require, require_any
+from app.config import settings
 from app.db import SessionDep, engine
 from app.models import LeagueMember
+from app.results import FINISH_SUFFIX
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
@@ -253,6 +257,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, action[1], "race")
         elif action[0] == "finish" and crossing is not None:   # the checkered came with the lap of the first car to complete the distance: that car is the winner (AC ranks by laps, then by time)
             log.info("winner: car %s (%s)", crossing, _name(inst, crossing))
+            _mark_finish(server_id, rc.leader_laps_seen)
             rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", ttl=90)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
@@ -277,6 +282,17 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
         elif action[0] == "violation":
             _say(rc, f"{_name(inst, action[1])}: adelantó bajo amarilla · DRIVE-THROUGH", "penalty")
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
+
+
+def _mark_finish(server_id: int, laps: int) -> None:
+    """The chequered flag fell: acServer goes on counting the laps of a race it does not know is over, so the result file is cut at this moment (app/results.py `_finish_cut`)."""
+    d = Path(settings.data_dir) / "instances" / str(server_id) / "results"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        (d / f"{int(now)}{FINISH_SUFFIX}").write_text(json.dumps({"at": now, "laps": laps}))
+    except OSError:
+        log.exception("could not write the finish marker of server %s", server_id)
 
 
 def plain_winner(client, event: dict) -> None:

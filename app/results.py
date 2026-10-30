@@ -17,11 +17,67 @@ from app.models import ChampionshipEvent, LeagueMember, Penalty
 
 
 NO_LAP_MS = 999_999_999   # the BestLap acServer writes for a car that set no lap
+FINISH_SUFFIX = ".finish"   # <unix time>.finish, written by the manager at the chequered flag of a NASCAR race (app/racecontrol.py): {"at": unix time, "laps": laps of the winner}
+
+
+def _finish_cut(path: Path, laps: list[dict]) -> int | None:
+    """The race is long in acServer and the manager decides when it ends, so the cars keep lapping after the chequered flag and acServer would rank them on those laps. -> the session time
+    (ms) at which the winner completed the distance: every car's race ends at its first lap completed from then on. None = nothing to cut. The flag a result file belongs to is the last one
+    before it was written, unless another race result was written in between (that one took it)."""
+    try:
+        written = path.stat().st_mtime
+        marks = []
+        for f in path.parent.glob("*" + FINISH_SUFFIX):
+            m = json.loads(f.read_text())
+            if float(m["at"]) <= written:
+                marks.append((float(m["at"]), int(m["laps"])))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not marks:
+        return None
+    at, n = max(marks)
+    if n < 1 or any(at <= p.stat().st_mtime < written for p in path.parent.glob("*_RACE.json") if p != path):
+        return None
+    seen, stamps = Counter(), []
+    for lap in laps:
+        g = lap.get("DriverGuid")
+        if g and (lap.get("LapTime") or 0) > 0:   # (the laps apply_penalties counts)
+            seen[g] += 1
+            if seen[g] == n:
+                stamps.append(lap.get("Timestamp") or 0)
+    return min(stamps) if stamps else None
+
+
+def _cut_after_finish(data: dict, classification: list[dict], cut: int) -> None:
+    """Each car's race ends at its first lap completed at or after `cut`: the laps after it are dropped and the classification is recomputed on the rest (laps, then time)."""
+    kept: dict[str, list[dict]] = defaultdict(list)
+    done: set[str] = set()
+    for lap in data.get("Laps", []):
+        g = lap.get("DriverGuid")
+        if not g:
+            kept[""].append(lap)   # (no GUID: nobody to follow, left as written)
+        elif g not in done:
+            kept[g].append(lap)
+            if (lap.get("Timestamp") or 0) >= cut:
+                done.add(g)
+    keep = {id(lap) for laps in kept.values() for lap in laps}
+    data["Laps"] = [lap for lap in data.get("Laps", []) if id(lap) in keep]
+    for e in classification:
+        mine = kept.get(e["driver_guid"], [])
+        if e["driver_guid"] in done:   # (a car that never crossed the line again keeps what acServer wrote)
+            e["total_time_ms"] = sum(lap.get("LapTime") or 0 for lap in mine)
+            clean = [lap["LapTime"] for lap in mine if lap.get("LapTime") and not lap.get("Cuts")]
+            e["best_lap_ms"] = min(clean) if clean else None
+        e["_laps"] = len(mine)
+    classification.sort(key=lambda e: (-e["_laps"], e["total_time_ms"] or float("inf")))
+    for i, e in enumerate(classification):
+        e["position"] = i + 1
+        del e["_laps"]
 
 
 def parse_result_file(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
-    session_type = data.get("Type", "")
+    session_type = data.get("Type", "").capitalize()   # (acServer writes RACE / QUALIFY / PRACTICE)
     is_race = session_type == "Race"
 
     classification = []
@@ -39,6 +95,10 @@ def parse_result_file(path: Path) -> dict:
                 "total_time_ms": r.get("TotalTime"),
             }
         )
+
+    cut = _finish_cut(path, data.get("Laps", [])) if is_race else None
+    if cut is not None:
+        _cut_after_finish(data, classification, cut)
 
     gap_key = "total_time_ms" if is_race else "best_lap_ms"
     leader_value = classification[0][gap_key] if classification else None
