@@ -8,6 +8,7 @@ already in finishing order, so parsing is mostly a rename + gap computation.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -17,7 +18,50 @@ from app.models import ChampionshipEvent, LeagueMember, Penalty
 
 
 NO_LAP_MS = 999_999_999   # the BestLap acServer writes for a car that set no lap
+STAGES_PENDING = "stages.pending"   # the same, while the race is on (the manager moves it to <result>.stages when acServer says the session ended)
+STAGES_SUFFIX = ".stages"   # <result file name without .json>.stages: the order at the end of every stage of a NASCAR race, {"stages": [{"stage": n, "order": [steam ids]}]} (app/racecontrol.py)
 FINISH_SUFFIX = ".finish"   # <unix time>.finish, written by the manager at the chequered flag of a NASCAR race (app/racecontrol.py): {"at": unix time, "laps": laps of the winner}
+
+
+def _pending_at(d: Path) -> float | None:
+    try:
+        return float(json.loads((d / STAGES_PENDING).read_text())["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def pending_is_unclaimed(d: Path, name: str) -> bool:
+    """The journal in `d` can be the one of the race result `name`: it was written before that result (if it exists yet) and no other race result was written after it."""
+    at = _pending_at(d)
+    if at is None or any(p.stat().st_mtime >= at for p in d.glob("*_RACE.json") if p.name != name):
+        return False
+    mine = d / name
+    return not mine.is_file() or at <= mine.stat().st_mtime
+
+
+def claim_orphan(d: Path) -> None:
+    """A journal whose race never got its end-of-session message (the manager was not told): before the next race overwrites it, it goes to the first race result written after it."""
+    at = _pending_at(d)
+    if at is None:
+        return
+    for _, p in sorted((p.stat().st_mtime, p) for p in d.glob("*_RACE.json") if p.stat().st_mtime >= at):
+        if not p.with_suffix(STAGES_SUFFIX).exists():
+            os.replace(d / STAGES_PENDING, p.with_suffix(STAGES_SUFFIX))
+        return
+
+
+def read_stages(path: Path) -> list[dict]:
+    """The order of the field at the end of each stage of this race result ([] = none recorded): [{"stage": n, "order": [steam id, ...]}], first of the order first."""
+    try:
+        mine = path.with_suffix(STAGES_SUFFIX)
+        data = json.loads((mine if mine.is_file() else path.parent / STAGES_PENDING).read_text())   # (read once: what is checked is what is used)
+        if not mine.is_file():   # acServer's end-of-session message did not reach us: the journal of the race is the one written before this result and after the previous race result
+            written, at = path.stat().st_mtime, float(data["at"])
+            if at > written or any(at <= p.stat().st_mtime < written for p in path.parent.glob("*_RACE.json") if p != path):
+                return []
+        return [{"stage": int(s["stage"]), "order": [str(g) for g in s["order"]]} for s in data["stages"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
 
 def _finish_cut(path: Path, laps: list[dict]) -> int | None:
@@ -124,6 +168,7 @@ def parse_result_file(path: Path) -> dict:
         "name": data.get("Name"),
         "classification": classification,
         "laps": laps,
+        "stages": read_stages(path) if is_race else [],
     }
 
 

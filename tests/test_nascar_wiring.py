@@ -1171,3 +1171,46 @@ def test_the_pits_of_an_incident_caution_open_by_themselves_after_the_first_full
     rc.caution.pit_enter(5)
     assert rc.caution.pits_open and rc.caution.pit_breakers() == []
     assert rc.caution_lap(3, speeds, 1180.0, cars) is None and rc.caution_laps == 2, 'then the lap count goes on to the automatic to go'
+
+
+def test_the_order_at_the_end_of_each_stage_is_written_down_and_becomes_the_races_own_file_when_the_session_ends(live, monkeypatch):
+    import json
+    from pathlib import Path
+    from app.config import settings
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
+    for car, guid in ((3, '76561190000000003'), (4, '76561190000000004'), (5, '76561190000000005')):
+        client.cars[car]['driver_guid'] = guid
+    monkeypatch.setattr(adapter, '_non_racing_guids', lambda now: frozenset({'76561190000000004'}))   # car 4 is the director
+    state, actions = live_rc.on_lap(sid, 21, 3)   # the leader ends stage 1 on the line
+    adapter.nascar_actions(sid, state, actions, 3)
+    d = Path(settings.data_dir) / 'instances' / str(sid) / 'results'
+    pending = json.loads((d / 'stages.pending').read_text())
+    assert pending['stages'] == [{'stage': 1, 'order': ['76561190000000003', '76561190000000005']}], 'the order of the frozen field, without the director'
+    adapter.claim_stages(sid, 'results/2026_10_30_2_00_QUALIFY.json')   # not a race: the journal stays
+    assert (d / 'stages.pending').is_file()
+    adapter.claim_stages(sid, 'results\\2026_10_30_2_00_RACE.json')
+    assert not (d / 'stages.pending').exists() and json.loads((d / '2026_10_30_2_00_RACE.stages').read_text()) == pending
+
+
+def test_a_stage_already_recorded_is_not_rewritten_and_a_car_that_left_takes_no_place(live, monkeypatch):
+    import json
+    from pathlib import Path
+    from app.config import settings
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
+    for car in (3, 4, 5):
+        client.cars[car]['driver_guid'] = f'7656119000000000{car}'
+    monkeypatch.setattr(adapter, '_non_racing_guids', lambda now: frozenset())
+    state, actions = live_rc.on_lap(sid, 21, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    inst = adapter._live(sid)
+    rc.caution.gone.add(5)   # car 5 left before the next look
+    client.cars[4]['driver_guid'] = '76561190000000099'   # (and car 4's slot is somebody else's now)
+    adapter._record_stage(sid, inst, rc)   # the break action again: the stage is over, nothing is rewritten
+    d = Path(settings.data_dir) / 'instances' / str(sid) / 'results'
+    assert json.loads((d / 'stages.pending').read_text())['stages'][0]['order'] == ['76561190000000003', '76561190000000004', '76561190000000005']

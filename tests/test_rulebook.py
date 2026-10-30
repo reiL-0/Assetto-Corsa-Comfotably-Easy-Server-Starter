@@ -158,3 +158,12 @@ def test_migration_006_adds_the_column_and_leaves_every_league_on_its_older_rule
     assert con.execute("SELECT id, name, rulebook FROM championships").fetchall() == [(1, "Vieja", None)]
     assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     db.init_db()   # rerun
+
+
+def test_the_nascar_cup_preset_and_a_rulebook_saved_before_stage_points_existed():
+    from app.rulebook import PRESETS, Rulebook
+    nc = PRESETS["nascar-cup"].scoring
+    assert nc.table[:4] == [40, 35, 34, 33] and nc.table[35] == 1 and len(nc.table) == 40 and set(nc.table[35:]) == {1}, "40 for the win, one less per place down to 1 at 36th and the rest"
+    assert nc.stage_points == [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+    old = Rulebook.model_validate({"schema_version": 1, "scoring": {"table": [25, 18]}})   # a rulebook stored before `stage_points`
+    assert old.scoring.stage_points == []

@@ -26,6 +26,7 @@ class _Strict(BaseModel):
 
 class Scoring(_Strict):
     table: list[int] = Field(default_factory=lambda: list(DEFAULT_POINTS_SYSTEM), max_length=100)   # points for 1st, 2nd...
+    stage_points: list[int] = Field(default_factory=list, max_length=40)   # NASCAR: points for the 1st, 2nd... of the order at the end of every stage that is not the last ([] = none)
 
 
 class CatalogueItem(_Strict):
@@ -95,7 +96,10 @@ def legacy_catalogue(rb: Rulebook) -> list[dict]:
     return [{"key": i.key, "name": i.name, "kind": i.kind, "seconds": i.value, "dsq": i.kind == "dsq"} for i in rb.catalogue]
 
 
+# NASCAR Cup: 40 for the win, 35 for second and one less per place down to 1 for 36th and the rest of the field; stage points 10 down to 1 for the first ten at the end of each stage but the last
+NASCAR_TABLE = [40, *range(35, 0, -1), 1, 1, 1, 1]
 PRESETS: dict[str, Rulebook] = {
+    "nascar-cup": Rulebook(preset="nascar-cup", scoring=Scoring(table=NASCAR_TABLE, stage_points=list(range(10, 0, -1)))),
     # From the VRL championship rulebook (July 2026), the base to calibrate against, not gospel: points for the top 10, the +5/+10/+15 s, drive-through (30 s charged),
     # stop & go 30 s and DSQ with their conduct points, and "more than 5 cuts = +5 s".
     "vrl-base": Rulebook(

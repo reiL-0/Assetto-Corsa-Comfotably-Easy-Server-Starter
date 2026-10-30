@@ -83,6 +83,7 @@ class RaceControl:
         self.lap_base = self.leader_laps_seen = 0   # leader laps run in the formation: the engine counts the race from the green
         self.caution_laps = -1             # laps the pace car (the leader when there is none) has done under this caution; -1 = the first crossing is still to come
         self.caution_notified = False      # the director was told that the track did not clear: the 'to go' is theirs
+        self.stage_log: dict[int, list[str]] = {}   # NASCAR: stage number -> the steam ids in the order of the field when it ended (app/racecontrol.py `_record_stage`)
         self.finish_wait: set[int] | None = None
         self.finish_deadline = 0.0
         self.next_at: float | None = None

@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, Literal
@@ -37,7 +39,7 @@ from app.auth import require, require_any
 from app.config import settings
 from app.db import SessionDep, engine
 from app.models import LeagueMember
-from app.results import FINISH_SUFFIX
+from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
@@ -269,6 +271,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
                 _say(rc, "SIN FREE PASS", "race", hold="freepass")
         elif action[0] == "break":
             lap = rc.stage_break(crossing is not None)
+            _record_stage(server_id, inst, rc)
             if lap is not None:
                 _say(rc, PITS_OPEN, "flag", hold="pits")
                 if lap:
@@ -284,9 +287,60 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, "DRIVE-THROUGH: adelantaste bajo amarilla", "penalty", action[1])
 
 
+_stage_files = threading.Lock()   # the journal of the stages is written by the race thread and filed by the ACSP loop: one at a time
+
+
+def _results_dir(server_id: int) -> Path:
+    return Path(settings.data_dir) / "instances" / str(server_id) / "results"
+
+
+def _record_stage(server_id: int, inst, rc) -> None:
+    """A stage of a NASCAR race ended: the order of the field at that moment goes to disk at once (results/stages.pending), because the points of the stage are read from it when the race is counted.
+    Cars that do not race (director, caster, pace car) and cars that are gone take no place."""
+    with _lock:
+        stage = rc.nascar.stage + 1 if rc.nascar else 0
+        if not (rc.caution and rc.nascar) or stage in rc.stage_log:   # (a repeated break does not rewrite a stage that is over)
+            return
+        out, order = _non_racing_guids(time.time()), []
+        for car in rc.caution.frozen:
+            g = "" if car in rc.caution.gone else (inst.acsp.cars.get(car) or {}).get("driver_guid") or ""   # (a car that left: its slot may be somebody else's now)
+            if g and g not in out and g not in order:
+                order.append(g)
+        first = not rc.stage_log
+        rc.stage_log[stage] = order[:40]
+        data = {"at": time.time(), "stages": [{"stage": n, "order": o} for n, o in sorted(rc.stage_log.items())]}
+    d = _results_dir(server_id)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        with _stage_files:
+            if first:
+                claim_orphan(d)   # (the journal of the race before, if its session end was never heard of, is not lost)
+            tmp = d / (STAGES_PENDING + ".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, d / STAGES_PENDING)
+    except OSError:
+        log.exception("could not write the stage order of server %s", server_id)
+        with _lock:
+            rc.stage_log.pop(stage, None)   # (not saved: the next look at this stage tries again)
+
+
+def claim_stages(server_id: int, filename: str) -> None:
+    """acServer said the session ended and wrote `filename`: if it is a race and a NASCAR journal is waiting, it becomes that result's own (<result>.stages)."""
+    name = re.split(r"[\\/]", str(filename))[-1]
+    d = _results_dir(server_id)
+    if not name.endswith("_RACE.json"):
+        return
+    with _stage_files:
+        if pending_is_unclaimed(d, name):   # (a journal older than another race result is a lost one: not this race's)
+            try:
+                os.replace(d / STAGES_PENDING, d / (name[: -len(".json")] + STAGES_SUFFIX))
+            except OSError:
+                log.exception("could not file the stage order of %s", name)
+
+
 def _mark_finish(server_id: int, laps: int) -> None:
     """The chequered flag fell: acServer goes on counting the laps of a race it does not know is over, so the result file is cut at this moment (app/results.py `_finish_cut`)."""
-    d = Path(settings.data_dir) / "instances" / str(server_id) / "results"
+    d = _results_dir(server_id)
     try:
         d.mkdir(parents=True, exist_ok=True)
         now = time.time()

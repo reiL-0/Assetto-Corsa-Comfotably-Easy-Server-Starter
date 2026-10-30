@@ -427,6 +427,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             if rc and (rc.caution or rc.formation):
                 from app.racecontrol import auto_caution
                 auto_caution(self.server_id, rc, event["car_id"])
+        elif t == "end_session":
+            from app.racecontrol import claim_stages   # the NASCAR stage order of the race that just ended becomes that result's own
+            claim_stages(self.server_id, event["filename"])
         elif t == "new_connection":
             self.field.drop(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event

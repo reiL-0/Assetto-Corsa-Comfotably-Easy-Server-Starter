@@ -260,3 +260,72 @@ def test_counting_a_race_makes_cut_notices_for_a_league_with_rules():
             assert not s.exec(select(Penalty).where(Penalty.server_id == sid)).all()   # a warning, never a penalty by itself
     assert got[0] == [("cuts", "time", 3000)]   # 3 cuts = one full step of 2
     assert got[1] == got[0]   # the second league counts the same file: the warning belongs to the file and is not doubled
+
+
+def test_nascar_scoring_adds_stage_points_to_the_race_points_and_counts_stage_wins():
+    G1, G2, G3, G9 = ("7656119000000000" + n for n in "1239")
+    sid = client.post("/api/v1/servers", json={"name": "NascarServer"}).json()["id"]
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    cars = [("76561190000000001", "Ann"), ("76561190000000002", "Bob"), ("76561190000000003", "Cat"), ("76561190000000009", "Dir")]
+    (d / "2026_10_30_1_00_RACE.json").write_text(json.dumps({"Type": "RACE", "TrackName": "t", "Laps": [], "Result": [
+        {"DriverName": n, "DriverGuid": g, "TotalTime": 600000 + i * 1000} for i, (g, n) in enumerate(cars)]}))
+    # Bob led stage 1, Ann stage 2; the director (9, non-racing) is in the recorded order but takes no place
+    (d / "2026_10_30_1_00_RACE.stages").write_text(json.dumps({"stages": [{"stage": 1, "order": ["76561190000000002", "76561190000000009", "76561190000000001", "76561190000000003"]}, {"stage": 2, "order": ["76561190000000001", "76561190000000002", "76561190000000003"]}]}))
+    cid = client.post("/api/v1/championships", json={"name": "Cup"}).json()["id"]
+    assert client.put(f"/api/v1/championships/{cid}/rulebook", json={"scoring": {"table": [40, 35, 34, 33], "stage_points": [10, 9, 8]}}).status_code == 200
+    assert client.post(f"/api/v1/championships/{cid}/members", json={"guid": "76561190000000009", "name": "Dir", "non_racing": True}).status_code in (200, 201)
+    assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "2026_10_30_1_00_RACE.json"}).status_code == 201
+    st = {s["driver_guid"]: s for s in client.get(f"/api/v1/championships/{cid}/standings").json()}
+    # Ann: P1 40 + stage 1 (second racing car: 9) + stage 2 (first: 10) = 59; Bob: P2 35 + 10 + 9 = 54; Cat: P3 34 + 8 + 8 = 50
+    assert (st["76561190000000001"]["points"], st["76561190000000002"]["points"], st["76561190000000003"]["points"]) == (59, 54, 50)
+    assert (st["76561190000000001"]["stage_points"], st["76561190000000001"]["stage_wins"], st["76561190000000002"]["stage_wins"]) == (19, 1, 1)
+    assert "76561190000000009" not in st, "the director does not score"
+    race = client.get(f"/api/v1/championships/{cid}/races").json()[0]
+    ann = next(r for r in race["classification"] if r["driver_guid"] == "76561190000000001")
+    assert ann["points"] == 40 and ann["stage_points"] == 19 and ann["total_points"] == 59 and [(x["stage"], x["place"]) for x in ann["stages"]] == [(1, 2), (2, 1)]
+    # a league without stage points scores the same file as before
+    cid2 = client.post("/api/v1/championships", json={"name": "Plain"}).json()["id"]
+    client.post(f"/api/v1/championships/{cid2}/events", json={"server_id": sid, "filename": "2026_10_30_1_00_RACE.json"})
+    plain = {s["driver_guid"]: s for s in client.get(f"/api/v1/championships/{cid2}/standings").json()}
+    assert plain["76561190000000001"]["points"] == 25 and plain["76561190000000001"]["stage_points"] == 0
+
+
+def test_the_stage_order_of_a_race_without_its_own_file_comes_from_the_journal_written_before_it(tmp_path):
+    from app.results import STAGES_PENDING, read_stages
+    race = tmp_path / "2026_10_30_2_00_RACE.json"
+    race.write_text("{}")
+    (tmp_path / STAGES_PENDING).write_text(json.dumps({"at": race.stat().st_mtime - 5, "stages": [{"stage": 1, "order": ["1", "2"]}]}))
+    assert read_stages(race) == [{"stage": 1, "order": ["1", "2"]}]
+    later = tmp_path / "2026_10_30_3_00_RACE.json"   # another race written after the first one took the journal: not its own
+    later.write_text("{}")
+    import os
+    os.utime(later, (race.stat().st_mtime + 60, race.stat().st_mtime + 60))
+    assert read_stages(later) == []
+    assert read_stages(tmp_path / "2026_10_30_9_00_RACE.json") == []
+
+
+def test_a_journal_whose_race_never_heard_the_session_end_is_given_to_that_race_before_it_is_overwritten_and_never_to_the_next_one(tmp_path):
+    import os
+    from app.results import STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed, read_stages
+    first = tmp_path / "2026_10_30_2_00_RACE.json"
+    first.write_text("{}")
+    at = first.stat().st_mtime - 5
+    (tmp_path / STAGES_PENDING).write_text(json.dumps({"at": at, "stages": [{"stage": 1, "order": ["1"]}]}))
+    assert pending_is_unclaimed(tmp_path, first.name), "the race that wrote it may claim it"
+    second = tmp_path / "2026_10_30_4_00_RACE.json"   # the next race: the first one's result already exists after the journal
+    second.write_text("{}")
+    os.utime(second, (at + 7200, at + 7200))
+    assert not pending_is_unclaimed(tmp_path, second.name), "a journal older than another race result is not this race's"
+    claim_orphan(tmp_path)   # the next race is about to write its own journal
+    assert not (tmp_path / STAGES_PENDING).exists() and read_stages(first) == [{"stage": 1, "order": ["1"]}]
+    assert (first.with_suffix(STAGES_SUFFIX)).is_file() and read_stages(second) == []
+
+
+def test_a_late_session_end_of_one_race_does_not_take_the_journal_of_the_next_race(tmp_path):
+    import os
+    from app.results import STAGES_PENDING, pending_is_unclaimed
+    a = tmp_path / "2026_10_30_2_00_RACE.json"
+    a.write_text("{}")
+    (tmp_path / STAGES_PENDING).write_text(json.dumps({"at": a.stat().st_mtime + 3600, "stages": []}))   # B's journal, written an hour after A's result
+    assert not pending_is_unclaimed(tmp_path, a.name)

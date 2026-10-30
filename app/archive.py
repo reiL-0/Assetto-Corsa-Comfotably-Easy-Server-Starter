@@ -12,6 +12,7 @@ their own life. The nightly backup still holds the result files for as long as i
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.auth import CurrentUser
 from app.championship import _get, get_open, score
 from app.db import SessionDep
 from app.leaguelock import serialized
+from app.results import STAGES_SUFFIX, read_stages
 from app.rulebook import effective
 from app.models import Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, Notice, Penalty, ResultClose, _now
 from app.servers import result_path
@@ -55,13 +57,14 @@ def _stamp(sess: Session, c: Championship) -> tuple:
     newest = max((sess.exec(select(Penalty.id).where(Penalty.server_id == s, Penalty.filename == f).order_by(Penalty.id.desc())).first() or 0 for s, f in files), default=0)
     count = sum(len(sess.exec(select(Penalty.id).where(Penalty.server_id == s, Penalty.filename == f)).all()) for s, f in files)
     mtimes = tuple(result_path(s, f).stat().st_mtime if result_path(s, f).is_file() else None for s, f in files)
+    stages = tuple(json.dumps(read_stages(result_path(s, f))) if result_path(s, f).is_file() else None for s, f in files)   # (the stage orders feed the points too)
     roster = tuple(sorted(sess.exec(select(LeagueMember.guid).where(LeagueMember.championship_id == c.id, LeagueMember.non_racing)).all()))
-    return tuple(e.id for e in events), newest, count, mtimes, c.name, tuple(effective(c).scoring.table), roster
+    return tuple(e.id for e in events), newest, count, mtimes, c.name, tuple(effective(c).scoring.table), tuple(effective(c).scoring.stage_points), stages, roster
 
 
 def snapshot(sess: Session, c: Championship) -> dict:
     standings, races = score(sess, c)
-    return {"version": VERSION, "name": c.name, "points_system": list(effective(c).scoring.table), "standings": standings, "races": races}
+    return {"version": VERSION, "name": c.name, "points_system": list(effective(c).scoring.table), "stage_points": list(effective(c).scoring.stage_points), "standings": standings, "races": races}
 
 
 class ArchiveIn(BaseModel):
@@ -124,6 +127,7 @@ def archive(championship_id: int, body: ArchiveIn, sess: SessionDep, user: Curre
             continue   # another league has taken it up since: it stays
         try:
             path.unlink(missing_ok=True)
+            path.with_suffix(STAGES_SUFFIX).unlink(missing_ok=True)
             deleted += 1
         except OSError as e:
             log.error("could not delete %s of archived league %s: %s", path, championship_id, e)
