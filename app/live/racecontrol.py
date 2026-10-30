@@ -27,7 +27,7 @@ from collections import deque
 
 from app.live.caution import Caution
 from app.live.incidents import Watch
-from app.live.nascar import CAUTION, Nascar, STAGES_DEFAULT
+from app.live.nascar import BREAK, CAUTION, Nascar, STAGES_DEFAULT
 
 log = logging.getLogger("acmanager.nascar")
 
@@ -236,6 +236,20 @@ class RaceControl:
                 return "warn"
             return None
 
+    def stage_break(self, pending_crossing: bool) -> int | None:
+        """A stage break began under our caution: the pit lane opens (the stops are what the break is for) and the lap on which the green will come is returned (None without a caution of ours; 0 behind a
+        pace car: its laps are not the leader's, the green depends on when it is in the pits). The automatic "to go" comes at the crossing that makes CAUTION_MIN_LAPS laps counted, the green at the next one
+        (caution_lap); `pending_crossing`: the crossing that ended the stage is still to be counted."""
+        with _lock:
+            if not (self.caution and self.nascar):
+                return None
+            self.caution.open_pits()
+            self._bump()
+            if self.pace_car is not None:
+                return 0
+            counted = self.caution_laps + (1 if pending_crossing else 0)
+            return self.nascar.laps + max(CAUTION_MIN_LAPS - counted, 1) + 2
+
     def take_blocked_warning(self) -> bool:
         """True once, at the second restart-leader crossing that found the pace car not in the pits (its hub may not be reporting): the green has to be sent by hand."""
         with _lock:
@@ -280,6 +294,8 @@ class RaceControl:
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
             self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits)
+            if self.nascar and self.nascar.phase == BREAK:
+                self.caution.open_pits()   # (from the first instant: a report cannot be judged between the caution and the notice)
             return [("caution", self.caution.free_pass)]
         if flag not in CAUTION:
             self.caution = None

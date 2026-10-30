@@ -230,6 +230,9 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+PITS_OPEN = "BOXES ABIERTOS: aprovecha para parar"
+
+
 def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | None = None) -> None:
     inst = _live(server_id)
     if not inst:
@@ -253,12 +256,18 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", ttl=90)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
-            _say(rc, "BOXES CERRADOS: solo con permiso del director", "flag", hold="pits")
+            _say(rc, PITS_OPEN if rc.caution and rc.caution.pits_open else "BOXES CERRADOS: solo con permiso del director", "flag", hold="pits")   # (a stage break's "break" action may have come first)
             if action[1] is not None:
                 _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race", hold="freepass")
                 _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1], hold="freepass-car")
             else:
                 _say(rc, "SIN FREE PASS", "race", hold="freepass")
+        elif action[0] == "break":
+            lap = rc.stage_break(crossing is not None)
+            if lap is not None:
+                _say(rc, PITS_OPEN, "flag", hold="pits")
+                if lap:
+                    _say(rc, f"REINICIO: bandera verde en la vuelta {lap}", "race", hold="restart-lap")
         elif action[0] == "no_free_pass":
             rc.drop_hold("freepass-car")
             _say(rc, f"FREE PASS anulado: {_name(inst, action[1])} entró a boxes", "race", hold="freepass")

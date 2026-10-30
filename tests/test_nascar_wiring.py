@@ -646,7 +646,7 @@ def test_a_stopped_car_is_proposed_to_the_director_or_puts_the_yellow_out_by_its
     assert rc.incident_step(fast, client.field, 91.0) == (None, []) and rc.flag == 'green'
     rc.incident_step(stopped, client.field, 95.0)
     prop, actions = rc.incident_step(stopped, client.field, 101.5)
-    assert prop and prop['kind'] == 'stopped' and actions == [] and rc.flag == 'green' and rc.snapshot()['proposal'] == prop, 'only a proposal'
+    assert prop and prop['kind'] in ('stopped', 'mass_stop') and actions == [] and rc.flag == 'green' and rc.snapshot()['proposal'] == prop, 'only a proposal'
     assert _client('steward').post(f'{V}/servers/{sid}/race-control/auto-yellow', json={'enabled': True}).json()['auto_yellow'] is True
     rc.watch.proposal = None
     for a, b in ((3, 4), (4, 5)):
@@ -1103,3 +1103,54 @@ def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the
     client.session = {'session_type': 2, 'laps': 0, 'time_min': 10}; client.winner_done = False; live_rc._states.clear()
     lap(4, 7)
     assert winners() == [], 'only a race has a winner'
+
+
+def _break_notices(rc):
+    return [n['text'] for n in rc.snapshot()['notices']]
+
+
+def test_a_stage_break_opens_the_pits_and_says_the_lap_where_the_green_comes(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
+    state, actions = live_rc.on_lap(sid, 21, 3)   # the leader ends the stage on the line
+    adapter.nascar_actions(sid, state, actions, 3)
+    texts = _break_notices(rc)
+    assert rc.caution.pits_open and 'BOXES ABIERTOS: aprovecha para parar' in texts and 'BOXES CERRADOS: solo con permiso del director' not in texts
+    assert 'REINICIO: bandera verde en la vuelta 26' in texts
+    go_at = None
+    for lap in range(21, 30):   # the automatic "to go" comes where the notice counted on: the green is the crossing after it
+        if lap > 21:
+            live_rc.on_lap(sid, lap, 3)
+        if rc.caution_lap(3, {3: 200.0, 4: 200.0, 5: 200.0}, 1000.0 + lap, {3, 4, 5}) == 'go':
+            go_at = lap
+            break
+    assert go_at == 26 - 2
+    rc.caution.pit_enter(4)
+    assert rc.caution.pit_breakers() == [], 'nobody is judged for entering the pits of a stage break'
+
+
+def test_a_stage_break_that_comes_out_in_mid_lap_counts_the_lap_it_is_in(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 18), c4=(0.48, 18), c5=(0.30, 16))
+    live_rc.on_lap(sid, 18, 3)
+    assert _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'}).status_code == 200   # within the last 10 laps of the stage
+    texts = _break_notices(rc)
+    assert rc.nascar.phase == 'break' and rc.caution.pits_open and 'REINICIO: bandera verde en la vuelta 24' in texts
+    go_at = next(lap for lap in range(19, 30) if (live_rc.on_lap(sid, lap, 3), rc.caution_lap(3, {3: 200.0, 4: 200.0, 5: 200.0}, 1000.0 + lap, {3, 4, 5}))[1] == 'go')
+    assert go_at == 24 - 2
+
+
+def test_a_stage_break_behind_a_pace_car_opens_the_pits_but_does_not_promise_a_lap(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    rc.pace_car = 9
+    _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
+    state, actions = live_rc.on_lap(sid, 21, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    texts = _break_notices(rc)
+    assert rc.caution.pits_open and 'BOXES ABIERTOS: aprovecha para parar' in texts and not any(t.startswith('REINICIO: bandera verde') for t in texts)

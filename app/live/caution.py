@@ -10,6 +10,7 @@ Cup's in the parts that matter here:
   * the WAVE-AROUND: the lapped cars (but the free pass one) that are physically between the leader and the pace car, which can pass the pace car and unlap themselves.
   * the PITS ARE CLOSED while it lasts (this league's rule, not the rulebook's): a car that enters the pit lane is a violator, unless it was already there when the yellow came out, it is involved in a contact
     (damaged), it has a drive-through to serve (the pit lane is how it is served) or the director let it in (`pit_allow`). One violation per car, on the tail of the restart like a passer.
+    The STAGE BREAK is the exception: its pits are open to everybody (`open_pits`), so the cars can make their stops. A car that joins the server under the yellow starts in its box: never judged for it.
   * the RESTART ORDER (4.14.5): lead lap cars that did not pit, lead lap cars that pitted, lapped cars, the free pass car, involved cars and wave-around cars, penalty cars.
 """
 
@@ -39,6 +40,7 @@ class Caution:
         self.pit_ok: set[int] = set(pitted) | set(involved)   # cars that may be in the pit lane: there already when the yellow came out, involved (damaged), or let in by the director
         self.pit_entered: set[int] = set()                    # cars that reported the pit lane without being in pit_ok, not judged yet
         self.pit_broken: set[int] = set()                     # cars already judged for it (once per caution)
+        self.pits_open = False                                # the stage break: the pit lane is open to everybody (that is what the break is for)
         self._pending: dict[tuple[int, int], float] = {}   # (passer, the car it passed) -> when the passer becomes a violator unless the passed car reached the pit lane first
         self.waved: list[int] = []        # the wave-around cars once the restart has been called ("to go")
         self.restart: list[int] = []      # the restart order once it has been called
@@ -133,9 +135,13 @@ class Caution:
             self.leader = self.frozen[0] if self.frozen else None
 
     def pit_enter(self, car: int) -> None:
-        """The car's hub says it is in the pit lane."""
-        if car not in self.pit_ok and car not in self.pit_broken:
+        """The car's hub says it is in the pit lane. Not judged: a car that joined after the yellow (it appears in its box: it is not in `p0`), nor anybody while the pits are open."""
+        if car in self.p0 and not self.pits_open and car not in self.pit_ok and car not in self.pit_broken:
             self.pit_entered.add(car)
+
+    def open_pits(self) -> None:
+        self.pits_open = True
+        self.pit_entered.clear()
 
     def pit_allow(self, car: int, allowed: bool) -> None:
         """The director lets a car into the pit lane (or takes the permission back; a car already judged stays judged)."""

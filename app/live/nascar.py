@@ -155,6 +155,7 @@ class Nascar:
         if self.flag not in CAUTION:
             out.append(("flag", "yellow"))   # the stage-break caution; the flag it brings back is ignored while the break lasts
             self.flag = "yellow"
+        out.append(("break",))   # (the caller opens the pits and says on which lap the green comes)
         return out
 
     def _chequered(self, text: str) -> list[tuple]:

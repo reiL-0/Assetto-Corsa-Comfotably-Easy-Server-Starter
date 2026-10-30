@@ -155,3 +155,15 @@ def test_closed_pits_cost_a_drive_through_unless_there_before_involved_serving_o
     assert c.pit_breakers() == [] and 1 in c.violators, "once per caution; it restarts at the tail"
     c.pit_allow(4, False); c.pit_enter(4)
     assert c.pit_breakers() == [4], "no permission, nothing to serve: judged"
+
+
+def test_a_car_that_joined_after_the_yellow_and_anybody_in_an_open_pit_lane_are_not_judged_for_the_pits():
+    c = Caution(field(5.20, 5.10), 0.0)
+    c.pit_enter(9)   # joined the server under the yellow: it appears in its box
+    c.pit_enter(1)
+    assert c.pit_breakers() == [1], "a car of the field that enters the closed pit lane is still a violator"
+    c = Caution(field(5.20, 5.10), 0.0)
+    c.pit_enter(1)
+    c.open_pits()   # (the stage break opens the pits while a report is waiting: nobody is judged for it)
+    c.pit_enter(2)
+    assert c.pit_breakers() == []

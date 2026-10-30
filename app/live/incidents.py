@@ -2,7 +2,7 @@
 
 Plain state, no I/O (`ACSPClient` feeds the contacts, the monitor calls `step`). Three things call for a caution:
   * a car STOPPED on the track: it was moving (so it is racing, not a spectator or a car in the garage), it has been under STOP_KMH for STOP_S seconds and it is not in the pit lane.
-  * several cars BRAKED to a near stop together (a wreck that stops cars): DROP_CARS cars, each fast (FAST_KMH) in the last DROP_WITHIN s and now under DROP_KMH for DROP_S s, outside the pit lane.
+  * several cars BRAKED to a near stop together (a wreck that stops cars): DROP_CARS cars, each fast (FAST_KMH) in the last DROP_WITHIN s and now under DROP_KMH for DROP_S s, outside the pit lane. ONE car is enough if it stays that way SPIN_S s (it spun out, nobody else needed) or braked like that within SPIN_WITHIN s of a contact.
   * a LIMPING car: it keeps moving but under SLOW_FRAC of the pace of the others (their median, at least SLOW_REF_KMH) for SLOW_LIMP_S seconds, outside the pit lane (a damaged car).
 A contact is NEVER a reason for a caution by itself (in NASCAR cars touch all the time: a pile-up is cars that stop or limp). The cars in a contact are `involved`: they are the ones the
 free pass skips and that restart at the tail (app/live/caution.py). The speed unit of the contact events is not verified against a real server (km/h assumed, like app/stewards/detectors.py),
@@ -16,6 +16,7 @@ STOP_KMH, STOP_S = 5.0, 6.0
 MOVING_KMH = 30.0    # a car that has been this fast is racing: the one that never was (a spectator, a car in the garage) is not a stopped car
 SLOW_FRAC, SLOW_REF_KMH, SLOW_LIMP_S, SLOW_MIN_CARS = 0.4, 100.0, 12.0, 3   # a limping car: under 40 % of the median of the others (which must be doing 100+, at least 3 of them) for 12 s
 FAST_KMH, DROP_KMH, DROP_S, DROP_WITHIN, DROP_CARS = 80.0, 20.0, 2.5, 8.0, 2   # several cars braked to a near stop together
+SPIN_S, SPIN_WITHIN = 4.0, 10.0   # one car that braked to a near stop: it spun out after SPIN_S s, or after DROP_S s if it was in a contact in the last SPIN_WITHIN s (a contact is reported 1.5-2.5 s late)
 PROPOSAL_FOR = 60.0  # s a proposal stays up if nobody acts on it
 
 
@@ -91,9 +92,10 @@ class Watch:
                 self._limp_flagged.add(c)
                 return self._propose(now, "limping", [c], "Coche lento en pista")
         down = [c for c, t in self._slow_since.items() if now - t >= DROP_S and c not in self._drop_flagged]
-        if len(down) >= DROP_CARS:
+        alone = [c for c in down if now - self._slow_since[c] >= SPIN_S or now - self.involved.get(c, -1e9) <= SPIN_WITHIN]
+        if len(down) >= DROP_CARS or alone:
             self._drop_flagged.update(down)
-            return self._propose(now, "mass_stop", sorted(down), f"Varios coches frenados en pista: {len(down)}")
+            return self._propose(now, "mass_stop", sorted(down), f"Varios coches frenados en pista: {len(down)}" if len(down) > 1 else "Coche trompeado en pista")
         for c, since in self._still.items():
             if now - since >= STOP_S and c not in self._flagged:
                 self._flagged.add(c)

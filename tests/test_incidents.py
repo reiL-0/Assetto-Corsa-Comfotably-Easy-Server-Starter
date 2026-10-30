@@ -28,14 +28,14 @@ def test_slow_touches_and_old_contacts_do_not_count():
 
 def test_a_car_that_was_racing_and_stops_on_the_track_is_proposed_once_until_it_moves_again():
     w = Watch()
-    moving(w, [7], 0.0)
+    moving(w, [7], -20.0)   # (it slowed down long ago: a car that braked from speed just now is a spin, see the last test)
     assert w.step(1.0, {7: 0.0}, set(), True) is None, "just stopped"
     assert w.step(1.0 + STOP_S - 0.5, {7: 0.0}, set(), True) is None
     p = w.step(1.0 + STOP_S + 0.1, {7: 0.0}, set(), True)
     assert p and p["kind"] == "stopped" and p["cars"] == [7]
     assert w.step(30.0, {7: 0.0}, set(), True) is None, "once"
     moving(w, [7], 40.0)
-    assert w.step(41.0, {7: 0.0}, set(), True) is None and w.step(48.0, {7: 0.0}, set(), True)["kind"] == "stopped", "it moved and stopped again"
+    assert w.step(41.0, {7: 0.0}, set(), True) is None and w.step(48.0, {7: 0.0}, set(), True)["kind"] in ("stopped", "mass_stop"), "it moved and stopped again"
 
 
 def test_a_car_in_the_pits_one_that_never_moved_and_a_caution_already_out_are_not_proposed():
@@ -130,9 +130,9 @@ def test_two_cars_braking_from_speed_to_a_near_stop_together_are_a_mass_stop_but
     w = Watch()
     w.step(0.0, {1: 200.0, 2: 200.0, 3: 200.0}, set(), True)
     w.step(1.0, {1: 10.0, 2: 200.0, 3: 200.0}, set(), True)
-    assert w.step(1.0 + DROP_S + 0.1, {1: 10.0, 2: 200.0, 3: 200.0}, set(), True) is None, "one car slowing is a stopped/limping car at most"
-    w.step(5.0, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)   # (car 2 was fast 5 s ago? no: 200 at t=1.0 -> it is within the window)
-    p = w.step(5.0 + DROP_S + 0.1, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)
+    assert w.step(1.0 + DROP_S + 0.1, {1: 10.0, 2: 200.0, 3: 200.0}, set(), True) is None, "one car slowing is not a mass stop (alone it is a spin only after SPIN_S)"
+    w.step(2.0, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)   # (car 2 was fast 1 s ago: it is within the window)
+    p = w.step(2.0 + DROP_S + 0.1, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True)
     assert p and p["kind"] == "mass_stop" and p["cars"] == [1, 2]
     assert w.step(20.0, {1: 10.0, 2: 15.0, 3: 200.0}, set(), True) is None, "once"
     w = Watch()
@@ -156,3 +156,24 @@ def test_cars_that_braked_before_the_race_went_green_are_not_a_mass_stop():
     w.step(0.0, {1: 200.0, 2: 200.0}, set(), False)   # (fast, but the race is not on)
     w.step(1.0, {1: 10.0, 2: 10.0}, set(), True)
     assert w.step(10.0, {1: 10.0, 2: 10.0}, set(), True) is None
+
+
+def test_one_car_that_braked_to_a_near_stop_is_a_spin_after_a_few_seconds_or_sooner_after_a_contact():
+    from app.live.incidents import DROP_S, SPIN_S
+    pack = {2: 200.0, 3: 200.0}
+    w = Watch()   # alone, no contact: a spin only when it lasts
+    w.step(0.0, {1: 200.0, **pack}, set(), True)
+    w.step(1.0, {1: 10.0, **pack}, set(), True)
+    assert w.step(1.0 + DROP_S + 0.1, {1: 10.0, **pack}, set(), True) is None
+    p = w.step(1.0 + SPIN_S + 0.1, {1: 10.0, **pack}, set(), True)
+    assert p and p["cars"] == [1] and "trompeado" in p["text"]
+    w = Watch()   # after a contact the short wait is enough
+    w.step(0.0, {1: 200.0, **pack}, set(), True)
+    w.on_contact(1.0, 1, 2, 250.0)
+    w.step(3.0, {1: 10.0, **pack}, set(), True)
+    p = w.step(3.0 + DROP_S + 0.1, {1: 10.0, **pack}, set(), True)
+    assert p and p["cars"] == [1]
+    w = Watch()   # in the pit lane it is a pit stop, and a car that never was fast is not a spin
+    w.step(0.0, {1: 200.0, **pack}, set(), True)
+    w.step(1.0, {1: 10.0, **pack}, {1}, True)
+    assert w.step(20.0, {1: 10.0, **pack}, {1}, True) is None
