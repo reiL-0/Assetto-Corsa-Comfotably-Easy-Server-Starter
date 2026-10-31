@@ -96,3 +96,22 @@ def test_an_older_race_keeps_its_cut_when_a_later_race_has_its_own_flag(tmp_path
     old = p.stat().st_mtime
     (tmp_path / "2.finish").write_text(json.dumps({"at": old + 3600, "laps": 99}))   # the next race's flag, written long after this result
     assert parse_result_file(p)["classification"][0]["driver_name"] == "Ann"
+
+
+def test_a_driver_in_two_slots_is_one_row_with_the_best_of_both(tmp_path):   # he reconnected: acServer lists the old empty slot and the new one
+    def parse(rows):
+        p = tmp_path / "race.json"
+        p.write_text(json.dumps({**RACE_JSON, "Result": rows}))
+        return parse_result_file(p)["classification"]
+    empty = {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_a", "BestLap": 999999999, "TotalTime": 0}
+    bob = {"DriverName": "Bob", "DriverGuid": "2", "CarModel": "car_b", "BestLap": 91000, "TotalTime": 605000}
+    alice = {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_c", "BestLap": 90000, "TotalTime": 600000}
+    for rows in ([empty, bob, alice], [alice, bob, empty], [bob, empty, alice]):   # wherever the empty one is, Alice takes the place of the row that drove
+        cls = parse(rows)
+        assert [e["driver_name"] for e in cls] == ["Alice", "Bob"] or [e["driver_name"] for e in cls] == ["Bob", "Alice"]
+        assert [e["position"] for e in cls] == [1, 2]
+        a = next(e for e in cls if e["driver_name"] == "Alice")
+        assert a["car_model"] == "car_c" and a["best_lap_ms"] == 90000 and a["total_time_ms"] == 600000
+    assert [e["driver_name"] for e in parse([empty, bob, alice])] == ["Bob", "Alice"], "the empty slot does not give him its place"
+    both = parse([{**alice, "BestLap": 92000, "TotalTime": 100}, bob, alice])   # he drove in two cars: one row, the times add up
+    assert len(both) == 2 and both[0]["total_time_ms"] == 600100 and both[0]["best_lap_ms"] == 90000
