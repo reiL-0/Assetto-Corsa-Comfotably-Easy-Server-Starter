@@ -98,7 +98,7 @@ def test_an_older_race_keeps_its_cut_when_a_later_race_has_its_own_flag(tmp_path
     assert parse_result_file(p)["classification"][0]["driver_name"] == "Ann"
 
 
-def test_a_driver_in_two_slots_is_one_row_with_the_best_of_both(tmp_path):   # he reconnected: acServer lists the old empty slot and the new one
+def test_a_driver_in_two_slots_is_one_row_the_one_that_drove_kept_as_it_is(tmp_path):   # he reconnected: acServer lists the old empty slot and the new one
     def parse(rows):
         p = tmp_path / "race.json"
         p.write_text(json.dumps({**RACE_JSON, "Result": rows}))
@@ -106,12 +106,12 @@ def test_a_driver_in_two_slots_is_one_row_with_the_best_of_both(tmp_path):   # h
     empty = {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_a", "BestLap": 999999999, "TotalTime": 0}
     bob = {"DriverName": "Bob", "DriverGuid": "2", "CarModel": "car_b", "BestLap": 91000, "TotalTime": 605000}
     alice = {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_c", "BestLap": 90000, "TotalTime": 600000}
-    for rows in ([empty, bob, alice], [alice, bob, empty], [bob, empty, alice]):   # wherever the empty one is, Alice takes the place of the row that drove
+    for rows in ([empty, bob, alice], [alice, bob, empty], [bob, empty, alice]):   # wherever the empty one is, one row of Alice, the one that drove, untouched
         cls = parse(rows)
-        assert [e["driver_name"] for e in cls] == ["Alice", "Bob"] or [e["driver_name"] for e in cls] == ["Bob", "Alice"]
-        assert [e["position"] for e in cls] == [1, 2]
+        assert [e["position"] for e in cls] == [1, 2] and sorted(e["driver_name"] for e in cls) == ["Alice", "Bob"]
         a = next(e for e in cls if e["driver_name"] == "Alice")
-        assert a["car_model"] == "car_c" and a["best_lap_ms"] == 90000 and a["total_time_ms"] == 600000
+        assert (a["car_model"], a["best_lap_ms"], a["total_time_ms"]) == ("car_c", 90000, 600000)
     assert [e["driver_name"] for e in parse([empty, bob, alice])] == ["Bob", "Alice"], "the empty slot does not give him its place"
-    both = parse([{**alice, "BestLap": 92000, "TotalTime": 100}, bob, alice])   # he drove in two cars: one row, the times add up
-    assert len(both) == 2 and both[0]["total_time_ms"] == 600100 and both[0]["best_lap_ms"] == 90000
+    other = {**alice, "CarModel": "car_d", "BestLap": 92000, "TotalTime": 100}   # two rows with a time: the first stays, nothing is added up or mixed
+    kept = parse([other, bob, alice])
+    assert len(kept) == 2 and (kept[0]["car_model"], kept[0]["best_lap_ms"], kept[0]["total_time_ms"]) == ("car_d", 92000, 100)

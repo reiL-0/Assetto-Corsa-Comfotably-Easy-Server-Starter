@@ -140,7 +140,7 @@ def parse_result_file(path: Path) -> dict:
             }
         )
 
-    one: dict[str, dict] = {}   # a driver is classified once (everything downstream goes by SteamID): a second slot of his is folded into the first
+    one: dict[str, dict] = {}   # a driver is classified once (everything downstream goes by SteamID): the row that drove is kept as it is, the other one (the empty slot he left) is dropped
     merged = []
     for e in classification:
         first = one.get(e["driver_guid"]) if e["driver_guid"] else None
@@ -148,17 +148,10 @@ def parse_result_file(path: Path) -> dict:
             merged.append(e)
             if e["driver_guid"]:
                 one[e["driver_guid"]] = e
-            continue
-        e["best_lap_ms"] = min((x for x in (first["best_lap_ms"], e["best_lap_ms"]) if x), default=None)
-        if not first["total_time_ms"]:   # the first slot was an empty one he left: the row that drove takes its place in the order
+        elif not first["total_time_ms"] and e["total_time_ms"]:   # the first was the empty slot: this one drove and takes its place in the order
             merged.remove(first)
             merged.append(e)
             one[e["driver_guid"]] = e
-        else:   # he drove in both: the times add up, as when the finish cut recomputes them from his laps
-            first["best_lap_ms"] = e["best_lap_ms"]
-            first["total_time_ms"] += e["total_time_ms"] or 0
-            if (e["total_time_ms"] or 0) > first["total_time_ms"] / 2:
-                first["car_model"] = e["car_model"]
     for i, e in enumerate(merged):
         e["position"] = i + 1
     classification = merged
