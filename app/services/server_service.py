@@ -137,6 +137,7 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
         )
     except RuntimeError as e:
         raise ServerError(409, str(e)) from e
+    inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
     inst.set_weather_plan(s.weather_plan, s.config)
     timeline.start_resume(server_id, planned, planned_at)   # if the session clock ran while the server was off, move it to where the clock is
     return {"running": inst.running, "pid": inst.pid}
@@ -215,6 +216,7 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart): the clock starts over with the next start
     s.config = cfg
     s.welcome = body.welcome.strip()
+    old_pace = (s.session or {}).get("pace_steam_id")
     s.session = body.model_dump(exclude={"admin_password", "restart"})
     if body.entries:
         s.entry_list = [
@@ -236,6 +238,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     inst = supervisor.get(server_id)
     if inst:
         inst.nascar_config = (s.session or {}).get("nascar")
+        if body.pace_steam_id != old_pace:   # the same one again must not undo what the director did since
+            inst.pace_steam_id = body.pace_steam_id
     result = ApplyResult()
     if body.restart:
         try:
@@ -270,6 +274,7 @@ async def adopt_running(sess: Session) -> int:
             nascar_config=(s.session or {}).get("nascar"),
         )
         if inst:
+            inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
             inst.set_weather_plan(s.weather_plan, s.config)
         n += inst is not None
     return n

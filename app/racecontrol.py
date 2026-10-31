@@ -42,7 +42,7 @@ from app.models import LeagueMember
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, TOL_DEFAULT, TOL_MAX, _lock, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -107,7 +107,11 @@ def slot_of(cars: dict, steam_id: str) -> int | None:
 def pace_car_check() -> None:
     """The pace car is a driver: its slot follows him when he connects or reconnects, and it is empty while he is away (he stays named, so he is the pace car again when he comes back)."""
     for inst in supervisor.live():
-        rc = state_of(inst.server_id, True, inst.acsp.session)
+        want = getattr(inst, "pace_steam_id", None)   # the pace car the event / preset names: put once, then the director's choices stand
+        rc = state_of(inst.server_id, True, inst.acsp.session, create=bool(want))
+        if rc and want:
+            inst.pace_steam_id = None
+            rc.set_pace_car(slot_of(inst.acsp.cars, want), PACE_CAR_KMH, want)
         if rc and rc.pace_guid:
             rc.follow_pace_driver(slot_of(inst.acsp.cars, rc.pace_guid))
 
@@ -441,6 +445,7 @@ def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
         steam_id = car.get("driver_guid") or ""
         if not re.fullmatch(r"[0-9]{17}", steam_id):
             raise HTTPException(409, "that car has no SteamID")
+    inst.pace_steam_id = None   # the director chose: what the event named no longer applies
     try:
         if steam_id is None:
             rc.set_pace_car(None)

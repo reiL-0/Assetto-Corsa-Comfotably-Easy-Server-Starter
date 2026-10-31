@@ -1214,3 +1214,36 @@ def test_a_stage_already_recorded_is_not_rewritten_and_a_car_that_left_takes_no_
     adapter._record_stage(sid, inst, rc)   # the break action again: the stage is over, nothing is rewritten
     d = Path(settings.data_dir) / 'instances' / str(sid) / 'results'
     assert json.loads((d / 'stages.pending').read_text())['stages'][0]['order'] == ['76561190000000003', '76561190000000004', '76561190000000005']
+
+
+def test_the_pace_car_an_event_names_is_put_once_and_the_director_changes_it_after(live, monkeypatch):
+    sid, client, _ = live
+    inst = SimpleNamespace(server_id=sid, acsp=client, pace_steam_id='76561190000000009')
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [inst])
+    client.cars[6] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
+    adapter.pace_car_check()
+    rc = live_rc.state_of(sid, True, client.session)
+    assert rc.pace_car == 6 and rc.pace_guid == '76561190000000009' and inst.pace_steam_id is None, 'named by the event, in his slot'
+    rc.set_pace_car(None)
+    adapter.pace_car_check()
+    assert rc.pace_car is None and rc.pace_guid == '', 'once only: the director removing him stands'
+    for bad in ('1234', 'x' * 17, '７６５６１１９００００００００９'):
+        with pytest.raises(ValidationError):
+            SessionIn(**{**SESSION, 'pace_steam_id': bad})
+    assert SessionIn(**{**SESSION, 'pace_steam_id': '76561190000000009'}).pace_steam_id == '76561190000000009' and SessionIn(**SESSION).pace_steam_id is None
+
+
+def test_applying_the_same_pace_car_again_does_not_undo_the_director(session_events):
+    sid, _, _ = session_events
+    inst = adapter.supervisor._instances[sid]
+
+    def apply(pace):
+        with Session(engine) as sess:
+            asyncio.run(server_service.apply(sess, sess.get(Server, sid), SessionIn(**{**SESSION, 'pace_steam_id': pace})))
+    apply('76561190000000009')
+    assert inst.pace_steam_id == '76561190000000009', 'a new pace car is armed'
+    inst.pace_steam_id = None   # pace_car_check named him, or the director chose
+    apply('76561190000000009')
+    assert inst.pace_steam_id is None, 'the same one again is not armed again'
+    apply('76561190000000010')
+    assert inst.pace_steam_id == '76561190000000010', 'a different one is'

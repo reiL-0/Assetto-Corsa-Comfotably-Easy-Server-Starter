@@ -65,6 +65,7 @@ class Instance:
                  nascar_config: dict | None = None) -> None:
         self.server_id = server_id
         self.nascar_config = nascar_config  # snapshot of Server.session.nascar; replaced on apply, read by ACSP without I/O
+        self.pace_steam_id: str | None = None   # Server.session.pace_steam_id until pace_car_check names him (then None); set on start / apply / adopt
         self.cwd = cwd
         self.proc = proc  # only for a process this manager spawned; an adopted one is known by its pid alone
         self.pid = proc.pid if proc else pid
