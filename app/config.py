@@ -1,6 +1,9 @@
 import shlex
 from pathlib import Path
 
+import re
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,20 +17,32 @@ class Settings(BaseSettings):
     csp_hub: bool = True
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
     csp_hub_version: str = "13"
-    # Probe of the in-game race-control plugin (static/csp/opr_rc_probe.lua): sent as one more default script, only to the servers listed in ACM_CSP_PROBE_SERVERS ("2" or "2,3"; empty = nobody).
+    # The three lists below take a selector (app/csp.py `server_listed`): `*` = every server, the ones made later too; `2` or `2,3` = those; empty = nobody; `!2` takes one out (`*,!2`).
+    # Probe of the in-game race-control plugin (static/csp/opr_rc_probe.lua): sent as one more default script, only to the servers listed in ACM_CSP_PROBE_SERVERS (temporary: empty = nobody).
     csp_probe_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua"
     csp_probe_servers: str = ""
-    # The lap trainer (static/csp/opr_trainer.lua: braking-point bar, live delta, corner summaries, practice and qualifying only): same rule, only the servers in ACM_CSP_TRAINER_SERVERS.
+    # The lap trainer (static/csp/opr_trainer.lua: braking-point bar, live delta, corner summaries, practice and qualifying only; it also SENDS the driver's telemetry in every session and asks for the
+    # token with OPRHELLO): every server by default, ACM_CSP_TRAINER_SERVERS=`*,!3` to keep one out, empty to switch it off everywhere.
     # `csp_trainer_version` goes in the URL like the hub's: raise it whenever the script changes.
     csp_trainer_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua"
-    csp_trainer_version: str = "11"
-    csp_trainer_servers: str = ""
-    # Automatic telemetry token (app/live/acsp.py `_claim_issue`): only the servers in ACM_CSP_CLAIM_SERVERS answer a driver's "OPRHELLO" chat with a private one-use code.
-    # Empty = nobody (it stays off until the private-chat probe has been checked with two clients). The website's issue endpoint and the secret it shares with the manager
+    csp_trainer_version: str = "12"   # 12: 5 frames a second instead of 10 (the ingest of the site is one process)
+    csp_trainer_servers: str = "*"
+    # Automatic telemetry token (app/live/acsp.py `_claim_issue`): the servers in ACM_CSP_CLAIM_SERVERS (every server by default, the ones made later too) answer a driver's "OPRHELLO" chat with a private
+    # one-use code. Empty = nobody. It rests on the ACSP chat message reaching only the car it is addressed to (checked with the probe on server 2). The website's issue endpoint and the secret it shares with the manager
     # (the website's OPR_CLAIM_SECRET): ACM_CLAIM_URL, ACM_CLAIM_SECRET (empty secret = off).
-    csp_claim_servers: str = ""
+    csp_claim_servers: str = "*"
     claim_url: str = "http://127.0.0.1:5100/api/telemetry/claim/issue"
     claim_secret: str = ""
+
+    @field_validator("csp_probe_servers", "csp_trainer_servers", "csp_claim_servers")
+    @classmethod
+    def _selector(cls, v: str) -> str:
+        """These take `*`, ids and `!id`, comma separated (app/csp.py `server_listed`). Anything else (`all`, `true`, `1;2`, `*,!*`) would switch things off or on without a word, so the manager
+        refuses to start with it: the deploy then goes back to what was running."""
+        for item in (x.strip() for x in v.split(",")):
+            if item and not re.fullmatch(r"\*|!?\d+", item):
+                raise ValueError(f"{item!r} is not a server selector: use *, a server id, or !id to leave one out (for example `*,!3`)")
+        return v
 
     host: str = "127.0.0.1"
     port: int = 8080

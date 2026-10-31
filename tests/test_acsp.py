@@ -197,3 +197,26 @@ def test_the_automatic_token_code_goes_to_the_car_that_said_hello_and_only_if_th
         await asyncio.gather(*list(client._claim_tasks))
     asyncio.run(swapped())
     assert len(sent) == 2   # nothing for the new occupant
+
+
+def test_the_claim_answers_on_every_server_by_default_and_the_selector_can_stop_one(monkeypatch):
+    import asyncio
+    from app.config import settings
+    posted, sent = [], []
+    monkeypatch.setattr(acsp, "_claim_post", lambda guid, code: posted.append((guid, code)) or True)
+    monkeypatch.setattr(settings, "claim_secret", "s3cret")
+
+    def hello(server_id):
+        async def go():
+            client = acsp.ACSPClient(server_id)
+            client.send = sent.append
+            client.cars[3] = {"car_id": 3, "driver_guid": "76561198000000001"}
+            client.datagram_received(bytes([acsp.CHAT, 3]) + acsp._write_string("\t\t\t\t$OPRHELLO"), ("127.0.0.1", 0))
+            await asyncio.gather(*list(client._claim_tasks))
+        asyncio.run(go())
+    for sid in (1, 2, 3, 77):   # the servers of today and one made later: no setting names them
+        n = len(posted); hello(sid); assert len(posted) == n + 1, sid
+    monkeypatch.setattr(settings, "csp_claim_servers", "*,!3")
+    n = len(posted); hello(3); hello(77); assert len(posted) == n + 1   # the brake stops server 3 only
+    monkeypatch.setattr(settings, "csp_claim_servers", "")
+    n = len(posted); hello(1); assert len(posted) == n                 # empty = nobody

@@ -471,7 +471,8 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def _claim_probe_on(self) -> bool:
         from app.config import settings   # (late, like the others here)
-        return str(self.server_id) in {x.strip() for x in settings.csp_probe_servers.split(",")}
+        from app.csp import server_listed
+        return server_listed(self.server_id, settings.csp_probe_servers)
 
     def _claim_probe_greet(self, car_id: int) -> None:
         """TEMPORARY, only on the servers of ACM_CSP_PROBE_SERVERS: answers three questions about the automatic telemetry token before it is built (the token would travel
@@ -486,11 +487,12 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def _claim_issue(self, car_id: int) -> None:
         """Automatic telemetry token, step 2 (the website's app/telemetry_claim.py explains the whole flow). A driver's script said OPRHELLO in the chat; `car_id` is the number the
-        acServer stamped on it, so `self.cars[car_id]["driver_guid"]` is who really is in that car, whatever the script claims. Only on servers of ACM_CSP_CLAIM_SERVERS, at most one
+        acServer stamped on it, so `self.cars[car_id]["driver_guid"]` is who really is in that car, whatever the script claims. On every server unless ACM_CSP_CLAIM_SERVERS says otherwise (csp.server_listed), at most one
         answer per car every CLAIM_PAUSE s. The website is told {guid, code} first; only when it accepted is the code sent to THAT car alone, and only if the same Steam ID
         still sits in the car (a slot that changed hands meanwhile gets nothing). The code is never logged."""
         from app.config import settings   # (late, like the others here)
-        if str(self.server_id) not in {x.strip() for x in settings.csp_claim_servers.split(",")} or not settings.claim_secret:
+        from app.csp import server_listed
+        if not server_listed(self.server_id, settings.csp_claim_servers) or not settings.claim_secret:
             return
         guid, now = (self.cars.get(car_id) or {}).get("driver_guid"), time.monotonic()
         if not guid or now - self._claim_last.get(car_id, float("-inf")) < CLAIM_PAUSE:

@@ -153,7 +153,7 @@ def test_every_server_sends_the_hub_and_keeps_its_own_options(monkeypatch):
     mine = '[SCRIPT_100]\nSCRIPT = "mine.lua"\n[EXTRA_RULES]\nA = 1'
     both = csp.extra_for(7, mine)
     assert both.startswith(mine) and "[SCRIPT_101]" in both and both.count("opr_hub.lua") == 1   # the admin's script is not replaced
-    assert csp.decode(csp.welcome_with_extra("hola", both)) .strip().endswith("SERVER = 7")
+    assert "SERVER = 7" in csp.decode(csp.welcome_with_extra("hola", both))
     monkeypatch.setattr(settings, "csp_hub", False)   # ACM_CSP_HUB=false: the kill switch
     assert csp.extra_for(7, mine) == mine
 
@@ -293,6 +293,7 @@ def test_notices_expire_are_capped_and_never_carry_quotes():
 
 
 def test_the_probe_goes_only_to_the_servers_named_in_the_setting(monkeypatch):
+    monkeypatch.setattr(settings, "csp_trainer_servers", "")   # (the trainer is on everywhere by default: this one counts the probe's scripts alone)
     assert "opr_rc_probe" not in csp.extra_for(2, "")   # off by default
     monkeypatch.setattr(settings, "csp_probe_servers", "2, 3")
     on = csp.extra_for(2, "")
@@ -301,8 +302,9 @@ def test_the_probe_goes_only_to_the_servers_named_in_the_setting(monkeypatch):
     assert csp.extra_for(3, '[SCRIPT_100]\nSCRIPT = "mine.lua"').count("[SCRIPT_") == 3   # the admin's script, the hub (101) and the probe (102) all stay
 
 
-def test_the_trainer_goes_only_to_the_servers_named_in_its_setting(monkeypatch):
-    assert "opr_trainer" not in csp.extra_for(2, "")   # off by default
+def test_the_trainer_goes_only_to_the_servers_named_when_the_setting_is_an_explicit_list(monkeypatch):
+    monkeypatch.setattr(settings, "csp_trainer_servers", "")
+    assert "opr_trainer" not in csp.extra_for(2, "")   # empty = nobody: the emergency stop
     monkeypatch.setattr(settings, "csp_trainer_servers", "2")
     on = csp.extra_for(2, "")
     assert on.count("opr_hub.lua") == 1 and '[SCRIPT_101]\nSCRIPT = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua?v=' in on
@@ -310,3 +312,36 @@ def test_the_trainer_goes_only_to_the_servers_named_in_its_setting(monkeypatch):
     monkeypatch.setattr(settings, "csp_probe_servers", "2")
     both = csp.extra_for(2, "")
     assert "[SCRIPT_101]\nSCRIPT = \"https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua\"" in both and "[SCRIPT_102]" in both and both.index("opr_rc_probe") < both.index("opr_trainer")
+
+
+def test_the_server_selector_means_every_server_unless_it_is_told_otherwise():
+    on = csp.server_listed
+    assert on(7, "*") and on(1, " * ") and on(4242, "*")
+    assert not on(7, "") and not on(7, "  ")                        # empty = nobody
+    assert on(2, "2") and not on(3, "2") and on(3, "2, 3")          # a list of ids
+    assert not on(12, "1,2") and not on(1, "12")                    # ids, never substrings
+    assert on(1, "*,!2") and not on(2, "*,!2") and on(3, "*, !2")   # every server but one: the brake for a single server
+    assert not on(2, "!2") and not on(1, "!2")                      # an exclusion alone turns nothing on
+    assert not on(2, "*,!2,2")                                      # the brake wins over a listing
+
+
+def test_a_selector_that_is_not_one_is_refused_at_start_instead_of_switching_things_off_quietly():
+    import pytest
+    from app.config import Settings
+    for ok in ("*", "", "  ", "2", "2, 3", "*,!3", "*, !3 ,", ",1"):   # what is allowed, with the blanks and the stray comma people leave
+        assert Settings(csp_claim_servers=ok, csp_trainer_servers=ok, csp_probe_servers=ok)
+    for bad in ("all", "true", "1;2", "*,!*", "*,!", "!", "2-3", "a", "**", "1 2", "*,!x"):
+        for field in ("csp_claim_servers", "csp_trainer_servers", "csp_probe_servers"):
+            with pytest.raises(ValueError):
+                Settings(**{field: bad})
+
+
+def test_every_server_gets_the_trainer_by_default_and_the_selector_can_stop_one(monkeypatch):
+    for sid in (1, 2, 3, 7, 4242):   # the three of today and any server made later
+        e = csp.extra_for(sid, "")
+        assert e.count("opr_hub.lua") == 1 and "opr_trainer.lua?v=" in e, sid
+        assert "opr_rc_probe" not in e, sid                          # the probe stays temporary and opt-in
+    monkeypatch.setattr(settings, "csp_trainer_servers", "*,!3")
+    assert "opr_trainer" not in csp.extra_for(3, "") and "opr_trainer" in csp.extra_for(4, "") and csp.extra_for(3, "").count("opr_hub.lua") == 1
+    monkeypatch.setattr(settings, "csp_hub", False)                  # the hub's own kill switch also stops the trainer: it rides on the hub's section
+    assert csp.extra_for(4, "") == ""

@@ -28,6 +28,14 @@ def decode(text: str) -> str:
     return zlib.decompress(base64.b64decode(tail + "=" * (-len(tail) % 4))).decode("utf-8") if sep else ""
 
 
+def server_listed(server_id: int, spec: str) -> bool:
+    """Whether a server is named by a setting such as ACM_CSP_TRAINER_SERVERS: `*` = every server (also the ones made later), `2` or `2, 3` = those, empty = nobody, and `!2` takes one
+    out (`*,!2` = every server but 2: the brake for a single server). An exclusion alone turns nothing on, and it wins over a listing. Ids, never substrings."""
+    items = {x.strip() for x in spec.split(",") if x.strip()}
+    sid = str(server_id)
+    return f"!{sid}" not in items and ("*" in items or sid in items)
+
+
 def extra_for(server_id: int, extra: str) -> str:
     """The extra options a server really sends: its own (`Server.csp_extra`) plus the OPR hub script, always (flags, penalties and track-limit reports of every session do not depend on
     anyone having pasted a section). It takes the first free `[SCRIPT_n]` from 100 up so it never replaces a script the admin added."""
@@ -38,10 +46,11 @@ def extra_for(server_id: int, extra: str) -> str:
         n += 1
     hub = f'[SCRIPT_{n}]\nSCRIPT = "{settings.csp_hub_url}?v={settings.csp_hub_version}"\nSERVER = {server_id}\n'
     k = n + 1
-    # the optional scripts, each only for the servers named in its setting: the race-control plugin's probe and the lap trainer
+    # the other scripts, each for the servers its setting names (server_listed): the race-control plugin's probe (temporary, off unless named) and the lap trainer, which also sends the driver's
+    # telemetry and asks for its token (OPRHELLO): every server by default, the ones made later too
     for url, servers in ((settings.csp_probe_url, settings.csp_probe_servers),
                          (f"{settings.csp_trainer_url}?v={settings.csp_trainer_version}", settings.csp_trainer_servers)):
-        if str(server_id) in {x.strip() for x in servers.split(",")}:
+        if server_listed(server_id, servers):
             hub += f'\n[SCRIPT_{k}]\nSCRIPT = "{url}"\n'
             k += 1
     return (extra.strip() + "\n\n" if extra.strip() else "") + hub
