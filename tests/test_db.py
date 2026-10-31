@@ -57,7 +57,7 @@ def test_old_servers_keep_rows_and_get_the_domain_values(tmp_path, monkeypatch):
     db.init_db()
     rows = _q(path, "SELECT id, name, base_port, wake, integrity, stewards FROM servers ORDER BY id")
     assert rows == [(1, "a", 9600, "always", "warn", "off"), (2, "b", 9610, "always", "warn", "off"), (3, "c", 9620, "always", "warn", "off")]
-    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+    assert _q(path, "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
 
 
 def test_upgraded_and_fresh_databases_have_the_same_indexes(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_fresh_database_is_not_backed_up(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "engine", create_engine(f"sqlite:///{tmp_path / 'new.db'}"))
     db.init_db()
     assert not (tmp_path / "backups").exists()
-    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+    assert _q(tmp_path / "new.db", "SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
 
 
 def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path, monkeypatch):
@@ -151,7 +151,7 @@ def test_migration_003_removes_only_the_old_scan_repeats_and_adds_the_indexes(tm
     assert len(rows) == 2 + 1 + 1 + 1 + 1 + 1 and len(scan_upload) == 4   # h1+h2 once each, the other detail, the post-fix repeat
     assert {r[1]: r[0] for r in scan_upload if r[2] in ("car a (3 files, 9 bytes)", "car b (1 files, 2 bytes)") and r[5] < "2026-10-08"} == first   # the FIRST of each survives
     assert {(r[3], r[4]) for r in rows} == {("scan", "upload"), ("upload", "upload"), ("scan", "scan"), ("admin", "source")}
-    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     names = {r[0] for r in _q(path, "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert {"ux_content_holders_hash_holder", "ix_catalog_events_hash_id", "ix_activity_server_ts", "ix_incidents_server_ts"} <= names
     plan = " ".join(str(r) for r in _q(path, "EXPLAIN QUERY PLAN SELECT * FROM catalog_events WHERE hash = 'h1' ORDER BY id DESC LIMIT 5"))
@@ -241,7 +241,7 @@ def test_migration_004_adds_the_archive_columns_and_keeps_every_running_league_r
     assert _q(path, "SELECT id, name, archived_at, archived_by FROM championships") == [(1, "Vieja", None, "")], "an existing league must stay running"
     assert _q(path, "SELECT name FROM sqlite_master WHERE name = 'championship_archive'") == [("championship_archive",)]
     stamp = _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version")
-    assert [r[0] for r in stamp] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [r[0] for r in stamp] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     db.init_db()   # rerun
     assert _q(path, "SELECT version, applied_at FROM schema_migrations ORDER BY version") == stamp
 
@@ -273,4 +273,18 @@ def test_migration_005_keeps_old_penalties_manual_and_allows_one_automatic_per_d
     con.close()
     assert _q(path, "SELECT auto_rules FROM championships") == []
     db.init_db()   # rerun
-    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [r[0] for r in _q(path, "SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_migration_011_counts_every_old_result_for_the_table_and_is_idempotent():
+    import sqlite3
+    from app.db import _m011_practice_no_points
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE championship_events (id INTEGER PRIMARY KEY, filename TEXT)")
+    con.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, title TEXT)")
+    con.execute("INSERT INTO championship_events VALUES (1, 'r.json')")
+    con.execute("INSERT INTO events VALUES (1, 'e')")
+    for _ in range(2):
+        _m011_practice_no_points(con)
+    assert con.execute("SELECT scores FROM championship_events").fetchall() == [(1,)], "every result already counted keeps counting"
+    assert con.execute("SELECT count_only_league_id FROM events").fetchall() == [(None,)]

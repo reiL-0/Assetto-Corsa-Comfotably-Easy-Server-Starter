@@ -178,6 +178,11 @@ def delete(championship_id: int, sess: SessionDep) -> None:
 class EventIn(BaseModel):
     server_id: int
     filename: str
+    scores: bool = True   # False: listed in the results, no points (a practice)
+
+
+class EventPatch(BaseModel):
+    scores: bool
 
 
 @router.post("/{championship_id}/events", response_model=ChampionshipEvent, status_code=201)
@@ -187,8 +192,23 @@ def add_event(championship_id: int, body: EventIn, sess: SessionDep) -> Champion
     if not result_path(body.server_id, body.filename).is_file():
         raise HTTPException(404, "result not found")
     e = ChampionshipEvent(
-        championship_id=championship_id, server_id=body.server_id, filename=body.filename
+        championship_id=championship_id, server_id=body.server_id, filename=body.filename, scores=body.scores
     )
+    sess.add(e)
+    sess.commit()
+    sess.refresh(e)
+    return e
+
+
+@router.patch("/{championship_id}/events/{event_id}", response_model=ChampionshipEvent)
+@serialized
+def patch_event(championship_id: int, event_id: int, body: EventPatch, sess: SessionDep) -> ChampionshipEvent:
+    """Whether a counted result adds to the table (the points are computed live from the files: the table follows at once). Suspensions already served by it stay served."""
+    get_open(sess, championship_id)
+    e = sess.get(ChampionshipEvent, event_id)
+    if not e or e.championship_id != championship_id:
+        raise HTTPException(404, "event not found")
+    e.scores = body.scores
     sess.add(e)
     sess.commit()
     sess.refresh(e)
@@ -212,7 +232,7 @@ def list_events(championship_id: int, sess: SessionDep) -> list[ChampionshipEven
     if c.archived_at:   # the result files are gone: the counted races are listed from the archive (negative ids: they are not rows any more)
         arch = sess.get(ChampionshipArchive, championship_id)
         return [ChampionshipEvent(id=-(i + 1), championship_id=championship_id, server_id=r["server_id"], filename=r["filename"], session_type=r["session_type"],
-                                  created_at=c.archived_at) for i, r in enumerate(arch.data.get("races", []) if arch else [])]
+                                  created_at=c.archived_at, scores=r.get("scores", True)) for i, r in enumerate(arch.data.get("races", []) if arch else [])]
     return list(
         sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == championship_id))
     )
@@ -249,7 +269,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
         nonrun = non_racing_for(sess, e.server_id, e.filename)
         pens = penalties_for(sess, e.server_id, e.filename)
         parsed = apply_penalties(parse_result_file(p), pens, nonrun)
-        scoring = parsed["type"] == "Race"   # ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
+        scoring = parsed["type"] == "Race" and e.scores   # a practice counted without points is only listed. ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
         rows = []
         stage_places = _stage_places(parsed, nonrun) if scoring and stage_table else {}   # {steam id: [(stage, place)]}: the first of the order at the end of each stage but the last
         staged: set[str] = set()
@@ -278,7 +298,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             row["wins"] += pos == 1
             row["podiums"] += bool(pos and pos <= 3)
             row["races"] += 1
-        races.append({"filename": e.filename, "server_id": e.server_id, "session_type": e.session_type or parsed["type"], "type": parsed["type"], "name": parsed["name"],
+        races.append({"id": e.id, "scores": e.scores, "filename": e.filename, "server_id": e.server_id, "session_type": e.session_type or parsed["type"], "type": parsed["type"], "name": parsed["name"],
                       "track": parsed["track"], "track_config": parsed["track_config"], "classification": rows,
                       "penalties": [{"driver_guid": x.driver_guid, "kind": x.kind, "value": x.value, "reason": x.reason, "created_by": x.created_by} for x in pens]})
 

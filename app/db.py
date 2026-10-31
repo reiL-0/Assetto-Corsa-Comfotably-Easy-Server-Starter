@@ -187,6 +187,14 @@ def _m010_member_number(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "league_members" ADD COLUMN "number" VARCHAR NOT NULL DEFAULT \'\'')
 
 
+def _m011_practice_no_points(con: sqlite3.Connection) -> None:
+    """`championship_events.scores` (1 = counts for the table, as every existing result does) and `events.count_only_league_id` (NULL = none)."""
+    if "scores" not in {row[1] for row in con.execute('PRAGMA table_info("championship_events")')}:
+        con.execute('ALTER TABLE "championship_events" ADD COLUMN "scores" BOOLEAN NOT NULL DEFAULT 1')
+    if "count_only_league_id" not in {row[1] for row in con.execute('PRAGMA table_info("events")')}:
+        con.execute('ALTER TABLE "events" ADD COLUMN "count_only_league_id" INTEGER')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -198,6 +206,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (8, _m008_wake_always),
     (9, _m009_member_in_pits),
     (10, _m010_member_number),
+    (11, _m011_practice_no_points),
 ]
 
 

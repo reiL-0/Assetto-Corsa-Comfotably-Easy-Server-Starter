@@ -59,7 +59,7 @@ def _stamp(sess: Session, c: Championship) -> tuple:
     mtimes = tuple(result_path(s, f).stat().st_mtime if result_path(s, f).is_file() else None for s, f in files)
     stages = tuple(json.dumps(read_stages(result_path(s, f))) if result_path(s, f).is_file() else None for s, f in files)   # (the stage orders feed the points too)
     roster = tuple(sorted(sess.exec(select(LeagueMember.guid).where(LeagueMember.championship_id == c.id, LeagueMember.non_racing)).all()))
-    return tuple(e.id for e in events), newest, count, mtimes, c.name, tuple(effective(c).scoring.table), tuple(effective(c).scoring.stage_points), stages, roster
+    return tuple((e.id, e.scores) for e in events), newest, count, mtimes, c.name, tuple(effective(c).scoring.table), tuple(effective(c).scoring.stage_points), stages, roster
 
 
 def snapshot(sess: Session, c: Championship) -> dict:

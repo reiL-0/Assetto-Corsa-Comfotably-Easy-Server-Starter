@@ -29,6 +29,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | GET | `/api/v1/championships/{championship_id}/events` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships/{championship_id}/events` | the site (leagues), the manager's UI |
 | DELETE | `/api/v1/championships/{championship_id}/events/{event_id}` | the site (leagues), the manager's UI |
+| PATCH | `/api/v1/championships/{championship_id}/events/{event_id}` | the site (leagues), the manager's UI |
 | GET | `/api/v1/championships/{championship_id}/members` | the site (leagues), the manager's UI |
 | POST | `/api/v1/championships/{championship_id}/members` | the site (leagues), the manager's UI |
 | DELETE | `/api/v1/championships/{championship_id}/members/{guid}` | the site (leagues), the manager's UI |

@@ -329,3 +329,59 @@ def test_a_late_session_end_of_one_race_does_not_take_the_journal_of_the_next_ra
     a.write_text("{}")
     (tmp_path / STAGES_PENDING).write_text(json.dumps({"at": a.stat().st_mtime + 3600, "stages": []}))   # B's journal, written an hour after A's result
     assert not pending_is_unclaimed(tmp_path, a.name)
+
+
+def test_a_result_counted_without_points_is_listed_but_adds_nothing_and_can_be_flipped():
+    sid = client.post("/api/v1/servers", json={"name": "ChampPractice"}).json()["id"]
+    _write_race_result(sid, "race.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}, {"DriverName": "Bob", "DriverGuid": "2", "TotalTime": 605000}])
+    _write_race_result(sid, "practice.json", [{"DriverName": "Bob", "DriverGuid": "2", "TotalTime": 600000}, {"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 605000}])
+    cid = client.post("/api/v1/championships", json={"name": "Practice Cup"}).json()["id"]
+    url = f"/api/v1/championships/{cid}"
+    assert client.post(f"{url}/events", json={"server_id": sid, "filename": "race.json"}).json()["scores"] is True
+    prac = client.post(f"{url}/events", json={"server_id": sid, "filename": "practice.json", "scores": False}).json()
+    assert prac["scores"] is False
+    standings = {s["driver_guid"]: s for s in client.get(f"{url}/standings").json()}
+    assert standings["1"]["points"] == 25 and standings["2"]["points"] == 18 and standings["1"]["races"] == 1, "the practice adds nothing"
+    races = client.get(f"{url}/races").json()
+    assert [(r["filename"], r["scores"]) for r in races] == [("race.json", True), ("practice.json", False)], "but it is listed with its classification"
+    assert [e["driver_guid"] for e in races[1]["classification"]] == ["2", "1"] and all(e["points"] == 0 for e in races[1]["classification"])
+    flipped = client.patch(f"{url}/events/{prac['id']}", json={"scores": True})
+    assert flipped.status_code == 200 and flipped.json()["scores"] is True
+    assert {s["driver_guid"]: s["points"] for s in client.get(f"{url}/standings").json()} == {"1": 43, "2": 43}, "flipped: it counts at once"
+    assert client.patch(f"{url}/events/9999", json={"scores": False}).status_code == 404
+    assert client.patch(f"{url}/events/{prac['id']}", json={}).status_code == 422
+
+
+def test_a_practice_event_with_count_only_league_is_counted_without_points_and_keeps_its_entry_list_open():
+    import os, time
+    from sqlmodel import Session, select
+    from app import league
+    from app.db import engine
+    from app.models import ChampionshipEvent, Event, Schedule
+    sid = client.post("/api/v1/servers", json={"name": "Práctica liga"}).json()["id"]
+    lg = client.post("/api/v1/championships", json={"name": "Liga práctica"}).json()["id"]
+    _write_race_result(sid, "prac.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}])
+    now = time.time()
+    os.utime(Path(settings.data_dir) / "instances" / str(sid) / "results" / "prac.json", (now - 60, now - 60))
+    session = {"name": "p", "track": "spa", "cars": ["a"]}
+    api = "/api/v1/events"
+    both = client.post(api, json={"title": "x", "session": session, "league_id": lg, "count_only_league_id": lg})
+    assert both.status_code == 422, "a roster league and a count-only league do not go together"
+    made = client.post(api, json={"title": "Pretemporada", "session": session, "count_only_league_id": lg})
+    assert made.status_code == 201 and made.json()["count_only_league_id"] == lg and made.json()["league_id"] is None
+    eid = made.json()["id"]
+    old_client_put = client.put(f"{api}/{eid}", json={"title": "Pretemporada 2", "session": session})   # an older panel does not send the new field
+    assert old_client_put.json()["count_only_league_id"] == lg, "it keeps what was saved"
+    assert client.put(f"{api}/{eid}", json={"title": "P", "session": session, "league_id": lg}).json()["count_only_league_id"] is None, "naming a roster league takes it over"
+    assert client.put(f"{api}/{eid}", json={"title": "P", "session": session, "count_only_league_id": lg}).json()["league_id"] is None
+    with Session(engine) as s:
+        ev = s.get(Event, eid)
+        sc = Schedule(event_id=eid, server_id=sid, start_at=now - 1800, state="running")
+        s.add(sc)
+        s.commit()
+        assert league.count_results(s, sc, ev, now + 60) == 0, "no counted race for the suspensions"
+        row = s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg)).one()
+        assert row.filename == "prac.json" and row.scores is False and row.event_id == eid
+        assert league.count_results(s, sc, ev, now + 60) == 0 and len(s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg)).all()) == 1
+    assert client.get(f"/api/v1/championships/{lg}/standings").json() == []
+    assert [r["scores"] for r in client.get(f"/api/v1/championships/{lg}/races").json()] == [False]

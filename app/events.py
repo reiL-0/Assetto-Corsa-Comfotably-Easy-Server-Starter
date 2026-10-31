@@ -24,6 +24,7 @@ class EventIn(BaseModel):
     session: SessionIn  # same shape the server's /apply takes; its `restart` is chosen when the event is run
     derived: bool = False  # the calendar sync's per-event copy of a preset; can be set, never cleared
     league_id: int | None = None  # run with this league's eligible roster as the (locked) entry list (app/league.py)
+    count_only_league_id: int | None = None  # a practice: its result is listed in this league's results with no points; the entry list stays open
 
     @model_validator(mode="after")
     def _entries_fit(self) -> EventIn:
@@ -50,6 +51,7 @@ class EventOut(BaseModel):
     is_default: bool
     derived: bool
     league_id: int | None
+    count_only_league_id: int | None = None
     updated_at: datetime
 
 
@@ -60,7 +62,7 @@ class RunIn(BaseModel):
 
 def _out(e: Event) -> EventOut:
     return EventOut(id=e.id, title=e.title, notes=e.notes, session=SessionIn(**e.data), is_default=e.is_default,
-                    derived=e.derived, league_id=e.league_id, updated_at=e.updated_at)
+                    derived=e.derived, league_id=e.league_id, count_only_league_id=e.count_only_league_id, updated_at=e.updated_at)
 
 
 def _check_league(sess: SessionDep, league_id: int | None) -> None:
@@ -89,7 +91,10 @@ def list_events(sess: SessionDep) -> list[EventOut]:
 @serialized
 def create_event(body: EventIn, sess: SessionDep) -> EventOut:
     _check_league(sess, body.league_id)
-    e = Event(title=body.title, notes=body.notes, data=body.session.model_dump(), derived=body.derived, league_id=body.league_id)
+    _check_league(sess, body.count_only_league_id)
+    if body.league_id is not None and body.count_only_league_id is not None:
+        raise HTTPException(422, "league_id and count_only_league_id are not used together")
+    e = Event(title=body.title, notes=body.notes, data=body.session.model_dump(), derived=body.derived, league_id=body.league_id, count_only_league_id=body.count_only_league_id)
     sess.add(e)
     sess.commit()
     sess.refresh(e)
@@ -106,7 +111,14 @@ def get_event(event_id: int, sess: SessionDep) -> EventOut:
 def update_event(event_id: int, body: EventIn, sess: SessionDep) -> EventOut:
     e = _get_event(sess, event_id)
     _check_league(sess, body.league_id)
+    _check_league(sess, body.count_only_league_id)
+    if body.league_id is not None and body.count_only_league_id is not None:
+        raise HTTPException(422, "league_id and count_only_league_id are not used together")
     e.title, e.notes, e.data, e.league_id = body.title, body.notes, body.session.model_dump(), body.league_id
+    if "count_only_league_id" in body.model_fields_set:   # an older client does not send it: the saved one stays, unless it names a roster league (then the two cannot both be set)
+        e.count_only_league_id = body.count_only_league_id
+    elif body.league_id is not None:
+        e.count_only_league_id = None
     e.derived = e.derived or body.derived  # a calendar copy made before the flag existed gets it on its next sync; never cleared
     e.updated_at = datetime.now(UTC)
     sess.add(e)
@@ -142,7 +154,7 @@ def delete_event(event_id: int, sess: SessionDep) -> None:
 def duplicate_event(event_id: int, sess: SessionDep) -> EventOut:
     src = _get_event(sess, event_id)
     league = sess.get(Championship, src.league_id) if src.league_id else None
-    e = Event(title=f"{src.title} (copia)"[:80], notes=src.notes, data=dict(src.data), league_id=None if league is None or league.archived_at else league.id)   # (a copy never joins an archived league)
+    e = Event(title=f"{src.title} (copia)"[:80], notes=src.notes, data=dict(src.data), league_id=None if league is None or league.archived_at else league.id, count_only_league_id=src.count_only_league_id if src.count_only_league_id and (c2 := sess.get(Championship, src.count_only_league_id)) and not c2.archived_at else None)   # (a copy never joins an archived league)
     sess.add(e)
     sess.commit()
     sess.refresh(e)

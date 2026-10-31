@@ -124,6 +124,7 @@ class Event(SQLModel, table=True):
     notes: str = ""
     data: dict = Field(default_factory=dict, sa_type=JSON)  # a servers.SessionIn, as JSON
     league_id: int | None = None  # the league whose roster is this event's closed entry list when it runs (app/league.py); None = the entries saved in `data`
+    count_only_league_id: int | None = None  # the league whose results get this event's result WITHOUT points and without locking the entry list (a practice); never together with league_id
     is_default: bool = False  # the preset a new calendar event starts from; at most one (events.set_default)
     derived: bool = False  # made by the website's calendar sync for one calendar event, not a preset an admin edits
     created_at: datetime = Field(default_factory=_now)
@@ -370,4 +371,5 @@ class ChampionshipEvent(SQLModel, table=True):
     filename: str  # result JSON under data/instances/<server_id>/results/
     session_type: str | None = None  # "Race" (scores) or "Qualify" (feeds the grid penalties); None = added by hand, read as it is
     event_id: int | None = None  # the saved event whose run produced it (counted automatically, league.count_results); None = added by hand
+    scores: bool = True  # False = shown in the league's results but adds nothing to its table (a practice); the admin can flip it
     created_at: datetime = Field(default_factory=_now)

@@ -220,7 +220,7 @@ def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
     between the schedule's start and `until`. Idempotent; returns how many Race results were added. A calendar event is thus a counted
     race of its league (draft or published) without anyone picking files. A Race scores (app/championship.py) and uses up the
     suspensions measured in races; a Qualify result feeds the grid suspensions; practice results are skipped."""
-    if not ev.league_id or not (c := sess.get(Championship, ev.league_id)) or c.archived_at:   # an archived league counts no more results
+    if not (ev.league_id or ev.count_only_league_id) or not (c := sess.get(Championship, ev.league_id or ev.count_only_league_id)) or c.archived_at:   # an archived league counts no more results
         return 0
     if not league_lock.acquire(blocking=False):   # a league is being archived or edited right now: this runs on the event loop, so it does not wait; the next tick counts (idempotent)
         return 0
@@ -242,7 +242,10 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
         parsed = parse_result_file(f)
         if parsed["type"] not in ("Race", "Qualify"):
             continue
-        sess.add(ChampionshipEvent(championship_id=c.id, server_id=sc.server_id, filename=f.name, event_id=ev.id, session_type=parsed["type"]))
+        scores = ev.league_id is not None   # a practice (count_only_league_id) is listed but adds nothing: no points, no suspension served, no grid, no cut warnings
+        sess.add(ChampionshipEvent(championship_id=c.id, server_id=sc.server_id, filename=f.name, event_id=ev.id, session_type=parsed["type"], scores=scores))
+        if not scores:
+            continue
         if parsed["type"] == "Race":
             added += 1
             _race_served(sess, c, f.stat().st_mtime)
