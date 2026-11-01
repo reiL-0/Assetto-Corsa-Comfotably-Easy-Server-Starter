@@ -157,7 +157,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.snapshot() if rc else {"rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -267,7 +267,9 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", ttl=90)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
-            _say(rc, PITS_OPEN if rc.caution and rc.caution.pits_open else "BOXES CERRADOS: solo con permiso del director", "flag", hold="pits")   # (a stage break's "break" action may have come first)
+            eta = rc.caution_eta() or {}
+            closed = "BOXES CERRADOS: solo con permiso del director" + (f" · abren en la vuelta {eta['pits']}" if eta.get("pits") else "")   # (the lap goes last: the hub writes it over the banner)
+            _say(rc, PITS_OPEN if rc.caution and rc.caution.pits_open else closed, "flag", hold="pits")   # (a stage break's "break" action may have come first)
             if action[1] is not None:
                 _say(rc, f"FREE PASS: {_name(inst, action[1])}", "race", hold="freepass")
                 _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1], hold="freepass-car")
@@ -532,6 +534,11 @@ def auto_caution(server_id: int, rc, car: int) -> None:
                 _restart(inst, rc, 1)
             except HTTPException:
                 pass   # (the caution ended in between: nothing to restart)
+        elif verdict == "two":
+            try:
+                _restart(inst, rc, 2)
+            except HTTPException:
+                pass   # (the caution ended in between: nothing to announce)
         elif verdict == "pits":
             _say(rc, PITS_OPEN, "flag", hold="pits")
         elif verdict == "one":
