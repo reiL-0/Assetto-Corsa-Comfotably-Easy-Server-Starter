@@ -50,7 +50,7 @@ def test_the_feed_lists_connected_cars_with_the_servers_own_numbers():
         assert r.status_code == 200
         srv = next(s for s in r.json()["servers"] if s["serverId"] == 902)
         assert srv["session"] == {"type": 1, "track": "spa", "trackConfig": "", "serverName": "P2", "index": 3}
-        assert srv["cars"] == [{"guid": "76561190000000001", "connected": True, "splinePos": 0.41, "carModel": "gt3", "speedKmh": 180.0, "laps": 1, "lastLapMs": 103420}]
+        assert srv["cars"] == [{"carId": 0, "name": "d0", "guid": "76561190000000001", "connected": True, "splinePos": 0.41, "carModel": "gt3", "speedKmh": 180.0, "laps": 1, "lastLapMs": 103420}]
         c.cars.pop(0)   # no position packet yet: no speed, never a crash
         again = next(s for s in TestClient(app, headers=ADMIN).get(f"{V}/telemetry-feed").json()["servers"] if s["serverId"] == 902)
         assert again["cars"][0]["speedKmh"] is None
