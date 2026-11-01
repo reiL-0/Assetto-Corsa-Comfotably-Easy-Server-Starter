@@ -61,7 +61,7 @@ def test_a_driver_who_goes_off_the_track_and_keeps_the_place_gets_a_time_penalty
     rows = []
     _drive(sid, client, 1000.0, 1009.4, report_at=1007.5, saved=rows)
     obs = api.get(f"{V}/servers/{sid}/race-state").json()["obligations"]
-    assert len(obs) == 1 and obs[0]["car"] == 4 and obs[0]["creditors"] == [3] and 0 <= obs[0]["left_s"] <= 30, "the banner of car 4: give the place back to car 3 (the state counts with the real clock, the test with its own: only the shape is checked)"
+    assert len(obs) == 1 and obs[0]["car"] == 4 and obs[0]["creditors"] == [3] and obs[0]["names"] == "Ana" and 0 <= obs[0]["left_s"] <= 30, "the banner of car 4: give the place back to car 3 (the state counts with the real clock, the test with its own: only the shape is checked)"
     _drive(sid, client, 1009.6, 1040.0, saved=rows)
     assert len(rows) == 1 and rows[0]["driver_guid"] == A_GUID and rows[0]["seconds"] == 5 and rows[0]["creditors"] == "Ana", "time is up, still in front: one penalty"
     texts = [n["text"] for n in api.get(f"{V}/servers/{sid}/race-state").json()["notices"]]
@@ -241,3 +241,14 @@ def test_a_late_due_never_goes_to_a_later_race():
         s.commit()
         c = s.get(Championship, lid)
         assert give_back_penalties(s, c, sid, "race2.json", parsed, 4000.0, 2000.0) == 0, "race 2 began at 2000: a due of 1800 is race 1's, not its"
+
+
+def test_a_name_with_a_quote_or_a_backslash_cannot_break_what_the_hub_reads(live, monkeypatch):
+    sid, client, _ = live
+    _race(sid, client, monkeypatch)
+    client.cars[3]["driver_name"] = 'Ana "Rayo" \\ Largo Largo Largo Largo'
+    _drive(sid, client, 1000.0, 1009.4, report_at=1007.5)
+    obs = api.get(f"{V}/servers/{sid}/race-state").json()["obligations"]
+    assert obs[0]["names"] == "Ana 'Rayo' / Largo Largo"[:24] and '"' not in obs[0]["names"] and "\\" not in obs[0]["names"] and len(obs[0]["names"]) <= 24
+    raw = api.get(f"{V}/servers/{sid}/race-state").text
+    assert '\\"' not in raw.split('"obligations"')[1].split('"rev"')[0], "no escaped quote inside the obligations"

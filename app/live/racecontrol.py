@@ -74,6 +74,7 @@ class RaceControl:
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
+        self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
         self.cuts_server: dict[int, int] = {}   # car -> cuts the acServer counted in the laps it finished in this race (the authority: what the rulebook's rule counts)
         self.cuts_client: dict[int, int] = {}   # car -> excursions its own game reported (live: it does not wait for the lap to end; evidence, the driver's game could lie about it)
@@ -602,7 +603,10 @@ class RaceControl:
         """What the hub and the panel read: the obligations that are open ({id, car, creditors, left_s}) and the cases left for the director."""
         with _lock:
             gb = self.giveback
-            return {"obligations": gb.open_obligations(now) if gb else [], "give_back_reviews": list(gb.reviews) if gb else []}
+            label = lambda c: self.gb_names.get(c) or f"#{c}"
+            clean = lambda s: str(s).replace('"', "'").replace("\\", "/")[:24]   # (the hub reads the state with patterns: no quote or backslash in a name)
+            obs = [{**o, "names": ", ".join(clean(label(c)) for c in o["creditors"])} for o in (gb.open_obligations(now) if gb else [])]
+            return {"obligations": obs, "give_back_reviews": list(gb.reviews) if gb else []}
 
     def cuts_view(self, rule: dict | None) -> dict:
         """The counter of the hub: {cuts: {car: n}, cuts_rule}. n is the larger of the two counts (the game's own report is faster, the acServer's is the one that counts: neither is ever hidden by the other).

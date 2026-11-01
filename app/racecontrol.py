@@ -139,6 +139,7 @@ def give_back_tick(now: float) -> list[dict]:
         rc.gb_rule = rule
         speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None}
         events = rc.give_back_tick(inst.acsp.field.snapshot(), speeds, now)
+        rc.gb_names = {c: info.get("driver_name") or "" for c, info in inst.acsp.cars.items()}
         for ob in rc.give_back_view(now)["obligations"]:   # (a slot that changed hands: the new driver owes nothing)
             owner, cur = rc.gb_owner.get(ob["id"]), (inst.acsp.cars.get(ob["car"]) or {}).get("driver_guid")
             if owner and cur and str(cur) != owner:
