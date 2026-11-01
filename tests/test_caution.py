@@ -1,6 +1,6 @@
 """Caution procedures (app/live/caution.py) and the progress they read (app/live/field.py): pure state fed with numbers."""
 
-from app.live.caution import PASS_HOLD, PIT_GRACE, Caution
+from app.live.caution import GIVE_BACK_HOLD, GIVE_BACK_MAX, GIVE_BACK_MIN, PASS_HOLD, Caution
 from app.live.field import Field, ring
 
 
@@ -52,10 +52,29 @@ def test_a_pass_that_lasts_is_a_violation_once_and_a_short_swap_is_not():
     assert run(c, [(1.0, start), (1.5, swapped), (2.0, swapped)]) == [], "less than PASS_HOLD"
     assert run(c, [(2.2, start)]) == [] and run(c, [(3.0, swapped)]) == [], "it went back: the timer restarted"
     t = 3.0 + PASS_HOLD + 0.1
-    assert run(c, [(3.5, swapped), (t, swapped)]) == [], "held, but the passed car may still reach the pit lane"
-    assert run(c, [(t + PIT_GRACE + 0.1, swapped)]) == [2]
-    assert run(c, [(9.0, swapped), (12.0, swapped)]) == [], "once per caution"
+    assert run(c, [(3.5, swapped), (t, swapped)]) == [], "held, but it is judged at the passer's next crossing of the line"
+    assert run(c, [(t + GIVE_BACK_MIN + 0.1, swapped)]) == [], "20 s later, but car 2 has not crossed the line yet"
+    assert run(c, [(t + GIVE_BACK_MAX + 0.1, swapped)]) == [2], "a passer that never crosses is judged after GIVE_BACK_MAX"
+    assert run(c, [(300.0, swapped), (310.0, swapped)]) == [], "once per caution"
     assert c.violators == {2}
+
+
+def test_the_pass_is_judged_at_the_next_crossing_of_the_line_and_giving_the_place_back_before_it_clears_the_passer():
+    start = field(5.985, 5.975)
+    swapped = field(5.985, 5.995)   # car 2 passed car 1 just before the line
+    c = Caution(start, 0.0)
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)])
+    t = 1.0 + PASS_HOLD + 0.1
+    assert run(c, [(t + 5, field(6.01, 6.03))]) == [], "crossed the line, but less than GIVE_BACK_MIN after the pass"
+    assert run(c, [(t + GIVE_BACK_MIN - 1, field(6.50, 6.52))]) == [], "it only crossed early: the end of its lap is the next crossing, at least GIVE_BACK_MIN after the pass"
+    assert run(c, [(t + GIVE_BACK_MIN + 0.1, field(7.01, 7.03))]) == [2], "crossed the line again, still in front: the drive-through"
+    c = Caution(start, 0.0)   # the same pass, but car 2 lets car 1 by before the line
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)])
+    behind = field(6.01, 6.0)
+    assert run(c, [(t + 3, behind), (t + 3 + GIVE_BACK_HOLD + 0.1, behind), (t + GIVE_BACK_MIN + 1, field(7.20, 7.19))]) == [], "gave the place back"
+    c = Caution(start, 0.0)   # behind for less than GIVE_BACK_HOLD does not count
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)])
+    assert run(c, [(t + 3, behind), (t + 3.5, field(6.0, 6.02)), (t + GIVE_BACK_MIN + 1, field(7.01, 7.03))]) == [2]
 
 
 def test_giving_the_place_back_within_the_hold_is_no_violation_and_a_passed_car_that_reaches_the_pit_lane_clears_the_passer():
@@ -65,7 +84,7 @@ def test_giving_the_place_back_within_the_hold_is_no_violation_and_a_passed_car_
     assert run(c, [(1.0, swapped), (1.0 + PASS_HOLD - 0.5, swapped), (1.0 + PASS_HOLD - 0.4, start), (20.0, start)]) == [], "passed and gave it back inside PASS_HOLD"
     c = Caution(start, 0.0)   # the pack goes by a car that is heading to the pits: it reports the pit lane while the pass is pending
     run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)])
-    assert run(c, [(1.0 + PASS_HOLD + 2.0, swapped)], exempt={1}) == [] and run(c, [(30.0, swapped)]) == [] and not c.violators
+    assert run(c, [(1.0 + PASS_HOLD + 2.0, swapped)], exempt={1}) == [] and run(c, [(GIVE_BACK_MAX + 30.0, swapped)]) == [] and not c.violators
 
 
 def test_passing_a_stopped_car_a_car_in_the_pits_or_one_directed_to_pass_is_not_a_violation():
@@ -167,3 +186,76 @@ def test_a_car_that_joined_after_the_yellow_and_anybody_in_an_open_pit_lane_are_
     c.open_pits()
     c.pit_enter(2)
     assert c.pit_breakers() == [1], "the entry before the pits opened is still judged, the one after is not"
+
+
+def test_the_leader_going_by_a_lapped_car_that_is_physically_ahead_of_it_is_not_a_pass():
+    # car 3 is a lap down and 0.02 ahead of the leader ON THE TRACK; the leader catches it and goes by: the frozen order puts the leader in front, so it is getting its place, not passing
+    c = Caution(field(5.20, 5.10, 4.22), 0.0)
+    swapped = field(5.25, 5.15, 4.23)
+    assert run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped), (GIVE_BACK_MAX + 30.0, swapped)], speeds={1: 60.0, 2: 60.0, 3: 60.0}) == [] and not c.violators and not c._pending
+
+
+def test_a_car_that_went_wide_and_crawls_back_is_not_passed_illegally_and_may_take_its_place_again():
+    start = field(5.20, 5.19)
+    swapped = field(5.20, 5.215)   # car 2 (behind in the frozen order) goes by car 1...
+    c = Caution(start, 0.0)
+    slow = {1: 30.0, 2: 80.0}      # ...which is at 30 km/h against 80: it went wide, it is crawling
+    assert run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped), (GIVE_BACK_MAX + 30.0, swapped)], speeds=slow) == [] and not c._pending
+    again = field(5.25, 5.22)   # car 1 recovers and goes by car 2: it was ahead in the frozen order, so it is its own place
+    assert run(c, [(200.0, again), (200.0 + PASS_HOLD + 0.1, again), (400.0, again)], speeds={1: 80.0, 2: 80.0}) == [] and not c.violators
+
+
+def test_several_cars_going_by_the_same_one_are_for_the_director_and_nobody_is_punished_by_the_automatic_judge():
+    start = field(5.30, 5.29, 5.28, 5.27)   # car 1 in front, then 2, 3, 4
+    c = Caution(start, 0.0)
+    swapped = field(5.30, 5.315, 5.31, 5.27)   # 2 and 3 go by car 1 (which is slow), 4 stays behind it
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)], speeds={1: 70.0, 2: 80.0, 3: 80.0, 4: 80.0})
+    assert run(c, [(GIVE_BACK_MAX + 30.0, swapped)], speeds={1: 70.0, 2: 80.0, 3: 80.0, 4: 80.0}) == [] and not c.violators
+    assert c.reviews == [{"passed": 1, "passers": [2, 3]}] and c.snapshot()["reviews"] == c.reviews
+
+
+def test_a_car_leaving_the_pits_is_not_judged_even_if_its_report_lapses_before_the_move_is_confirmed():
+    start = field(5.20, 5.19)
+    swapped = field(5.20, 5.215)
+    c = Caution(start, 0.0)
+    run(c, [(1.0, swapped)], exempt={2})   # the move begins while car 2 is reported in the pit lane (just leaving it)
+    assert run(c, [(1.0 + PASS_HOLD + 0.1, swapped), (GIVE_BACK_MAX + 30.0, swapped)]) == [] and not c._pending
+
+
+def test_a_car_that_leaves_or_becomes_the_pace_car_leaves_no_trace_in_the_passes_and_the_reviews():
+    start = field(5.30, 5.29, 5.28)
+    swapped = field(5.30, 5.315, 5.31)
+    c = Caution(start, 0.0)
+    sp = {1: 70.0, 2: 80.0, 3: 80.0}
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)], speeds=sp)
+    run(c, [(GIVE_BACK_MAX + 30.0, swapped)], speeds=sp)
+    assert c.reviews == [{"passed": 1, "passers": [2, 3]}]
+    c.remove(3)
+    assert c.reviews == [] and all(3 != x for seen in c._passed_by.values() for _, x in seen), "one passer is no cascade any more"
+    c = Caution(start, 0.0)
+    run(c, [(1.0, swapped), (1.0 + PASS_HOLD + 0.1, swapped)], speeds=sp)
+    run(c, [(30.0, {1: 5.30, 2: 5.315})], speeds=sp)   # car 3 disappeared from the track list
+    assert 3 in c.gone and all(3 not in k for k in c._pending) and all(x != 3 for seen in c._passed_by.values() for _, x in seen)
+
+
+def test_the_cascade_window_is_shorter_than_the_wait_before_a_verdict_and_the_history_does_not_grow_for_ever():
+    from app.live.caution import CASCADE_S
+    assert CASCADE_S < GIVE_BACK_MIN
+    c = Caution(field(5.30, 5.29), 0.0)
+    a, b = field(5.30, 5.315), field(5.30, 5.29)
+    t = 1.0
+    for _ in range(40):   # car 2 passes car 1 and gives the place back, again and again
+        run(c, [(t, a), (t + PASS_HOLD + 0.1, a), (t + PASS_HOLD + 0.2, b), (t + PASS_HOLD + 0.2 + GIVE_BACK_HOLD + 0.1, b)])
+        t += 30.0
+    assert len(c._passed_by.get(1, [])) <= 6, "only the passes that can still be near a waiting one are kept"
+
+
+def test_a_second_cascade_on_the_same_car_is_another_review_and_does_not_erase_the_first():
+    c = Caution(field(5.30, 5.29, 5.28, 5.27, 5.26), 0.0)
+    sp = {i: 80.0 for i in range(1, 6)}; sp[1] = 70.0
+    first = field(5.30, 5.315, 5.31, 5.27, 5.26)          # 2 and 3 go by car 1
+    run(c, [(1.0, first), (1.0 + PASS_HOLD + 0.1, first), (GIVE_BACK_MAX + 20.0, first)], speeds=sp)
+    second = field(5.30, 5.61, 5.60, 5.32, 5.325)         # much later 2 and 3 are far away and 4 and 5 go by car 1 too
+    t = GIVE_BACK_MAX + 100.0
+    run(c, [(t, second), (t + PASS_HOLD + 0.1, second), (t + GIVE_BACK_MAX + 20.0, second)], speeds=sp)
+    assert c.reviews == [{"passed": 1, "passers": [2, 3]}, {"passed": 1, "passers": [4, 5]}] and not c.violators
