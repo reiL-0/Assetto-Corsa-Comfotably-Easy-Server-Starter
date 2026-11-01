@@ -403,3 +403,26 @@ def test_a_counted_race_is_named_after_the_event_that_ran_it_when_the_result_has
         s.add(ChampionshipEvent(championship_id=cid, server_id=sid, filename="byhand.json", session_type="Race"))
         s.commit()
     assert [r["name"] for r in client.get(f"/api/v1/championships/{cid}/races").json()] == ["Daytona 500", None], "an event's title; a result added by hand keeps the site's fallback"
+
+
+def test_a_result_added_by_hand_is_linked_to_the_schedule_that_ran_it():
+    import os, time
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Event, Schedule
+    sid = client.post("/api/v1/servers", json={"name": "ChampHand"}).json()["id"]
+    _write_race_result(sid, "ran.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}])
+    _write_race_result(sid, "stray.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}])
+    now = time.time()
+    os.utime(Path(settings.data_dir) / "instances" / str(sid) / "results" / "ran.json", (now, now))
+    os.utime(Path(settings.data_dir) / "instances" / str(sid) / "results" / "stray.json", (now - 86400, now - 86400))
+    with Session(engine) as s:
+        ev = Event(title="Pretemporada", data={"name": "r", "track": "spa", "cars": ["a"]})
+        s.add(ev)
+        s.commit()
+        s.add(Schedule(event_id=ev.id, server_id=sid, start_at=now - 3600, state="done"))
+        s.commit()
+        eid = ev.id
+    cid = client.post("/api/v1/championships", json={"name": "Hand Cup"}).json()["id"]
+    assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "ran.json"}).json()["event_id"] == eid
+    assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "stray.json"}).json()["event_id"] is None, "no schedule behind it: unlinked"
