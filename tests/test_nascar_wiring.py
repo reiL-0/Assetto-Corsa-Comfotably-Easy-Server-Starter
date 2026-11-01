@@ -407,7 +407,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'caution_eta', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -813,6 +813,10 @@ def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_lin
     lap(4)
     assert rc.flag == 'yellow', 'only the car that takes the restart brings the green'
     lap(3)
+    assert rc.flag == 'yellow' and not rc.go_armed and rc.blocked_crossings == 0, 'a crossing before a whole lap since the "to go" is not even counted'
+    rc.caution_tick({3: 0.50, 4: 0.48, 9: 0.60}, {}, time.time())   # the restart leader is seen in the middle of its lap
+    assert rc.go_armed
+    lap(3)
     assert rc.flag == 'yellow', 'the pace car is not in the pit lane yet: the line crossing alone brings no green'
     rc.restart_plan(client.field.snapshot())
     assert not rc.pace_car_pitted, 'a second "to go" changes nothing'
@@ -839,6 +843,7 @@ def test_alone_on_the_track_the_pace_car_arriving_in_the_pits_brings_the_green(l
     rc.set_pace_car(9, 120, 'g9')
     rc.set_flag('yellow', field=client.field)
     rc.restart_plan(client.field.snapshot())
+    rc.go_armed = True
     adapter.auto_green(sid, rc, 9)
     assert rc.flag == 'yellow', 'to go was called but the pace car is still on the track'
     rc.report_pit(9, True)
@@ -877,9 +882,10 @@ def test_a_caution_ends_by_itself_after_the_pace_cars_third_lap_when_the_track_i
     assert rc.caution_laps == -1 and not rc.caution_notified, 'a new caution starts the count again'
     client.cars[4]['velocity'] = [30.0, 0.0, 0.0]   # moving: the track is clear
     lap(9); lap(9); lap(9)
-    assert not rc.pace_car_in
+    assert not rc.pace_car_in and rc.one_more and rc.caution_laps == 2, 'two laps counted and clear: the "two to go" came out by itself'
+    assert any(m.startswith('DOS PARA VERDE') for m in [n['text'] for n in rc.snapshot()['notices']])
     lap(9)
-    assert rc.pace_car_in and rc.caution_laps == 3, 'three laps and clear: the "to go" came out by itself'
+    assert rc.pace_car_in and not rc.one_more and rc.caution_laps == 2, 'a lap later it is the "one to go"'
 
 
 def test_two_to_go_keeps_the_pace_car_leading_one_more_lap_then_it_is_a_one_to_go(live, monkeypatch):
@@ -903,6 +909,7 @@ def test_two_to_go_keeps_the_pace_car_leading_one_more_lap_then_it_is_a_one_to_g
     lap(9)
     assert rc.pace_car_state()['mode'] == 'in' and not rc.one_more, 'the pace car crossing makes it the one to go'
     rc.report_pit(9, True)
+    rc.go_armed = True
     lap(3)
     assert rc.flag == 'green', 'the restart leader crossing after the pace car pitted brings the green'
 
@@ -1162,7 +1169,9 @@ def test_the_pits_of_an_incident_caution_open_by_themselves_after_the_first_full
     rc.configure_nascar(70)
     _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.46, 9))
     assert _client('steward').post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'}).status_code == 200
-    assert not rc.caution.pits_open and 'BOXES CERRADOS: solo con permiso del director' in _break_notices(rc)
+    assert not rc.caution.pits_open and any(m.startswith('BOXES CERRADOS: solo con permiso del director') for m in _break_notices(rc))
+    assert [m for m in _break_notices(rc) if m.startswith('BOXES CERRADOS')][0].endswith(f' · abren en la vuelta {rc.nascar.laps + 2}'), 'the notice says on which lap the pit lane opens (the second crossing)'
+    assert rc.caution_eta()['pits'] == rc.nascar.laps + 2
     speeds, cars = {3: 200.0, 4: 200.0, 5: 200.0}, {3, 4, 5}
     assert rc.caution_lap(3, speeds, 1000.0, cars) is None, 'the first crossing is only part of a lap'
     rc.caution.pit_enter(4)
@@ -1170,7 +1179,8 @@ def test_the_pits_of_an_incident_caution_open_by_themselves_after_the_first_full
     assert rc.caution_lap(3, speeds, 1090.0, cars) == 'pits'
     rc.caution.pit_enter(5)
     assert rc.caution.pits_open and rc.caution.pit_breakers() == []
-    assert rc.caution_lap(3, speeds, 1180.0, cars) is None and rc.caution_laps == 2, 'then the lap count goes on to the automatic to go'
+    assert rc.caution_eta()['pits'] is None, 'the pit lane is open: no lap to announce'
+    assert rc.caution_lap(3, speeds, 1180.0, cars) == 'two' and rc.caution_laps == 2, 'then the lap count goes on: the automatic "two to go" comes a lap before the "one to go"'
 
 
 def test_the_order_at_the_end_of_each_stage_is_written_down_and_becomes_the_races_own_file_when_the_session_ends(live, monkeypatch):
@@ -1247,3 +1257,45 @@ def test_applying_the_same_pace_car_again_does_not_undo_the_director(session_eve
     assert inst.pace_steam_id is None, 'the same one again is not armed again'
     apply('76561190000000010')
     assert inst.pace_steam_id == '76561190000000010', 'a different one is'
+
+
+def test_the_caution_eta_tells_the_lap_of_each_step(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    assert rc.caution_eta() is None, 'no caution of ours'
+    rc.set_flag('yellow', field=client.field)
+    L = rc.nascar.laps
+    assert rc.caution_eta() == {'pits': L + 2, 'two': L + 3, 'one': L + 4, 'green': L + 5, 'green_max': L + 8}
+    rc.restart_plan(client.field.snapshot(), 2)
+    assert rc.caution_eta() == {'pits': None, 'two': None, 'one': L + 1, 'green': L + 2, 'green_max': L + 2}, 'two to go called: the next crossing is the one to go'
+    rc.restart_plan(client.field.snapshot(), 1)
+    assert rc.caution_eta() == {'pits': None, 'two': None, 'one': None, 'green': L + 1, 'green_max': L + 1}
+    rc.set_flag('green', field=client.field)
+    assert rc.caution_eta() is None
+
+
+def test_the_green_does_not_wait_for_ever_for_a_restart_leader_the_progress_never_shows_mid_lap(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    rc.set_flag('yellow', field=client.field)
+    rc.restart_plan(client.field.snapshot())
+    assert rc.green_if_due(3) is None and not rc.go_armed, 'first crossing: too soon'
+    assert rc.green_if_due(3) is not None and rc.flag == 'green', 'the second one is a whole lap later: the green, armed or not'
+
+
+def test_the_caution_eta_stops_promising_laps_that_are_past_and_gives_up_after_the_warning(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9))
+    rc.set_flag('yellow', field=client.field)
+    rc.caution_laps = 5
+    eta = rc.caution_eta()
+    nxt = rc.nascar.laps + 1
+    assert eta['one'] == nxt and eta['green'] == nxt + 1 and eta['two'] is None, 'the track is not clear: the next clear crossing, never a lap in the past'
+    rc.caution_notified = True
+    assert rc.caution_eta()['green'] is None, 'after the six-lap warning the "to go" is the director\'s'

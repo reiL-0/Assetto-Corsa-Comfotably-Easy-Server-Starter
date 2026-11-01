@@ -57,6 +57,7 @@ PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' repor
 PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
+GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -77,6 +78,8 @@ class RaceControl:
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
+        self.go_early = 0                  # crossings of the restart leader that came before go_armed (a second one brings the green anyway: if the progress never showed it mid-lap, the green must not wait for ever)
+        self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
         self.formation = False             # a rolling start is being run: the race begins under yellow behind the pace car (no Caution procedures, the NASCAR engine does not hear of it)
@@ -198,6 +201,12 @@ class RaceControl:
                 return None
             if car != (self.caution.restart[0] if self.caution.restart else self.pace_car):
                 return None
+            if not self.go_armed:
+                self.go_early += 1
+                if self.go_early == 1:   # (a second crossing is a whole lap later: the progress never showed the car mid-lap, so the green goes ahead)
+                    log.info("green held: car %s crossed before a whole lap since the \"to go\"", car)
+                    return None
+                log.info("green: car %s crossed twice since the \"to go\" without being seen mid-lap", car)
             if self.pace_car is not None and not self.pace_car_pitted:
                 if self.caution.restart:
                     self.blocked_crossings += 1
@@ -207,7 +216,7 @@ class RaceControl:
 
     def caution_lap(self, car: int, speeds: dict[int, float], now: float, connected: set[int] | None = None) -> str | None:
         """A car crossed the line under our caution. Only the pace car's laps count (the leader's when there is no pace car); the first crossing is a part of a lap. -> 'pits' (the first full lap is done: the pit lane opens), 'go' (at least CAUTION_MIN_LAPS
-        done and the track is clear: the automatic 'to go'), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
+        done and the track is clear: the automatic 'to go', announced as 'two' a lap before: 'two' = "two to go"), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
         with _lock:
             c = self.caution
             if not (c and self.flag in CAUTION and not self.pace_car_in and (self.one_more or not self.caution_notified)):   # (after the six-lap warning only a pending "two to go" still counts)
@@ -219,7 +228,7 @@ class RaceControl:
                 return None   # (the leader left the server: any car crossing counts, or the count would never move)
             if self.one_more:   # "two to go" was called: this crossing is the "one to go"
                 self.one_more = False
-                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0
+                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings, self.go_armed, self.go_early = True, False, 0, False, 0
                 self._bump()
                 log.info("two to go became one to go at the crossing of car %s", car)
                 return "one"
@@ -229,7 +238,7 @@ class RaceControl:
                 self._bump()
                 log.info("caution lap %s counted (car %s): the pit lane opens", self.caution_laps, car)
                 return "pits"
-            if self.caution_laps < CAUTION_MIN_LAPS:
+            if self.caution_laps < CAUTION_MIN_LAPS - 1:
                 log.info("caution lap %s/%s counted (car %s): too early for the automatic to go", self.caution_laps, CAUTION_MIN_LAPS, car)
                 return None
             pits = {i for i, t in self._pit_seen.items() if now - t < PIT_CLEAR}
@@ -237,11 +246,32 @@ class RaceControl:
             involved = self.watch.recent_involved(now, INVOLVED_FOR)
             log.info("caution lap %s counted (car %s): stopped=%s recent_involved=%s", self.caution_laps, car, stopped, bool(involved))
             if not stopped and not involved:
-                return "go"
+                return "two" if self.caution_laps == CAUTION_MIN_LAPS - 1 else "go"   # ("two to go" a lap before: at the next crossing it becomes the "one to go"; with the track not clear then, it waits for the "go" of a later lap)
+            if self.caution_laps < CAUTION_MIN_LAPS:
+                return None
             if self.caution_laps >= CAUTION_MAX_LAPS:
                 self.caution_notified = True
                 return "warn"
             return None
+
+    def caution_eta(self) -> dict | None:
+        """The race laps (as the leader's counter will read at the crossing) on which the caution's next steps come, for the panel and the pit-lane notice. An estimate: the laps are counted at the
+        crossings of the car that leads under the caution (caution_lap), and it assumes the track clears. `pits` = the pit lane opens (None once open), `two`/`one` = the automatic "two to go"/"one to go"
+        (None once called), `green` = the earliest green, `green_max` = the lap after which the "to go" is the director's."""
+        with _lock:
+            if not (self.caution and self.nascar):
+                return None
+            at = self.nascar.laps - self.caution_laps    # (lap of the crossing that will make the count k: at + k)
+            nxt = self.nascar.laps + 1                   # (lap of the next crossing)
+            if self.pace_car_in:
+                return {"pits": None, "two": None, "one": None, "green": nxt, "green_max": nxt}
+            if self.caution_notified:   # (the track did not clear in time: the "to go" is the director's, there is no lap to tell)
+                return {"pits": None, "two": None, "one": None, "green": None, "green_max": None}
+            if self.one_more:
+                return {"pits": None, "two": None, "one": nxt, "green": nxt + 1, "green_max": nxt + 1}
+            pits = at + PITS_OPEN_LAP if not self.caution.pits_open else None
+            two, one = at + CAUTION_MIN_LAPS - 1, max(at + CAUTION_MIN_LAPS, nxt)   # (the track not clear yet: the "to go" waits for the next clear crossing)
+            return {"pits": pits, "two": two if two >= nxt else None, "one": one, "green": one + 1, "green_max": at + CAUTION_MAX_LAPS + 1}
 
     def stage_break(self, pending_crossing: bool) -> int | None:
         """A stage break began under our caution: the pit lane opens (the stops are what the break is for) and the lap on which the green will come is returned (None without a caution of ours; 0 behind a
@@ -296,7 +326,7 @@ class RaceControl:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
             self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
-            self.pace_car_in = self.pace_car_pitted = self.one_more = False   # a new caution: the pace car comes out again
+            self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
@@ -410,7 +440,7 @@ class RaceControl:
                 self.one_more = True
             elif not self.pace_car_in:   # (a second "to go" does not forget that the pace car already pitted)
                 self.one_more = False
-                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings = True, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
+                self.pace_car_in, self.pace_car_pitted, self.blocked_crossings, self.go_armed, self.go_early = True, False, 0, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
             log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)
             return plan
@@ -422,6 +452,10 @@ class RaceControl:
             if not c:
                 return []
             out: list[tuple] = []
+            if self.pace_car_in and not self.go_armed:   # (the car that takes the restart seen in the middle of its lap: its next crossing is the one that brings the green)
+                lead = c.restart[0] if c.restart else self.pace_car
+                if lead in progress and GO_ARM_FROM <= progress[lead] % 1.0 <= GO_ARM_TO:
+                    self.go_armed = True
             if c.free_pass is not None and c.free_pass in c.pitted:
                 out.append(("no_free_pass", c.void_free_pass()))
             exempt = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
@@ -501,7 +535,7 @@ class RaceControl:
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None,
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60}
 
