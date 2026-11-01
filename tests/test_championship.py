@@ -385,3 +385,21 @@ def test_a_practice_event_with_count_only_league_is_counted_without_points_and_k
         assert league.count_results(s, sc, ev, now + 60) == 0 and len(s.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == lg)).all()) == 1
     assert client.get(f"/api/v1/championships/{lg}/standings").json() == []
     assert [r["scores"] for r in client.get(f"/api/v1/championships/{lg}/races").json()] == [False]
+
+
+def test_a_counted_race_is_named_after_the_event_that_ran_it_when_the_result_has_no_name():
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import ChampionshipEvent, Event
+    sid = client.post("/api/v1/servers", json={"name": "ChampTitle"}).json()["id"]
+    _write_race_result(sid, "titled.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}])
+    _write_race_result(sid, "byhand.json", [{"DriverName": "Alice", "DriverGuid": "1", "TotalTime": 600000}])
+    cid = client.post("/api/v1/championships", json={"name": "Title Cup"}).json()["id"]
+    with Session(engine) as s:
+        ev = Event(title="Daytona 500", data={"name": "r", "track": "spa", "cars": ["a"]})
+        s.add(ev)
+        s.commit()
+        s.add(ChampionshipEvent(championship_id=cid, server_id=sid, filename="titled.json", event_id=ev.id, session_type="Race"))
+        s.add(ChampionshipEvent(championship_id=cid, server_id=sid, filename="byhand.json", session_type="Race"))
+        s.commit()
+    assert [r["name"] for r in client.get(f"/api/v1/championships/{cid}/races").json()] == ["Daytona 500", None], "an event's title; a result added by hand keeps the site's fallback"
