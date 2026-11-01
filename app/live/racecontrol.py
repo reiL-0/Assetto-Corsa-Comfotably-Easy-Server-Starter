@@ -58,6 +58,7 @@ PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 i
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
+RACE_TYPE = 3                     # ACSP session_type of a race
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -69,6 +70,9 @@ class RaceControl:
         self.notices: list[dict] = []   # on-screen messages for the hub ({id, kind, text, to, until}); `to` = a car id, -1 = everybody
         self.rev, self.ts = 0, time.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
+        self.server_id = 0               # (set by state_of)
+        self.cuts_server: dict[int, int] = {}   # car -> cuts the acServer counted in the laps it finished in this race (the authority: what the rulebook's rule counts)
+        self.cuts_client: dict[int, int] = {}   # car -> excursions its own game reported (live: it does not wait for the lap to end; evidence, the driver's game could lie about it)
         self.nascar: Nascar | None = None
         self.caution: Caution | None = None   # the procedures of the caution being run (only with NASCAR armed), see app/live/caution.py
         self.watch = Watch()   # contacts and stopped cars: the proposal of a caution, and who is involved in one (app/live/incidents.py)
@@ -528,7 +532,24 @@ class RaceControl:
             self._bump()
             return out
 
+    def add_cuts(self, car: int, n: int, from_client: bool) -> None:
+        """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
+        with _lock:
+            book = self.cuts_client if from_client else self.cuts_server
+            book[car] = book.get(car, 0) + n
+            self._bump()
+
+    def cuts_view(self, rule: dict | None) -> dict:
+        """The counter of the hub: {cuts: {car: n}, cuts_rule}. n is the larger of the two counts (the game's own report is faster, the acServer's is the one that counts: neither is ever hidden by the other).
+        Only in a race and with a rule: otherwise nothing is shown."""
+        with _lock:
+            if not (rule and (self.session_ref or {}).get("session_type") == RACE_TYPE):
+                return {"cuts": {}, "cuts_rule": None}
+            cars = set(self.cuts_server) | set(self.cuts_client)
+            return {"cuts": {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}, "cuts_rule": rule}
+
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
+        rule = cut_rule_peek(self.server_id) if self.server_id else None   # (the cache only: this is also taken from the event loop and under the caller's lock, so no database; race-state refreshes it first)
         with _lock:
             at = time.time() if now is None else now
             notices = [{"id": n["id"], "kind": n["kind"], "left_s": math.ceil(n["until"] - at), "text": n["text"], "to": n["to"]} for n in self.notices if n["until"] > at]
@@ -537,7 +558,36 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60}
+                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule)}
+
+
+def cut_rule_peek(server_id: int) -> dict | None:
+    """The cut rule as it was last read (no database, no waiting): what the state snapshot shows."""
+    try:
+        from app.league import cut_rule_cached   # (late: league imports servers, which imports this module)
+        return cut_rule_cached(server_id)
+    except Exception:   # noqa: BLE001 - the counter must never break the state every hub reads
+        return None
+
+
+def cut_rule_of(server_id: int) -> dict | None:
+    """The cut rule of the league event running on this server (app/league.py `cut_rule`), read from the database when the cache is stale: only from a request thread, never the event loop or under the lock.
+    None when the database cannot say: the counter is only a screen."""
+    try:
+        from app.league import cut_rule   # (late: league imports servers, which imports this module)
+        return cut_rule(server_id)
+    except Exception:   # noqa: BLE001 - never let the counter break the state every hub reads
+        log.warning("cut rule of server %s could not be read", server_id, exc_info=True)
+        return None
+
+
+def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool) -> None:
+    """Cuts of a car, from the acServer's lap count or from the driver's own game. Only in a race (the counter and the rule are the race's)."""
+    if n <= 0 or (session or {}).get("session_type") != RACE_TYPE:
+        return
+    rc = state_of(server_id, True, session, create=True)
+    if rc:
+        rc.add_cuts(car_id, n, from_client)
 
 
 _states: dict[int, RaceControl] = {}
@@ -552,6 +602,7 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
             rc = None
             if running and session_ref is not None:   # a session change: tell the hub clients (rev moves on) that the old flag is gone
                 fresh = RaceControl(session_ref)
+                fresh.server_id = server_id
                 fresh.rev = 1
                 old = _old
                 fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid   # (the director's choices outlive the session)
@@ -559,6 +610,7 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 return fresh
         if rc is None and create and running:
             rc = _states[server_id] = RaceControl(session_ref)
+            rc.server_id = server_id
         return rc
 
 
