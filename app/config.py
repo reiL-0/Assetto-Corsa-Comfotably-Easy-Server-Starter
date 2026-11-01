@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ACM_", env_file=".env", extra="ignore")
 
-    # The CSP hub script (opr_hub.lua, served by the website): added to the extra options of EVERY server, not chosen per server (app/csp.py `extra_for`).
+    # The CSP hub script (opr_hub.lua, served by the website): added to the extra options of every server unless its checkbox in Control AC is off (`Server.csp_off`, app/csp.py `extra_for`).
     # `csp_hub_version` goes in the script URL: CSP caches a script by URL, so it is raised whenever the script changes. ACM_CSP_HUB=false turns it off everywhere.
     csp_hub: bool = True
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     csp_probe_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua"
     csp_probe_servers: str = ""
     # The lap trainer (static/csp/opr_trainer.lua: braking-point bar, live delta, corner summaries, practice and qualifying only; it also SENDS the driver's telemetry in every session and asks for the
-    # token with OPRHELLO): every server by default, ACM_CSP_TRAINER_SERVERS=`*,!3` to keep one out, empty to switch it off everywhere.
+    # token with OPRHELLO): every server by default (checkbox per server in Control AC: `Server.csp_off`); ACM_CSP_TRAINER_SERVERS=`*,!3` / empty is only the ops brake and should stay unset.
     # `csp_trainer_version` goes in the URL like the hub's: raise it whenever the script changes.
     csp_trainer_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua"
     csp_trainer_version: str = "12"   # 12: 5 frames a second instead of 10 (the ingest of the site is one process)

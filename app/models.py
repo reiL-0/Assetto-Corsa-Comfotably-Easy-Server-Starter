@@ -47,6 +47,7 @@ class Server(SQLModel, table=True):
     welcome: str = ""  # text shown to a driver on joining (WELCOME_MESSAGE file); changes with each session
     weather_plan: dict | None = Field(default=None, sa_type=JSON)  # {steps: [[second, WeatherFX type]], transition_s, loop_s, ambient}: played to CSP clients (app/live/cspweather.py)
     csp_extra: str = ""  # Custom Shaders Patch extra options (INI) hidden at the end of the welcome message (app/csp.py); kept across sessions
+    csp_off: str = ""  # OPR CSP scripts switched off for this server, "hub,trainer" ("" = all on, also on a server made later; app/csp.py `extra_for`)
     session: dict | None = Field(default=None, sa_type=JSON)  # the last servers.SessionIn applied (no admin password): what the panel edits and the calendar starts from
     integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting

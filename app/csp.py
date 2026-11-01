@@ -36,24 +36,37 @@ def server_listed(server_id: int, spec: str) -> bool:
     return f"!{sid}" not in items and ("*" in items or sid in items)
 
 
-def extra_for(server_id: int, extra: str) -> str:
-    """The extra options a server really sends: its own (`Server.csp_extra`) plus the OPR hub script, always (flags, penalties and track-limit reports of every session do not depend on
-    anyone having pasted a section). It takes the first free `[SCRIPT_n]` from 100 up so it never replaces a script the admin added."""
+def scripts_off(csp_off: str) -> set[str]:
+    """`Server.csp_off`: the scripts the admin switched off for one server, as `hub,trainer` ('' = all on, so a server made later is born with them)."""
+    return {x.strip() for x in csp_off.split(",") if x.strip()}
+
+
+def hub_enabled(csp_off: str = "") -> bool:
+    """Whether this server sends the OPR hub. It also decides if the game keeps its own penalties (ini_generator.server_cfg): with no hub nobody else applies them."""
+    return settings.csp_hub and "hub" not in scripts_off(csp_off)
+
+
+def extra_for(server_id: int, extra: str, csp_off: str = "") -> str:
+    """The extra options a server really sends: its own (`Server.csp_extra`) plus the OPR scripts, each one switched off per server by `csp_off` (hub: flags, penalties and track-limit reports of every
+    session, so no one has to paste a section; trainer: the lap trainer that also SENDS the driver's telemetry and asks for its token with OPRHELLO, every server by default, the ones made later too).
+    The probe (temporary) only goes to the servers ACM_CSP_PROBE_SERVERS names. Each takes the first free `[SCRIPT_n]` from 100 up so it never replaces a script the admin added.
+    ACM_CSP_HUB=false is the master switch: nothing of OPR is sent."""
     if not settings.csp_hub:
         return extra
-    n = 100
-    while re.search(rf"^\s*\[SCRIPT_{n}\]", extra, re.M | re.I):
+    off = scripts_off(csp_off)
+    scripts = []   # (switch of the checkbox, ACM_CSP_*_SERVERS selector, script URL, extra lines)
+    scripts.append(("hub", "*", f"{settings.csp_hub_url}?v={settings.csp_hub_version}", f"SERVER = {server_id}\n"))
+    scripts.append(("probe", settings.csp_probe_servers, settings.csp_probe_url, ""))
+    scripts.append(("trainer", settings.csp_trainer_servers, f"{settings.csp_trainer_url}?v={settings.csp_trainer_version}", ""))
+    out, n = [], 100
+    for key, servers, url, more in scripts:
+        if key in off or not server_listed(server_id, servers):
+            continue
+        while re.search(rf"^\s*\[SCRIPT_{n}\]", extra, re.M | re.I):
+            n += 1
+        out.append(f'[SCRIPT_{n}]\nSCRIPT = "{url}"\n{more}')
         n += 1
-    hub = f'[SCRIPT_{n}]\nSCRIPT = "{settings.csp_hub_url}?v={settings.csp_hub_version}"\nSERVER = {server_id}\n'
-    k = n + 1
-    # the other scripts, each for the servers its setting names (server_listed): the race-control plugin's probe (temporary, off unless named) and the lap trainer, which also sends the driver's
-    # telemetry and asks for its token (OPRHELLO): every server by default, the ones made later too
-    for url, servers in ((settings.csp_probe_url, settings.csp_probe_servers),
-                         (f"{settings.csp_trainer_url}?v={settings.csp_trainer_version}", settings.csp_trainer_servers)):
-        if server_listed(server_id, servers):
-            hub += f'\n[SCRIPT_{k}]\nSCRIPT = "{url}"\n'
-            k += 1
-    return (extra.strip() + "\n\n" if extra.strip() else "") + hub
+    return (extra.strip() + "\n\n" if extra.strip() and out else extra) + "\n".join(out)
 
 
 def welcome_with_extra(welcome: str, extra: str) -> str:
