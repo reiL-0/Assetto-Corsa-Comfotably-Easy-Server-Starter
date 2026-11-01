@@ -43,6 +43,7 @@ from app.schemas.servers import (  # noqa: F401 - re-exported: other modules imp
     WeatherPlanIn,
     CspWeatherIn,
     CspExtraIn,
+    CspScriptsIn,
     LimitsIn,
     ChatIn,
     SetSessionIn,
@@ -70,6 +71,7 @@ def _out(s: Server) -> ServerOut:
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
+        csp_scripts={k: k not in csp.scripts_off(s.csp_off) for k in ("hub", "trainer")},
         weather_plan=s.weather_plan,
         session=s.session,
         integrity=s.integrity,
@@ -84,7 +86,7 @@ _render_ini = ini_generator.render_ini
 
 def render_server_cfg(s: Server) -> str:
     """server_cfg.ini with allocated ports merged into [SERVER] (user values win)."""
-    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra).strip()), settings.csp_hub)
+    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra, s.csp_off).strip()), csp.hub_enabled(s.csp_off))
 
 
 def render_entry_list(s: Server) -> str:
@@ -277,6 +279,17 @@ def set_csp_extra(server_id: int, body: CspExtraIn, sess: SessionDep) -> ServerO
     (app/csp.py). Written to `cfg/welcome.txt` the next time the server starts or a session is applied; kept across sessions."""
     s = _get(sess, server_id)
     s.csp_extra = body.text.strip()
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    return _out(s)
+
+
+@router.put("/{server_id}/csp_scripts", response_model=ServerOut)
+def set_csp_scripts(server_id: int, body: CspScriptsIn, sess: SessionDep) -> ServerOut:
+    """Which OPR CSP scripts this server sends (hub, trainer + telemetry). All on by default; the change reaches drivers when the server starts or a session is applied (welcome.txt)."""
+    s = _get(sess, server_id)
+    s.csp_off = ",".join(k for k, on in (("hub", body.hub), ("trainer", body.trainer)) if not on)
     sess.add(s)
     sess.commit()
     sess.refresh(s)

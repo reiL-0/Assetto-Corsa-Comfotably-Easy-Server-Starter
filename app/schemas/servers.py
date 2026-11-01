@@ -52,6 +52,7 @@ class ServerOut(BaseModel):
     integrity_extras: bool = False
     welcome: str = ""
     csp_extra: str = ""
+    csp_scripts: dict[str, bool] = {}  # {hub, trainer}: which OPR CSP scripts this server sends (app/csp.py)
     weather_plan: dict | None = None  # played to CSP clients as hidden chat commands (app/live/cspweather.py)
     session: dict | None = None  # the last SessionIn applied through /apply (None for a server never set up from the panel)
 
@@ -256,6 +257,11 @@ class CspWeatherIn(BaseModel):
 
 class CspExtraIn(BaseModel):
     text: str = Field(default="", max_length=6000)  # INI; "" removes it
+
+
+class CspScriptsIn(BaseModel):
+    hub: bool
+    trainer: bool
 
 
 class LimitsIn(BaseModel):

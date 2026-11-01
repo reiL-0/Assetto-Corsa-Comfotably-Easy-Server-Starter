@@ -73,6 +73,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | GET | `/api/v1/servers/{server_id}/cars` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/chat` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/csp_extra` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| PUT | `/api/v1/servers/{server_id}/csp_scripts` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/csp_weather` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/entry_list.ini` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/entry_list.ini` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

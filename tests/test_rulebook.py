@@ -156,7 +156,7 @@ def test_migration_006_adds_the_column_and_leaves_every_league_on_its_older_rule
     db.init_db()
     con = sqlite3.connect(path)
     assert con.execute("SELECT id, name, rulebook FROM championships").fetchall() == [(1, "Vieja", None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     db.init_db()   # rerun
 
 

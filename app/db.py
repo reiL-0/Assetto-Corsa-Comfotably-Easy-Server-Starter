@@ -195,6 +195,12 @@ def _m011_practice_no_points(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "events" ADD COLUMN "count_only_league_id" INTEGER')
 
 
+def _m012_server_csp_off(con: sqlite3.Connection) -> None:
+    """`servers.csp_off`: the OPR CSP scripts switched off per server ('' = none, so every existing server keeps them all on)."""
+    if "csp_off" not in {row[1] for row in con.execute('PRAGMA table_info("servers")')}:
+        con.execute('ALTER TABLE "servers" ADD COLUMN "csp_off" VARCHAR NOT NULL DEFAULT \'\'')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -207,6 +213,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (9, _m009_member_in_pits),
     (10, _m010_member_number),
     (11, _m011_practice_no_points),
+    (12, _m012_server_csp_off),
 ]
 
 
