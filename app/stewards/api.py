@@ -70,4 +70,6 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
     car = cars.get(body.car_id)
     if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
         raise HTTPException(409, "that car is not that driver")
-    engine.record_limits(inst.acsp, body.car_id, body.name, body.model_dump(exclude={"car_id", "name"}))
+    if engine.record_limits(inst.acsp, body.car_id, body.name, body.model_dump(exclude={"car_id", "name"})):
+        from app.live.racecontrol import on_cuts
+        on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)   # (the counter of the hub, live: an excursion that was not a flood)

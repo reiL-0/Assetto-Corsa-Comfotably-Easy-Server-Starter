@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 import time
 from datetime import timezone
@@ -185,6 +186,42 @@ def qualy_banned(server_id: int, guid: str) -> bool:
         sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
         ev = s.get(Event, sc.event_id) if sc else None
         return bool(ev and ev.league_id and active_suspensions(s, ev.league_id, ("qualy",), time.time(), guid))
+
+
+_CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
+_cut_rule_lock = threading.Lock()
+CUT_RULE_TTL = 30.0
+
+
+def cut_rule(server_id: int) -> dict | None:
+    """The track-cut rule of the league event running on this server now, as the hub's counter needs it: {max: free cuts (tolerance), per: cuts per step, step: seconds per step, cap: most seconds}.
+    None when no league event is running, its rulebook has no cut rule or it is not a league's. Read from the database at most every CUT_RULE_TTL s (the state of the hub asks every second)."""
+    hit = _CUT_RULES.get(server_id)
+    if hit and time.time() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    from app.rulebook import effective   # (late: the rulebook module imports the championship ones)
+    with _cut_rule_lock:   # (one read at a time: requests that find the cache stale together do not all go to the database, and an older read never replaces a newer one)
+        hit = _CUT_RULES.get(server_id)
+        if hit and time.time() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        rule = None
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            cut = effective(c).detectors.cuts if c else None
+            if cut:
+                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": cut.max_seconds}
+        if len(_CUT_RULES) > 64:
+            _CUT_RULES.clear()
+        _CUT_RULES[server_id] = (time.time(), rule)
+        return rule
+
+
+def cut_rule_cached(server_id: int) -> dict | None:
+    """What `cut_rule` read last, with no database and no waiting (None before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
+    hit = _CUT_RULES.get(server_id)
+    return hit[1] if hit else None
 
 
 def _qualy_grid(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict) -> None:
