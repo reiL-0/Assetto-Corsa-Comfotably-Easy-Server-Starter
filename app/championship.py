@@ -13,7 +13,7 @@ from sqlmodel import select
 from app import content, requirements
 from app.db import SessionDep
 from app.leaguelock import serialized
-from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension
+from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Schedule
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
 from app.schemas.servers import _folder_name, _setup_name
@@ -191,8 +191,10 @@ def add_event(championship_id: int, body: EventIn, sess: SessionDep) -> Champion
     get_open(sess, championship_id)
     if not result_path(body.server_id, body.filename).is_file():
         raise HTTPException(404, "result not found")
+    made = result_path(body.server_id, body.filename).stat().st_mtime
+    ran = sess.exec(select(Schedule).where(Schedule.server_id == body.server_id, Schedule.start_at <= made, Schedule.start_at >= made - 12 * 3600).order_by(Schedule.start_at.desc())).first()   # the event that ran it (its title names the race); None = not from a schedule
     e = ChampionshipEvent(
-        championship_id=championship_id, server_id=body.server_id, filename=body.filename, scores=body.scores
+        championship_id=championship_id, server_id=body.server_id, filename=body.filename, scores=body.scores, event_id=ran.event_id if ran else None
     )
     sess.add(e)
     sess.commit()
