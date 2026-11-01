@@ -52,7 +52,7 @@ class ServerOut(BaseModel):
     integrity_extras: bool = False
     welcome: str = ""
     csp_extra: str = ""
-    csp_scripts: dict[str, bool] = {}  # {hub, trainer}: which OPR CSP scripts this server sends (app/csp.py)
+    csp_scripts: dict[str, bool] = {}  # {hub, trainer, nascar}: which OPR CSP scripts this server sends (app/csp.py)
     weather_plan: dict | None = None  # played to CSP clients as hidden chat commands (app/live/cspweather.py)
     session: dict | None = None  # the last SessionIn applied through /apply (None for a server never set up from the panel)
 
@@ -262,6 +262,7 @@ class CspExtraIn(BaseModel):
 class CspScriptsIn(BaseModel):
     hub: bool
     trainer: bool
+    nascar: bool | None = None   # the NASCAR caution banners of the hub (they load only when the session asks for NASCAR, see csp.nascar_requested); not sent = as it was
 
 
 class LimitsIn(BaseModel):

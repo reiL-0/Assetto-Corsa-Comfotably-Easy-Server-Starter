@@ -126,16 +126,24 @@ def test_csp_scripts_are_on_by_default_and_switch_off_per_server():
     from app.config import settings
     api = TestClient(app, headers=ADMIN)
     sid = api.post("/api/v1/servers", json={"name": "Scripts"}).json()["id"]
-    assert api.get(f"/api/v1/servers/{sid}").json()["csp_scripts"] == {"hub": True, "trainer": True}   # born with everything on
+    assert api.get(f"/api/v1/servers/{sid}").json()["csp_scripts"] == {"hub": True, "trainer": True, "nascar": True}   # born with everything on
     settings.csp_hub = True   # (conftest switches the hub off for the older tests)
     try:
         both = csp.extra_for(sid, "[SCRIPT_100]\nSCRIPT = x\n")
         assert "opr_hub.lua" in both and "opr_trainer.lua" in both and "[SCRIPT_101]" in both and "[SCRIPT_102]" in both   # the admin's own script keeps 100
         r = api.put(f"/api/v1/servers/{sid}/csp_scripts", json={"hub": True, "trainer": False})
-        assert r.status_code == 200 and r.json()["csp_scripts"] == {"hub": True, "trainer": False}
+        assert r.status_code == 200 and r.json()["csp_scripts"] == {"hub": True, "trainer": False, "nascar": True}
         got = csp.extra_for(sid, "", "trainer")
         assert "opr_hub.lua" in got and "opr_trainer.lua" not in got
         assert "opr_hub.lua" not in csp.extra_for(sid, "", "hub") and csp.hub_enabled("hub") is False and csp.hub_enabled("trainer") is True
         assert csp.extra_for(sid, "", "hub,trainer") == ""
+        # the NASCAR banners of the hub: only for a session that asks for NASCAR, and not when the admin switched them off
+        nas = {"nascar": {"total": 70}}
+        assert "NASCAR = 1" not in csp.extra_for(sid, "") and "NASCAR = 1" not in csp.extra_for(sid, "", "", {}) and "NASCAR = 1" not in csp.extra_for(sid, "", "", {"nascar": None})
+        assert "NASCAR = 1" in csp.extra_for(sid, "", "", nas) and "NASCAR = 1" not in csp.extra_for(sid, "", "nascar", nas)
+        r = api.put(f"/api/v1/servers/{sid}/csp_scripts", json={"hub": True, "trainer": True, "nascar": False})
+        assert r.json()["csp_scripts"] == {"hub": True, "trainer": True, "nascar": False}
+        r = api.put(f"/api/v1/servers/{sid}/csp_scripts", json={"hub": False, "trainer": True})   # an older panel does not send nascar: it stays off
+        assert r.json()["csp_scripts"] == {"hub": False, "trainer": True, "nascar": False}
     finally:
         settings.csp_hub = False

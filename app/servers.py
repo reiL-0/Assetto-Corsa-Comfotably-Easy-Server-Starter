@@ -71,7 +71,7 @@ def _out(s: Server) -> ServerOut:
         limits={"cpu_percent": s.cpu_limit, "mem_mb": s.mem_limit_mb, "enforced": settings.limits_scope in ("user", "system")},
         welcome=s.welcome,
         csp_extra=s.csp_extra,
-        csp_scripts={k: k not in csp.scripts_off(s.csp_off) for k in ("hub", "trainer")},
+        csp_scripts={k: k not in csp.scripts_off(s.csp_off) for k in ("hub", "trainer", "nascar")},
         weather_plan=s.weather_plan,
         session=s.session,
         integrity=s.integrity,
@@ -86,7 +86,7 @@ _render_ini = ini_generator.render_ini
 
 def render_server_cfg(s: Server) -> str:
     """server_cfg.ini with allocated ports merged into [SERVER] (user values win)."""
-    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra, s.csp_off).strip()), csp.hub_enabled(s.csp_off))
+    return ini_generator.server_cfg(s.config, _ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra, s.csp_off, s.session).strip()), csp.hub_enabled(s.csp_off))
 
 
 def render_entry_list(s: Server) -> str:
@@ -289,7 +289,8 @@ def set_csp_extra(server_id: int, body: CspExtraIn, sess: SessionDep) -> ServerO
 def set_csp_scripts(server_id: int, body: CspScriptsIn, sess: SessionDep) -> ServerOut:
     """Which OPR CSP scripts this server sends (hub, trainer + telemetry). All on by default; the change reaches drivers when the server starts or a session is applied (welcome.txt)."""
     s = _get(sess, server_id)
-    s.csp_off = ",".join(k for k, on in (("hub", body.hub), ("trainer", body.trainer)) if not on)
+    nascar = ("nascar" not in csp.scripts_off(s.csp_off)) if body.nascar is None else body.nascar   # (a panel that does not know the switch leaves it as it was)
+    s.csp_off = ",".join(k for k, on in (("hub", body.hub), ("trainer", body.trainer), ("nascar", nascar)) if not on)
     sess.add(s)
     sess.commit()
     sess.refresh(s)
