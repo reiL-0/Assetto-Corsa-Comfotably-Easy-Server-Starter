@@ -35,7 +35,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import cut_notices
+from app.stewards.auto import cut_notices, give_back_penalties
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn, _folder_name, _setup_name
@@ -189,6 +189,7 @@ def qualy_banned(server_id: int, guid: str) -> bool:
 
 
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
+_GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
 
@@ -216,6 +217,43 @@ def cut_rule(server_id: int) -> dict | None:
             _CUT_RULES.clear()
         _CUT_RULES[server_id] = (time.time(), rule)
         return rule
+
+
+def give_back_rule(server_id: int) -> dict | None:
+    """The rule of the advantage gained off the track of the league event running on this server: {seconds, window_s}; None when no league event runs or the league switched it off. Cached like `cut_rule`
+    (CUT_RULE_TTL, one read at a time): from a request thread, never from the event loop."""
+    hit = _GIVE_BACK_RULES.get(server_id)
+    if hit and time.time() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    from app.rulebook import effective
+    with _cut_rule_lock:
+        hit = _GIVE_BACK_RULES.get(server_id)
+        if hit and time.time() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        rule = None
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            gb = effective(c).detectors.give_back if c else None
+            if gb and gb.enabled:
+                rule = {"seconds": gb.seconds, "window_s": gb.window_s}
+        if len(_GIVE_BACK_RULES) > 64:
+            _GIVE_BACK_RULES.clear()
+        _GIVE_BACK_RULES[server_id] = (time.time(), rule)
+        return rule
+
+
+def give_back_rule_cached(server_id: int) -> dict | None:
+    """What `give_back_rule` read last (no database, no waiting): for the monitor, which runs on the event loop."""
+    hit = _GIVE_BACK_RULES.get(server_id)
+    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None   # (never an old league's rule: the monitor refreshes it every CUT_RULE_TTL)
+
+
+def give_back_rule_stale(server_id: int) -> bool:
+    """Whether the cached rule of this server is missing or due to be read again (the monitor then reads it in a worker thread)."""
+    hit = _GIVE_BACK_RULES.get(server_id)
+    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
 
 
 def cut_rule_cached(server_id: int) -> dict | None:
@@ -270,11 +308,13 @@ def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
 
 def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, until: float) -> int:
     d, added = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0
+    last_end = sc.start_at   # where the race being counted began, for what fell due in it: the end of the one counted before (or the schedule's start)
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         if not sc.start_at <= f.stat().st_mtime <= until:
             continue
         if sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == c.id, ChampionshipEvent.server_id == sc.server_id,
                                                       ChampionshipEvent.filename == f.name)).first():
+            last_end = max(last_end, f.stat().st_mtime)
             continue
         parsed = parse_result_file(f)
         if parsed["type"] not in ("Race", "Qualify"):
@@ -287,6 +327,8 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             added += 1
             _race_served(sess, c, f.stat().st_mtime)
             cut_notices(sess, c, sc.server_id, f.name, parsed)
+            give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
+            last_end = f.stat().st_mtime
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)
     sess.commit()

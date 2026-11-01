@@ -59,8 +59,18 @@ class CutRule(_Strict):
     max_seconds: int = Field(ge=1, le=600)
 
 
+class GiveBackRule(_Strict):
+    """The advantage gained off the track (app/live/giveback.py): a car that leaves the track and comes back in front of a car it was behind has `window_s` seconds to give the place back, or the race time
+    grows by `seconds`. ON by default (that is what a league that never touched it gets); `enabled: false` switches it off for the league."""
+
+    enabled: bool = True
+    seconds: int = Field(default=5, ge=1, le=60)
+    window_s: int = Field(default=30, ge=10, le=120)
+
+
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
+    give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 
 
 class Rulebook(_Strict):

@@ -26,6 +26,7 @@ import time
 from collections import deque
 
 from app.live.caution import Caution
+from app.live.giveback import GiveBack
 from app.live.incidents import Watch
 from app.live.nascar import BREAK, CAUTION, Nascar, STAGES_DEFAULT
 
@@ -71,6 +72,10 @@ class RaceControl:
         self.rev, self.ts = 0, time.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.server_id = 0               # (set by state_of)
+        self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
+        self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
+        self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
+        self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
         self.cuts_server: dict[int, int] = {}   # car -> cuts the acServer counted in the laps it finished in this race (the authority: what the rulebook's rule counts)
         self.cuts_client: dict[int, int] = {}   # car -> excursions its own game reported (live: it does not wait for the lap to end; evidence, the driver's game could lie about it)
         self.nascar: Nascar | None = None
@@ -325,6 +330,8 @@ class RaceControl:
             if self.pace_car is not None and self.pace_car in (car, other):
                 return   # the pace car is not a competitor: a touch with it makes nobody 'involved' and is no part of a pile-up
             self.watch.on_contact(now, car, other, speed)
+            if self.giveback:
+                self.giveback.note_contact(now, car, other)   # (who touched whom around a move off the track: for the director, not for the automatic judge)
 
     def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
@@ -532,12 +539,74 @@ class RaceControl:
             self._bump()
             return out
 
+    def give_back_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
+        """One look at the advantage gained off the track. -> the events of app/live/giveback.py (open / cleared / due); [] and nothing kept when this is not a race with the rule on."""
+        with _lock:
+            if not (self.gb_rule and (self.session_ref or {}).get("session_type") == RACE_TYPE):
+                if self.giveback:
+                    self.giveback.clear()
+                    self.giveback = None
+                self.gb_owner.clear()
+                return []
+            if self.giveback is None:
+                self.giveback = GiveBack(self.gb_rule["window_s"])
+            self.giveback.window_s = self.gb_rule["window_s"]
+            exempt = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
+            progress = self.without_pace_car(progress)
+            events = self.giveback.step(now, progress, {c: v for c, v in speeds.items() if c in progress}, exempt, caution=self.flag in CAUTION)
+            if events:
+                self._bump()
+            return events
+
+    def give_back_forgive(self, ob_id: int) -> bool:
+        with _lock:
+            ok = bool(self.giveback and self.giveback.forgive(ob_id))
+            self.gb_owner.pop(ob_id, None)
+            if ok:
+                self._bump()
+            return ok
+
+    def give_back_peek(self, ob_id: int) -> dict | None:
+        """A copy of an open obligation ({id, car, creditors}) without closing it."""
+        with _lock:
+            ob = next((o for o in (self.giveback._open.values() if self.giveback else ()) if o["id"] == ob_id), None)
+            return {"id": ob["id"], "car": ob["car"], "creditors": sorted(ob["creditors"])} if ob else None
+
+    def give_back_due_now(self, ob_id: int) -> dict | None:
+        """The director sanctions an open obligation: closed and returned (None when it was not open); `give_back_restore` puts it back if its penalty cannot be written."""
+        with _lock:
+            ob = self.giveback.due_now(ob_id) if self.giveback else None
+            if ob:
+                self._bump()
+            return ob
+
+    def give_back_restore(self, ob: dict) -> None:
+        with _lock:
+            if self.giveback:
+                self.giveback.restore(ob)
+                self._bump()
+
+    def give_back_report(self, car: int, now: float, ms: int, lap: int, spline: float) -> None:
+        """An excursion off the track that the driver's own game reported (stewards/report)."""
+        with _lock:
+            if self.giveback and car != self.pace_car:
+                self.giveback.report(car, now, ms, lap, spline)
+
     def add_cuts(self, car: int, n: int, from_client: bool) -> None:
         """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
         with _lock:
             book = self.cuts_client if from_client else self.cuts_server
             book[car] = book.get(car, 0) + n
             self._bump()
+
+    def give_back_view(self, now: float) -> dict:
+        """What the hub and the panel read: the obligations that are open ({id, car, creditors, left_s}) and the cases left for the director."""
+        with _lock:
+            gb = self.giveback
+            label = lambda c: self.gb_names.get(c) or f"#{c}"
+            clean = lambda s: str(s).replace('"', "'").replace("\\", "/")[:24]   # (the hub reads the state with patterns: no quote or backslash in a name)
+            obs = [{**o, "names": ", ".join(clean(label(c)) for c in o["creditors"])} for o in (gb.open_obligations(now) if gb else [])]
+            return {"obligations": obs, "give_back_reviews": list(gb.reviews) if gb else []}
 
     def cuts_view(self, rule: dict | None) -> dict:
         """The counter of the hub: {cuts: {car: n}, cuts_rule}. n is the larger of the two counts (the game's own report is faster, the acServer's is the one that counts: neither is ever hidden by the other).
@@ -558,7 +627,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule), **self.give_back_view(time.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:
@@ -579,6 +648,42 @@ def cut_rule_of(server_id: int) -> dict | None:
     except Exception:   # noqa: BLE001 - never let the counter break the state every hub reads
         log.warning("cut rule of server %s could not be read", server_id, exc_info=True)
         return None
+
+
+def give_back_rule_peek(server_id: int) -> dict | None:
+    """The rule of the advantage gained off the track as it was last read (no database, no waiting): what the monitor uses on the event loop."""
+    try:
+        from app.league import give_back_rule_cached   # (late: league imports servers, which imports this module)
+        return give_back_rule_cached(server_id)
+    except Exception:   # noqa: BLE001 - never let this break the monitor
+        return None
+
+
+def give_back_rule_stale(server_id: int) -> bool:
+    try:
+        from app.league import give_back_rule_stale as stale
+        return stale(server_id)
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def give_back_rule_of(server_id: int) -> dict | None:
+    """The same rule, read from the database when the cache is stale: only from a request thread."""
+    try:
+        from app.league import give_back_rule
+        return give_back_rule(server_id)
+    except Exception:   # noqa: BLE001
+        log.warning("give-back rule of server %s could not be read", server_id, exc_info=True)
+        return None
+
+
+def on_excursion(server_id: int, session: object, car_id: int, ms: int, lap: int, spline: float, now: float | None = None) -> None:
+    """The game of a car reported an excursion off the track (stewards/report): it goes to the advantage judge when there is one (a race with the rule on)."""
+    if (session or {}).get("session_type") != RACE_TYPE:
+        return
+    rc = _states.get(server_id)
+    if rc and rc.session_ref is session:
+        rc.give_back_report(car_id, time.time() if now is None else now, ms, lap, spline)
 
 
 def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool) -> None:
