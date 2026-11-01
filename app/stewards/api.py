@@ -73,3 +73,5 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
     if engine.record_limits(inst.acsp, body.car_id, body.name, body.model_dump(exclude={"car_id", "name"})):
         from app.live.racecontrol import on_cuts
         on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)   # (the counter of the hub, live: an excursion that was not a flood)
+        from app.live.racecontrol import on_excursion
+        on_excursion(server_id, inst.acsp.session, body.car_id, body.ms, body.lap, body.spline)   # (the advantage judge: when the excursion started and how long it lasted)

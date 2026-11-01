@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
-from app.models import Championship, Notice, ResultClose
+from app.models import Championship, GiveBackDue, Notice, Penalty, ResultClose
 from app.results import non_racing_for
 from app.rulebook import CutRule, effective
 
@@ -30,6 +30,29 @@ def cut_drafts(parsed: dict, rule: CutRule, racing: set[str]) -> list[dict]:
             cuts[lap["driver_guid"]] = cuts.get(lap["driver_guid"], 0) + (lap["cuts"] or 0)
     names = {e["driver_guid"]: e["driver_name"] for e in parsed["classification"]}
     return [{"driver_guid": g, "driver_name": names.get(g) or g, "cuts": n, "seconds": s} for g, n in cuts.items() if g in racing and (s := cut_seconds(n, rule))]
+
+
+def give_back_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
+    """The time penalties of the advantage gained off the track (app/live/giveback.py): every `GiveBackDue` of this server that fell due while this schedule ran (`since`, its start, up to the end of this Race) and is
+    still due becomes a time `Penalty` on this result, once (`auto_key` = giveback:<id>), with the seconds the rule said when it fell due. A due of a driver who is not in the result is `expired`: that race is over,
+    it must not wait for the next one. Does not commit; returns how many penalties were made."""
+    if parsed["type"] != "Race" or not effective(c).detectors.give_back.enabled or sess.get(ResultClose, (server_id, filename)):
+        return 0
+    racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
+    made = 0
+    for due in sess.exec(select(GiveBackDue).where(GiveBackDue.server_id == server_id, GiveBackDue.state == "due", GiveBackDue.ts >= since, GiveBackDue.ts <= finished_at).order_by(GiveBackDue.ts)).all():
+        if due.driver_guid not in racing:
+            due.state = "expired"
+            sess.add(due)
+            continue
+        key = f"giveback:{due.id}"
+        if not sess.exec(select(Penalty.id).where(Penalty.server_id == server_id, Penalty.filename == filename, Penalty.driver_guid == due.driver_guid, Penalty.auto_key == key)).first():
+            sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="time", value=due.seconds * 1000, created_by="auto", auto_key=key,
+                             reason=f"Ventaja fuera de pista, no devolvió la posición{f' ({due.creditors})' if due.creditors else ''}"))
+            made += 1
+        due.state = "applied"
+        sess.add(due)
+    return made
 
 
 def cut_notices(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict) -> int:

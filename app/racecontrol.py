@@ -35,14 +35,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app import supervisor
-from app.auth import require, require_any
+from app.auth import CurrentUser, require, require_any
 from app.config import settings
 from app.db import SessionDep, engine
-from app.models import LeagueMember
+from app.models import GiveBackDue, LeagueMember
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, speed_kmh, state_of, tick
+from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -97,6 +97,77 @@ def caution_tick(now: float) -> None:
         actions = rc.caution_tick(inst.acsp.field.snapshot(), speeds, now)
         if actions:
             nascar_actions(inst.server_id, rc, actions)
+
+
+def _due_row(inst, car: int, creditors: list[int], seconds: int, now: float, by: str = "auto", owner: str | None = None) -> dict | None:
+    """What is saved for a driver who did not give the places back: None when there is no driver to write it for (the car has no Steam ID, or the slot changed hands since the obligation opened)."""
+    info = inst.acsp.cars.get(car) or {}
+    guid = str(owner or info.get("driver_guid") or "")
+    if not guid or (owner and info.get("driver_guid") and str(info["driver_guid"]) != owner):
+        log.warning("give-back: car %s has no Steam ID, or its driver changed: no penalty written", car)
+        return None
+    return {"server_id": inst.server_id, "driver_guid": guid, "driver_name": info.get("driver_name") or "", "ts": now, "seconds": seconds, "created_by": by,
+            "creditors": ", ".join(_name(inst, b) for b in creditors)}
+
+
+def _due_notices(inst, rc, car: int, seconds: int) -> None:
+    _say(rc, f"{_name(inst, car)}: no devolvió la posición · +{seconds} s", "penalty")
+    _say(rc, f"PENALIZACIÓN +{seconds} s: ventaja fuera de pista", "penalty", car)
+
+
+_unsaved_dues: list[dict] = []   # penalties that fell due and could not be written yet: tried again at every tick
+MAX_UNSAVED_DUES = 1000
+
+
+def give_back_stale_servers() -> list[int]:
+    """Servers in a race whose cached rule has to be read again (done by the monitor in a worker thread: never on the event loop)."""
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and give_back_rule_stale(i.server_id)]
+
+
+def give_back_tick(now: float) -> list[dict]:
+    """The advantage gained off the track of every race that has the league's rule on: reads the cars (positions, speeds), says who is no longer in debt, and returns the penalties that fell due (rows
+    for `GiveBackDue`, saved off the event loop by the caller). Runs in the monitor, on the event loop that also feeds the field."""
+    rows: list[dict] = []
+    for inst in supervisor.live():
+        session = inst.acsp.session
+        if (session or {}).get("session_type") != RACE_TYPE:
+            continue
+        rule = give_back_rule_peek(inst.server_id)
+        rc = state_of(inst.server_id, True, session, create=bool(rule))
+        if not rc:
+            continue
+        rc.gb_rule = rule
+        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None}
+        events = rc.give_back_tick(inst.acsp.field.snapshot(), speeds, now)
+        for ob in rc.give_back_view(now)["obligations"]:   # (a slot that changed hands: the new driver owes nothing)
+            owner, cur = rc.gb_owner.get(ob["id"]), (inst.acsp.cars.get(ob["car"]) or {}).get("driver_guid")
+            if owner and cur and str(cur) != owner:
+                rc.give_back_forgive(ob["id"])
+        for ev in events:
+            ob = ev[1]
+            if ev[0] == "open":
+                guid = (inst.acsp.cars.get(ob["car"]) or {}).get("driver_guid")
+                if guid:
+                    rc.gb_owner[ob["id"]] = str(guid)
+                log.info("give-back: server %s car %s owes the place to %s (until %ss)", inst.server_id, ob["car"], sorted(ob["creditors"]), rule["window_s"] if rule else "?")
+                continue
+            owner = rc.gb_owner.pop(ob["id"], None)
+            if ev[0] == "cleared" and ev[2] == "returned":
+                _say(rc, "POSICIÓN DEVUELTA ✓", "race", ob["car"])
+            elif ev[0] == "due" and rule:
+                row = _due_row(inst, ob["car"], sorted(ob["creditors"]), rule["seconds"], now, owner=owner)
+                if row:
+                    rows.append(row)
+                    _due_notices(inst, rc, ob["car"], rule["seconds"])
+    return rows
+
+
+def save_dues(rows: list[dict]) -> None:
+    """The penalties that fell due, written to the database (a worker thread: never the event loop). All or none."""
+    with Session(engine) as s:
+        for r in rows:
+            s.add(GiveBackDue(**r))
+        s.commit()
 
 
 def slot_of(cars: dict, steam_id: str) -> int | None:
@@ -157,11 +228,12 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     if inst and (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
-        cut_rule_of(server_id)   # (refreshes the cached rule here, in a request thread: the snapshot itself never touches the database)
+        cut_rule_of(server_id)   # (refreshes the cached rules here, in a request thread: the snapshot and the monitor never touch the database)
+        give_back_rule_of(server_id)
     if rc:
         return rc.snapshot()
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
-    return {"cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -436,6 +508,39 @@ class PaceCarIn(BaseModel):
     kmh: int = Field(default=120, ge=PACE_MIN, le=PACE_MAX)
 
 
+@control_router.post("/give-back/{ob_id}/forgive", status_code=204)
+def give_back_forgive(server_id: int, ob_id: int, sess: SessionDep) -> None:
+    """The director forgives a place that was owed (the obligation closes, nothing is written)."""
+    _, rc = _control(server_id, sess)
+    if not rc.give_back_forgive(ob_id):
+        raise HTTPException(404, "that obligation is not open")
+
+
+@control_router.post("/give-back/{ob_id}/sanction", status_code=204)
+def give_back_sanction(server_id: int, ob_id: int, sess: SessionDep, user: CurrentUser) -> None:
+    """The director sanctions a place that was owed right now, without waiting for the time: the same penalty, written at once. The obligation is only closed once the penalty can be written: with no
+    Steam ID (409) or a database that fails (503) it stays open."""
+    inst, rc = _control(server_id, sess)
+    ob = rc.give_back_peek(ob_id)
+    if not ob or not rc.gb_rule:
+        raise HTTPException(404, "that obligation is not open")
+    seconds = rc.gb_rule["seconds"]
+    row = _due_row(inst, ob["car"], ob["creditors"], seconds, time.time(), by=user.username, owner=rc.gb_owner.get(ob_id))
+    if not row:
+        raise HTTPException(409, "that car has no Steam ID, or its driver changed: no penalty can be written")
+    taken = rc.give_back_due_now(ob_id)
+    if not taken:
+        raise HTTPException(404, "that obligation was closed meanwhile")
+    try:
+        save_dues([row])
+    except Exception as e:   # noqa: BLE001
+        rc.give_back_restore(taken)
+        log.exception("give-back: sanction of obligation %s could not be written", ob_id)
+        raise HTTPException(503, "the penalty could not be written: the obligation is back open") from e
+    rc.gb_owner.pop(ob_id, None)
+    _due_notices(inst, rc, ob["car"], seconds)
+
+
 @control_router.post("/pace-car")
 def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
     """Which DRIVER is the pace car (by SteamID; his client runs the hub script that drives the car on autopilot) and its pace. It leads under every NASCAR caution and goes in on 'to go'.
@@ -593,6 +698,19 @@ async def monitor_forever() -> None:
             live = [(i.server_id, i.acsp.cars) for i in supervisor.live()]
             finish_nascar(now)
             caution_tick(now)
+            for sid in give_back_stale_servers():
+                await asyncio.to_thread(give_back_rule_of, sid)   # (the league's rule, from the database, off the event loop)
+            _unsaved_dues.extend(give_back_tick(now))
+            if len(_unsaved_dues) > MAX_UNSAVED_DUES:   # (a database that has been down for minutes: what does not fit is logged whole, never dropped silently)
+                log.error("give-back: too many penalties waiting to be saved, dropping the oldest: %s", _unsaved_dues[:-MAX_UNSAVED_DUES])
+                del _unsaved_dues[:-MAX_UNSAVED_DUES]
+            if _unsaved_dues:
+                batch = list(_unsaved_dues)
+                try:
+                    await asyncio.to_thread(save_dues, batch)
+                    del _unsaved_dues[:len(batch)]   # (only after it is written: a failure keeps them for the next tick)
+                except Exception:   # noqa: BLE001 - kept and tried again; the loop must not stop
+                    log.exception("give-back: %s penalties could not be saved, they will be tried again", len(batch))
             incident_tick(now)
             pace_car_check()
             for server_id, violations in tick(now, live):
