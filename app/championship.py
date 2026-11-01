@@ -13,7 +13,7 @@ from sqlmodel import select
 from app import content, requirements
 from app.db import SessionDep
 from app.leaguelock import serialized
-from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, LeagueMember, LeagueSuspension
+from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
 from app.schemas.servers import _folder_name, _setup_name
@@ -260,6 +260,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
     ).all()
 
     table, stage_table = effective(c).scoring.table, effective(c).scoring.stage_points
+    titles = {ev.id: ev.title for ev in sess.exec(select(Event).where(Event.id.in_({e.event_id for e in events if e.event_id}))).all()}   # acServer writes no Name: the race is called what the event that ran it was
     totals: dict[str, dict] = {}
     races: list[dict] = []
     for e in events:
@@ -298,7 +299,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             row["wins"] += pos == 1
             row["podiums"] += bool(pos and pos <= 3)
             row["races"] += 1
-        races.append({"id": e.id, "scores": e.scores, "filename": e.filename, "server_id": e.server_id, "session_type": e.session_type or parsed["type"], "type": parsed["type"], "name": parsed["name"],
+        races.append({"id": e.id, "scores": e.scores, "filename": e.filename, "server_id": e.server_id, "session_type": e.session_type or parsed["type"], "type": parsed["type"], "name": parsed["name"] or titles.get(e.event_id),
                       "track": parsed["track"], "track_config": parsed["track_config"], "classification": rows,
                       "penalties": [{"driver_guid": x.driver_guid, "kind": x.kind, "value": x.value, "reason": x.reason, "created_by": x.created_by} for x in pens]})
 
