@@ -39,7 +39,8 @@ def test_every_part_is_counted_from_the_files(tree):
     d = r.json()
     assert d["parts"] == {"cars": 1024, "tracks": 5000, "setups": 10, "data": 300, "program": 700}, d["parts"]
     assert d["used_bytes"] == 1024 + 5000 + 10 + 300 + 700 and d["quota_bytes"] is None
-    assert d["disk"]["total"] > 0 and d["disk"]["free"] > 0 and d["counted_at"] > 0
+    assert d["counted_at"] > 0 and set(d) == {"used_bytes", "quota_bytes", "parts", "counted_at"}, "the machine's disk figures reach the client"
+    assert "disk" not in r.text and "free" not in r.text
 
 
 def test_a_symbolic_link_is_never_followed(tree, tmp_path):

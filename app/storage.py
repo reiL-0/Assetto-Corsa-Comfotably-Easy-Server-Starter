@@ -1,7 +1,7 @@
 """How much disk the hosting client uses (the admin panel's home): the cars, the tracks, the setups, the manager's own data (database, results, logs) and the acServer program, against the plan's
-quota (`settings.storage_quota_mb`, shown only: nothing refuses an upload for it) and the free space of the disk.
+quota (`settings.storage_quota_mb`, shown only: nothing refuses an upload for it). The size or free space of the machine's disk is NOT in the answer: that is the provider's, not the client's.
 
-GET /api/v1/storage  (admin) -> {used_bytes, quota_bytes|null, parts: {cars, tracks, setups, data, program}, disk: {total, free}, counted_at}
+GET /api/v1/storage  (admin) -> {used_bytes, quota_bytes|null, parts: {cars, tracks, setups, data, program}, counted_at}
 
 Counting walks the folders (symbolic links are not followed, so nothing outside them is ever counted or read), so the answer is kept for CACHE_SECONDS: however many times the panel asks, the disk
 is walked once per period, and one walk at a time. Check: tests/test_storage.py.
@@ -9,7 +9,6 @@ is walked once per period, and one walk at a time. Check: tests/test_storage.py.
 from __future__ import annotations
 
 import os
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -56,9 +55,7 @@ def measure() -> dict:
         program = exe.stat().st_size if exe.is_file() else 0
     parts = {"cars": folder_bytes(content._cars_dir()), "tracks": folder_bytes(content._tracks_dir()), "setups": folder_bytes(content.setups_dir()),
              "data": folder_bytes(data), "program": program}
-    du = shutil.disk_usage(data if data.exists() else ".")
-    return {"used_bytes": sum(parts.values()), "quota_bytes": settings.storage_quota_mb * 1024 * 1024 or None, "parts": parts, "disk": {"total": du.total, "free": du.free},
-            "counted_at": int(time.time())}
+    return {"used_bytes": sum(parts.values()), "quota_bytes": settings.storage_quota_mb * 1024 * 1024 or None, "parts": parts, "counted_at": int(time.time())}
 
 
 @router.get("")
