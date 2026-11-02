@@ -1,3 +1,4 @@
+import os
 import shlex
 from pathlib import Path
 
@@ -44,6 +45,17 @@ class Settings(BaseSettings):
                 raise ValueError(f"{item!r} is not a server selector: use *, a server id, or !id to leave one out (for example `*,!3`)")
         return v
 
+    @field_validator("acserver_uid")
+    @classmethod
+    def _not_root(cls, v: int | None) -> int | None:
+        """acServer as root would be worse than no separation, and as the manager's own user it would be none at all (the binary would own the manager's database and secrets):
+        refuse to start rather than run a client's binary like that."""
+        if v is not None and v < 1:
+            raise ValueError("ACM_ACSERVER_UID must be a non-root user id (1 or more), or unset")
+        if v is not None and v == os.geteuid():
+            raise ValueError(f"ACM_ACSERVER_UID={v} is the user the manager runs as: there would be no separation; use another user")
+        return v
+
     host: str = "127.0.0.1"
     port: int = 8080
     data_dir: str = "data"
@@ -63,6 +75,10 @@ class Settings(BaseSettings):
     # Where the per-server CPU/RAM limits are enforced (systemd transient scope around acServer, see supervisor.limit_prefix): "" = not enforced,
     # "user" = the manager's own systemd user manager (needs `loginctl enable-linger <user>`), "system" = the system one (manager running as root).
     limits_scope: str = ""
+    # Run every acServer as this Unix user (and group of the same number) instead of the manager's own: hosting for others, where the binary a client brings must not read the
+    # manager's database or secrets. Needs CAP_SETUID/CAP_SETGID in the manager and `setpriv` (util-linux); the child loses every capability and cannot gain one (supervisor.spawn_prefix).
+    # None = same user as the manager (as always). 0 (root) is refused. The instance folders must be writable by that group.
+    acserver_uid: int | None = None
     unpack_timeout: int = 900   # seconds an uploaded archive may take to unpack before the child is killed (app/unpack.py)
     unpack_mem_mb: int = 1024   # memory cap of that child when limits_scope is on
     # Lenient uploads of cars/tracks (the league's own panel): any common archive (.7z, .rar, .tar.gz… through bsdtar), the car or track folder may sit anywhere inside

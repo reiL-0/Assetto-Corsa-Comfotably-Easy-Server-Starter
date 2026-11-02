@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import signal
 import time
 import urllib.request
@@ -49,14 +50,84 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def _is_our_acserver(pid: int, cwd: Path) -> bool:
-    """The pid is an acServer running in this instance directory (guards against a reused pid)."""
+HELPER_TIMEOUT = 5.0   # seconds the helper that signals another user's acServer may take (see _signal)
+START_TOLERANCE = 5.0   # seconds: how far a process' start time may be from the one `server.pid` recorded and still be that process
+
+
+def _proc_started(pid: int) -> float:
+    """Unix time the process started (boot time + the start tick of /proc/<pid>/stat)."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    btime = next((int(line.split()[1]) for line in open("/proc/stat") if line.startswith("btime")), None)
+    if btime is None:
+        raise ValueError("no btime in /proc/stat")
+    return btime + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+
+
+def _is_our_acserver(pid: int, cwd: Path, started_at: float | None = None) -> bool:
+    """The pid is an acServer running in this instance directory (guards against a reused pid).
+    The name of the binary and the owner must fit: the manager's own user, or `settings.acserver_uid` (a server started before that was switched on still runs as the manager's user and
+    must still be taken back, or it would be left running with people in it and no owner). The directory it runs in is compared when the kernel lets us read it; it does not for another
+    user's process (that is the point of `acserver_uid`), and then the start time recorded in `server.pid` stands in for it."""
     try:
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         want = shlex.split(settings.acserver_cmd)
-        return Path(os.readlink(f"/proc/{pid}/cwd")).resolve() == cwd.resolve() and os.path.basename(argv[0].decode()) == os.path.basename(want[0])
+        if os.path.basename(argv[0].decode()) != os.path.basename(want[0]):
+            return False
+        if os.stat(f"/proc/{pid}").st_uid not in {os.geteuid(), settings.acserver_uid}:
+            return False
+        try:
+            return Path(os.readlink(f"/proc/{pid}/cwd")).resolve() == cwd.resolve()
+        except PermissionError:
+            return isinstance(started_at, (int, float)) and abs(_proc_started(pid) - started_at) < START_TOLERANCE
     except (OSError, IndexError, ValueError):
         return False
+
+
+def child_env() -> dict[str, str]:
+    """The environment acServer starts with: the manager's, without the manager's own settings. Every setting is an `ACM_*` variable (`OPR_*` the website's), and the secrets are among them:
+    the binary is the game's, or a client's, and has no business reading them (nor does `/proc/<manager>/environ` stay the only place they are hidden)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ACM_", "OPR_"))}
+    env["XDG_RUNTIME_DIR"] = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"   # (systemd-run --user finds its bus there)
+    return env
+
+
+def spawn_prefix() -> list[str]:
+    """`setpriv` words that run acServer as `settings.acserver_uid` (and the group of the same number), no supplementary groups, with no capabilities and unable to gain any. [] when unset.
+    The capabilities need explicit care: a process that changes from one non-root user to another keeps its permitted and ambient sets, so without `--inh-caps=-all --ambient-caps=-all`
+    the child would still hold the CAP_SETUID the manager needs to make this very switch, and could become the manager's user again. `setpriv` execs in place: same pid, same argv[0]."""
+    uid = settings.acserver_uid
+    if not uid:
+        return []
+    if not shutil.which("setpriv"):
+        raise RuntimeError("ACM_ACSERVER_UID is set but `setpriv` (util-linux) is not installed")
+    return ["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--"]
+
+
+async def _signal(pid: int, sig: int) -> None:
+    """Send a signal to an acServer. kill(2) needs the sender to be the target's user or to hold CAP_KILL. A manager that holds CAP_KILL (recommended for hosting: `AmbientCapabilities=CAP_SETUID CAP_SETGID
+    CAP_KILL`) signals directly, so stopping a server never depends on a process of the client's user, which the client's binary could freeze. Without it the signal is sent by a short-lived process
+    that has become that user, with the CAP_SETUID the manager already needs to start it: a minimal environment (it runs as the client's user: no secrets), and a limit, because the binary can stop
+    that helper (SIGSTOP) and then `stop()` would wait for ever. Raises ProcessLookupError like os.kill; TimeoutError when the helper is frozen."""
+    try:
+        os.kill(pid, sig)
+        return
+    except PermissionError:
+        pass
+    try:
+        owner = os.stat(f"/proc/{pid}").st_uid
+    except FileNotFoundError:
+        raise ProcessLookupError(pid) from None
+    if owner != settings.acserver_uid:
+        raise PermissionError(f"pid {pid} belongs to uid {owner}: neither the manager's nor ACM_ACSERVER_UID")
+    p = await asyncio.create_subprocess_exec("setpriv", f"--reuid={owner}", f"--regid={owner}", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--",
+                                             "kill", f"-{int(sig)}", str(pid), env={"PATH": os.environ.get("PATH") or "/usr/sbin:/usr/bin:/sbin:/bin"},
+                                             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        failed = await asyncio.wait_for(p.wait(), HELPER_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"the helper that signals pid {pid} did not finish in {HELPER_TIMEOUT:g} s (frozen by the server? give the manager CAP_KILL)") from None
+    if failed:
+        raise ProcessLookupError(pid)
 
 
 class Instance:
@@ -177,12 +248,12 @@ class Instance:
             if self.http_port:
                 await self._snapshot_info()
             metrics.enqueue(self.server_id, "server_stop", name=reason, value=self.uptime)
-            os.kill(self.pid, signal.SIGTERM)
+            await _signal(self.pid, signal.SIGTERM)
             deadline = time.time() + timeout
             while self.running and time.time() < deadline:
                 await asyncio.sleep(0.1)
             if self.running:
-                os.kill(self.pid, signal.SIGKILL)
+                await _signal(self.pid, signal.SIGKILL)
                 while self.running:
                     await asyncio.sleep(0.1)
         self.pid_path.unlink(missing_ok=True)
@@ -281,16 +352,21 @@ async def _start(
         log_path.replace(cwd / "server.log.1")  # the previous run stays readable for one more start
     with open(log_path, "wb") as out:
         proc = await asyncio.create_subprocess_exec(
-            *limit_prefix(server_id, cpu_percent, mem_mb), *shlex.split(settings.acserver_cmd),
+            *limit_prefix(server_id, cpu_percent, mem_mb), *spawn_prefix(), *shlex.split(settings.acserver_cmd),
             cwd=cwd,
-            env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"},   # (systemd-run --user finds its bus there)
+            env=child_env(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=out,
             stderr=out,
             start_new_session=True,  # its own session: a signal or exit of the manager does not reach it
         )
     inst = Instance(server_id, cwd, proc=proc, http_port=http_port, nascar_config=nascar_config)
-    (cwd / "server.pid").write_text(json.dumps({"pid": proc.pid, "started_at": inst.started_at}))
+    record = {"pid": proc.pid, "started_at": inst.started_at}   # (started_at is taken once the spawn returns: a stalled event loop would move it; proc_started is the process' own, from /proc)
+    try:
+        record["proc_started"] = _proc_started(proc.pid)
+    except (OSError, IndexError, ValueError):
+        pass
+    (cwd / "server.pid").write_text(json.dumps(record))
     _instances[server_id] = inst   # registered before the plugin socket: a failure there must not leave a running acServer nobody owns
     if acsp_local_port and acsp_remote_port:
         await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host)
@@ -315,7 +391,7 @@ async def adopt(
         pid = int(info["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if not settings.acserver_cmd or not _alive(pid) or not _is_our_acserver(pid, cwd):
+    if not settings.acserver_cmd or not _alive(pid) or not _is_our_acserver(pid, cwd, info.get("proc_started", info.get("started_at"))):
         (cwd / "server.pid").unlink(missing_ok=True)  # stale: the process is gone (or the pid belongs to something else now)
         return None
     log_size = (cwd / "server.log").stat().st_size if (cwd / "server.log").exists() else 0
