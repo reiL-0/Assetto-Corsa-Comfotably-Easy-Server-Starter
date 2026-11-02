@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     # manager's database or secrets. Needs CAP_SETUID/CAP_SETGID in the manager and `setpriv` (util-linux); the child loses every capability and cannot gain one (supervisor.spawn_prefix).
     # None = same user as the manager (as always). 0 (root) is refused. The instance folders must be writable by that group.
     acserver_uid: int | None = None
+    # The plan's storage in MB for the admin panel's «espacio usado» card (app/storage.py); 0 = no limit shown. It only SHOWS the quota: nothing refuses an upload for it yet. Env: ACM_STORAGE_QUOTA_MB
+    storage_quota_mb: int = 0
     unpack_timeout: int = 900   # seconds an uploaded archive may take to unpack before the child is killed (app/unpack.py)
     unpack_mem_mb: int = 1024   # memory cap of that child when limits_scope is on
     # Lenient uploads of cars/tracks (the league's own panel): any common archive (.7z, .rar, .tar.gz… through bsdtar), the car or track folder may sit anywhere inside
