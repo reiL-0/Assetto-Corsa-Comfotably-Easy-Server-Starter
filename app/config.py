@@ -1,10 +1,11 @@
 import os
 import shlex
 from pathlib import Path
+from typing import Literal
 
 import re
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,37 @@ class Settings(BaseSettings):
     """Runtime config. Every field is overridable via ACM_* env vars or a .env file."""
 
     model_config = SettingsConfigDict(env_prefix="ACM_", env_file=".env", extra="ignore")
+
+    # Which build of the manager this is: "opr" (the league's own, as it always was) or "client" (hosting for others). In «client» none of the league's CSP scripts is ever sent (their
+    # addresses are the league's website: a client's drivers would load them from it and report to it), the chat words of the automatic telemetry token start with HL and Discord
+    # gets a neutral user agent. A client that serves scripts of its own can say so when this has a way to name them.
+    profile: Literal["opr", "client"] = "opr"
+    claim_prefix: str = ""   # the chat words are <prefix>HELLO / <prefix>CLAIM: ("" = OPR, or HL in the client profile): 2 to 8 capital letters
+    user_agent: str = ""     # what Discord is told we are ("" = OPR-AC-Manager, or HotLapHosting-Manager in the client profile)
+
+    @field_validator("claim_prefix")
+    @classmethod
+    def _claim_prefix(cls, v: str) -> str:
+        if v and not re.fullmatch(r"[A-Z]{2,8}", v):
+            raise ValueError("ACM_CLAIM_PREFIX is 2 to 8 capital letters (the chat words are <prefix>HELLO and <prefix>CLAIM:)")
+        return v
+
+    @model_validator(mode="after")
+    def _client_sends_no_script_of_the_league(self):
+        if self.profile != "client" and self.claim_prefix not in ("", "OPR"):
+            # the league's script says OPRHELLO: another word here and no token is ever issued, with nothing to say why
+            raise ValueError("ACM_CLAIM_PREFIX other than OPR needs ACM_PROFILE=client (the script of the league's website speaks with OPR)")
+        if self.profile == "client":
+            self.csp_hub, self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = False, "", "", ""
+        return self
+
+    def claim_word(self, suffix: str) -> str:
+        """A word of the telemetry token's chat exchange: HELLO (the driver's script), CLAIM: (the manager's private answer) or PROBE: ."""
+        return (self.claim_prefix or ("HL" if self.profile == "client" else "OPR")) + suffix
+
+    def agent(self) -> str:
+        """The user agent sent to Discord."""
+        return self.user_agent or ("HotLapHosting-Manager" if self.profile == "client" else "OPR-AC-Manager")
 
     # The CSP hub script (opr_hub.lua, served by the website): added to the extra options of every server unless its checkbox in Control AC is off (`Server.csp_off`, app/csp.py `extra_for`).
     # `csp_hub_version` goes in the script URL: CSP caches a script by URL, so it is raised whenever the script changes. ACM_CSP_HUB=false turns it off everywhere.

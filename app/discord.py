@@ -46,7 +46,7 @@ def message(name: str, kind: str, reason: str | None, value: float | None) -> st
 def _send(text: str, url: str | None = None) -> None:
     try:
         req = urllib.request.Request(url or settings.discord_status_webhook, data=json.dumps({"content": text[:2000]}).encode(),
-                                     headers={"Content-Type": "application/json", "User-Agent": "OPR-AC-Manager"})
+                                     headers={"Content-Type": "application/json", "User-Agent": settings.agent()})
         urllib.request.urlopen(req, timeout=8).close()
     except Exception:
         log.exception("discord status post failed")
@@ -98,14 +98,13 @@ def alert(text: str) -> None:
 # --- RSVP announcements: the bot posts, people react, schedule._rsvp reads the reactions ---
 
 API = "https://discord.com/api/v10"
-UA = "OPR-AC-Manager"
 RSVP = {"✅": "yes", "❔": "maybe", "❌": "no"}  # reaction -> status; this order is the priority when someone has several
 
 
 def _api(method: str, path: str, body: dict | None = None, *, bearer: str | None = None, form: dict | None = None):
     data = urllib.parse.urlencode(form).encode() if form else json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(API + path, method=method, data=data, headers={
-        "Authorization": bearer or f"Bot {settings.discord_bot_token}", "User-Agent": UA,
+        "Authorization": bearer or f"Bot {settings.discord_bot_token}", "User-Agent": settings.agent(),
         "Content-Type": "application/x-www-form-urlencoded" if form else "application/json"})
     with urllib.request.urlopen(req, timeout=8) as r:
         raw = r.read()
