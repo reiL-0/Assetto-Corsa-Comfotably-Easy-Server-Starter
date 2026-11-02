@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app.announcement import router as announcement_router
 from app.archive import router as archive_router
 from app.auth import guard
+from app.binary import router as binary_router
 from app.bans import router as bans_router
 from app.catalog import router as catalog_router
 from app.auth import router as auth_router
@@ -26,6 +27,7 @@ from app.penalties import router as penalties_router
 from app.racecontrol import control_router as race_control_router
 from app.racecontrol import state_router as race_state_router
 from app.servers import router as servers_router
+from app.storage import router as storage_router
 from app.stewards.api import report_router as stewards_report_router
 from app.stewards.api import router as stewards_router
 from app.servers import steward as steward_router
@@ -40,6 +42,8 @@ def version() -> dict[str, str]:
 
 
 api_router.include_router(auth_router)
+api_router.include_router(storage_router)  # disk used by the hosting client (its own admin guard)
+api_router.include_router(binary_router)  # the acServer program a hosting client brings (its own admin guard)
 api_router.include_router(discord_router)  # link/unlink the caller's own Discord account
 # Reads: any logged-in user, except servers (config carries ADMIN_PASSWORD, plus logs) -> steward.
 # Writes: admin. Steward-only moderation routes live on their own router.
