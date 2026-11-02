@@ -198,6 +198,50 @@ def test_adopt_refuses_a_process_of_another_owner_and_takes_back_one_started_bef
     asyncio.run(scenario())
 
 
+def test_the_instance_folder_keeps_the_acserver_from_rewriting_the_pid_file(tmp_path, monkeypatch):
+    """Seen on a real machine: the acServer (another user, same group) overwrote server.pid, and adopt() could no longer take the server back."""
+    (tmp_path / "server.pid").write_text("{}")
+    os.chmod(tmp_path / "server.pid", 0o660)
+    os.chmod(tmp_path, 0o2770)
+    monkeypatch.setattr(settings, "acserver_uid", None)
+    supervisor.protect_instance(tmp_path)
+    assert (tmp_path.stat().st_mode & 0o7777, (tmp_path / "server.pid").stat().st_mode & 0o7777) == (0o2770, 0o660), "without acserver_uid nothing changes"
+    monkeypatch.setattr(settings, "acserver_uid", os.getuid() + 1)
+    supervisor.protect_instance(tmp_path)
+    assert tmp_path.stat().st_mode & 0o7777 == 0o3770, "sticky: only the owner of a file renames or deletes it"
+    assert (tmp_path / "server.pid").stat().st_mode & 0o7777 == 0o640, "the group reads the pid file, it does not write it"
+    fresh = tmp_path / "second"
+    fresh.mkdir()
+    supervisor.protect_instance(fresh)
+    assert (fresh / "server.pid").stat().st_mode & 0o7777 == 0o640 and fresh.stat().st_mode & 0o7777 == 0o3770, "the file is there, protected, before any process exists"
+
+    def not_ours(path, mode):
+        raise PermissionError(1, "Operation not permitted", str(path))
+    with monkeypatch.context() as m:   # the manager's user was changed: it says so, it does not stop the server from starting
+        m.setattr(supervisor.os, "chmod", not_ours)
+        supervisor.protect_instance(tmp_path)
+
+
+def test_the_pid_file_is_protected_before_the_acserver_is_spawned(tmp_path, monkeypatch):
+    _use(tmp_path / "fake.py", tmp_path, monkeypatch, SLEEP)
+    order = []
+    real_protect, real_exec = supervisor.protect_instance, supervisor.asyncio.create_subprocess_exec
+    monkeypatch.setattr(supervisor, "protect_instance", lambda cwd: (order.append("protect"), real_protect(cwd))[1])
+
+    async def spy(*a, **k):
+        order.append("spawn")
+        return await real_exec(*a, **k)
+    monkeypatch.setattr(supervisor.asyncio, "create_subprocess_exec", spy)
+    monkeypatch.setattr(supervisor, "spawn_prefix", lambda: [])   # (no second user on this machine: the order is what is under test)
+
+    async def scenario():
+        inst = await supervisor.start(87, tmp_path)
+        await supervisor.stop(87)
+        inst.proc._transport.close()
+    asyncio.run(scenario())
+    assert order == ["protect", "spawn"], "a pid file group-writable while the acServer already runs can be held open by it"
+
+
 def test_adopt_does_not_take_this_very_process_for_an_acserver(tmp_path, monkeypatch):
     """Same binary name as the acServer command (python), alive, our own user: only the directory or the start time tell them apart."""
     _use(tmp_path / "fake.py", tmp_path, monkeypatch, SLEEP)
