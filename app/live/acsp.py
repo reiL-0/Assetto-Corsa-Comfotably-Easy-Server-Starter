@@ -17,6 +17,7 @@ import urllib.request
 from collections import deque
 
 from app import metrics
+from app.config import settings
 from app.live.board import LiveBoard
 from app.live.field import Field
 
@@ -448,9 +449,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             if self.on_client_loaded:
                 self.on_client_loaded(event["car_id"])
             self._claim_probe_greet(event["car_id"])
-        elif t == "chat" and event["message"].lstrip("\t$ ").startswith("OPRHELLO"):
+        elif t == "chat" and event["message"].lstrip("\t$ ").startswith(settings.claim_word("HELLO")):
             self._claim_issue(event["car_id"])
-        elif t == "chat" and event["message"].startswith("OPRPROBE") and self._claim_probe_on():
+        elif t == "chat" and event["message"].startswith(settings.claim_word("PROBE")) and self._claim_probe_on():
             log.info("claim probe: server %s saw chat from car %s (slot stamped by acServer): %r", self.server_id, event["car_id"], event["message"][:80])
             self._claim_probe_greet(event["car_id"])   # the script listens now: answer with a private code (the one sent at client_loaded arrives before the script runs)
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
@@ -484,7 +485,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         if not self._claim_probe_on():
             return
         code = f"{self.server_id}-{car_id}-{secrets.token_hex(3)}"
-        self.send(encode_send_chat(car_id, "\t\t\t\t$OPRPROBE:" + code))
+        self.send(encode_send_chat(car_id, "\t\t\t\t$" + settings.claim_word("PROBE:") + code))
         log.info("claim probe: server %s sent code %s to car %s only", self.server_id, code, car_id)
 
     def _claim_issue(self, car_id: int) -> None:
@@ -511,7 +512,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             return
         if str((self.cars.get(car_id) or {}).get("driver_guid")) != guid:
             return
-        self.send(encode_send_chat(car_id, "\t\t\t\t$OPRCLAIM:" + code))
+        self.send(encode_send_chat(car_id, "\t\t\t\t$" + settings.claim_word("CLAIM:") + code))
 
     def _kick_qualy_banned(self, cars: list[dict]) -> None:
         """The league keeps some drivers from qualifying (app/league.py): they are kicked while the server is in qualifying and can come
