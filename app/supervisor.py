@@ -83,6 +83,25 @@ def _is_our_acserver(pid: int, cwd: Path, started_at: float | None = None) -> bo
         return False
 
 
+def protect_instance(cwd: Path) -> None:
+    """With `acserver_uid` the acServer is another user that shares the instance folder (group-writable: it writes results there). Two things keep it from rewriting what the manager
+    keeps there: the sticky bit on the folder (nobody but the owner of a file may rename or delete it, so server.pid cannot be swapped) and server.pid itself read-only for the group
+    (seen on a real machine: the binary overwrote it, and `adopt` could no longer take the server back). Nothing changes without `acserver_uid`.
+    It runs BEFORE the process is spawned and makes the file if it is not there: the pid is written after the spawn, and a file that was ever group-writable while the acServer was
+    already running could be held open by it. If the folder is not ours (the manager's user was changed: chown the instances), it says so and goes on: the protection is for the
+    server's own recovery, and a service that does not start is worse."""
+    if not settings.acserver_uid:
+        return
+    try:
+        os.chmod(cwd, 0o3770)
+        pid = cwd / "server.pid"
+        if not pid.exists():
+            pid.touch(mode=0o640)
+        os.chmod(pid, 0o640)
+    except PermissionError:
+        log.warning("cannot protect %s: it is not ours (after a change of the manager's user, chown the instances); server.pid stays writable for the acServer's group", cwd)
+
+
 def child_env() -> dict[str, str]:
     """The environment acServer starts with: the manager's, without the manager's own settings. Every setting is an `ACM_*` variable (`OPR_*` the website's), and the secrets are among them:
     the binary is the game's, or a client's, and has no business reading them (nor does `/proc/<manager>/environ` stay the only place they are hidden)."""
@@ -347,6 +366,7 @@ async def _start(
         hook(server_id)
     if before_start:
         await asyncio.sleep(0.1)   # (closing a UDP endpoint takes effect on the next loop iteration)
+    protect_instance(cwd)
     log_path = cwd / "server.log"
     if log_path.exists():
         log_path.replace(cwd / "server.log.1")  # the previous run stays readable for one more start
@@ -366,7 +386,7 @@ async def _start(
         record["proc_started"] = _proc_started(proc.pid)
     except (OSError, IndexError, ValueError):
         pass
-    (cwd / "server.pid").write_text(json.dumps(record))
+    (cwd / "server.pid").write_text(json.dumps(record))   # (the file exists and is 0640 since protect_instance, before the spawn)
     _instances[server_id] = inst   # registered before the plugin socket: a failure there must not leave a running acServer nobody owns
     if acsp_local_port and acsp_remote_port:
         await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host)

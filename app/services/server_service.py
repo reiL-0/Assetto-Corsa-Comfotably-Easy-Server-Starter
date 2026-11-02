@@ -153,6 +153,7 @@ def write_instance(s: Server) -> Path:
     d = Path(settings.data_dir) / "instances" / str(s.id)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     (d / "results").mkdir(exist_ok=True)
+    supervisor.protect_instance(d)
     # acServer reads content/ and system/ relative to its cwd: share the install's copies.
     bin_dir = settings.acserver_dir()
     if bin_dir:
