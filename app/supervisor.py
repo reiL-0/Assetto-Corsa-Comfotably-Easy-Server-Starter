@@ -17,6 +17,7 @@ import os
 import shlex
 import shutil
 import signal
+import threading
 import time
 import urllib.request
 from collections import deque
@@ -362,6 +363,8 @@ async def _start(
         raise RuntimeError("already running")
     if not settings.acserver_cmd:
         raise RuntimeError("ACM_ACSERVER_CMD is not configured")
+    if program_lock.locked():
+        raise RuntimeError("the acServer program is being installed: try again in a moment")
     for hook in before_start:
         hook(server_id)
     if before_start:
@@ -431,6 +434,14 @@ async def stop(server_id: int, reason: str = "manual", only: Instance | None = N
         inst = _instances.get(server_id)
         if inst and (only is None or inst is only):
             await inst.stop(reason=reason)
+
+
+program_lock = threading.Lock()   # held by app/binary.py while it replaces the acServer program: a start waits for it (the replacement itself is one atomic rename, so the worst a start that slips in sees is the old or the new complete file)
+
+
+def any_running() -> bool:
+    """Whether any acServer of this manager is running (app/binary.py refuses to replace the program under a race)."""
+    return any(i.running for i in _instances.values())
 
 
 def live() -> list[Instance]:
