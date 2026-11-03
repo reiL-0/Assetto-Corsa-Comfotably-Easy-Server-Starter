@@ -18,6 +18,7 @@ Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
 engine = create_engine(
     f"sqlite:///{settings.resolved_db_path()}",
     connect_args={"check_same_thread": False},
+    pool_size=20, max_overflow=30,   # 50 >= the 40 threads of the request pool: with fewer, every thread can sit waiting for a connection that is only freed by a request that needs a thread to finish (a FileResponse sends the file from one): the pool stays full for good and the whole manager answers 502
 )
 
 
