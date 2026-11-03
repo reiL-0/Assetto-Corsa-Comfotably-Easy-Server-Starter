@@ -26,6 +26,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
 from app.auth import require
@@ -73,7 +74,11 @@ def _forget_tokens(keep: int | None = None) -> None:
 
 
 def _row(sess: Session) -> dict:
-    s = sess.get(Setting, KEY)
+    try:
+        s = sess.get(Setting, KEY)
+    except OperationalError:   # the table does not exist yet: this is asked at import time (the sample announcement asks for the role) and on a fresh database before init_db has made it. No bot configured.
+        sess.rollback()
+        return {}
     return dict(s.value) if s else {}
 
 

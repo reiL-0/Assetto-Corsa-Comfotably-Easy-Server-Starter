@@ -370,3 +370,24 @@ def test_the_note_and_the_test_message_take_their_locks(fake, monkeypatch):
     discord_config.note("algo falló")
     assert write.entered == 1, "note() rewrites the settings without the lock that serialises changes"
     assert client.post("/api/v1/discord/test").status_code == 200 and test.entered == 1, "the test message checks and marks its window without a lock"
+
+
+def test_asking_for_the_bot_before_the_database_has_its_tables_is_no_bot_not_a_crash(monkeypatch, tmp_path):
+    """The sample announcement (app/announcement.py, built at import) asks for the role; the manager imports before init_db has made `settings` on a fresh database. It used to raise «no such table»."""
+    from sqlalchemy import create_engine
+    monkeypatch.setattr(discord_config, "engine", create_engine(f"sqlite:///{tmp_path}/empty.db"))
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    assert discord_config.active() is None and discord_config.reminders() == [1440, 60, 10]
+    assert discord.bot() is None and discord.role_id() == settings.discord_role and discord.rsvp_enabled() is False
+    from app import announcement
+    assert announcement.variables("T", "S", {"track": "spa", "cars": ["clio"], "practice_min": 15, "qualify_min": 15, "race_laps": 5}, 0, {"yes": 0, "maybe": 0, "no": 0})["title"] == "T"
+
+
+def test_the_manager_imports_on_a_database_with_no_tables(tmp_path):
+    """What the server's import check does before anything is touched: `import app.main` against an empty database file."""
+    import os
+    import subprocess
+    import sys
+    env = {**os.environ, "ACM_DATA_DIR": str(tmp_path), "ACM_DB_PATH": str(tmp_path / "empty.db"), "ACM_ACSERVER_CMD": ""}
+    r = subprocess.run([sys.executable, "-c", "import app.main"], cwd=str(__import__("pathlib").Path(__file__).resolve().parent.parent), env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-800:]
