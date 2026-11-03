@@ -25,7 +25,7 @@ from app.live import acsp
 from app.live.acsp import ACSPClient
 from app.models import Activity, ChampionshipEvent, Incident, Penalty, Schedule, Server, Setting
 from app.services import ini_generator, server_service
-from app.services.server_service import ServerError, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
+from app.services.server_service import ServerError, check_slots, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.schemas.servers import (  # noqa: F401 - re-exported: other modules import these names from here
     Scalar,
@@ -139,6 +139,8 @@ def _alloc_id(sess: SessionDep) -> int:
 
 @router.post("", response_model=ServerOut, status_code=201)
 def create(body: ServerIn, sess: SessionDep) -> ServerOut:
+    with _http():
+        check_slots(body.config, body.entry_list)
     with _alloc_lock:   # choosing the block and committing it are one step: two simultaneous creates must not get the same ports
         s = Server(
             id=_alloc_id(sess),
@@ -166,6 +168,8 @@ def get_server(server_id: int, sess: SessionDep) -> ServerOut:
 @router.patch("/{server_id}", response_model=ServerOut)
 def update(server_id: int, body: ServerIn, sess: SessionDep) -> ServerOut:
     s = _get(sess, server_id)
+    with _http():
+        check_slots(body.config, body.entry_list)
     s.name, s.config, s.entry_list = body.name, body.config, body.entry_list
     s.updated_at = datetime.now(UTC)
     sess.add(s)
@@ -210,7 +214,10 @@ async def upload_server_cfg_ini(server_id: int, request: Request, sess: SessionD
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
     cp.read_string((await request.body()).decode())
-    s.config = {sec: dict(cp[sec]) for sec in cp.sections()}
+    config = {sec: dict(cp[sec]) for sec in cp.sections()}
+    with _http():
+        check_slots(config, s.entry_list)
+    s.config = config
     s.updated_at = datetime.now(UTC)
     sess.add(s)
     sess.commit()
@@ -228,7 +235,10 @@ async def upload_entry_list_ini(server_id: int, request: Request, sess: SessionD
         (sec for sec in cp.sections() if sec.startswith("CAR_")),
         key=lambda sec: int(sec.split("_", 1)[1]),
     )
-    s.entry_list = [dict(cp[sec]) for sec in car_sections]
+    entries = [dict(cp[sec]) for sec in car_sections]
+    with _http():
+        check_slots(s.config, entries)
+    s.entry_list = entries
     s.updated_at = datetime.now(UTC)
     sess.add(s)
     sess.commit()

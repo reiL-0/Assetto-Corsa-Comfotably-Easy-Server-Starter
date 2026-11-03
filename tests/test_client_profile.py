@@ -114,3 +114,12 @@ def test_a_clients_trainer_comes_only_from_its_own_site(monkeypatch):
     assert own not in csp.extra_for(1, "", "trainer", None), "the checkbox of the server does not switch the trainer off"
     for bad in ("https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua", "https://evil.test/static/csp/opr_trainer.lua", "https://grid.example.test/x/hl_trainer.lua", "http://grid.example.test/static/csp/hl_trainer.lua"):
         assert type(settings)(profile="client", csp_trainer_url=bad).csp_trainer_servers == "", bad
+
+
+def test_the_plan_slot_cap_stops_every_way_to_more_cars(monkeypatch):
+    from app.services import server_service as ss
+    monkeypatch.setattr(settings, "max_slots", 32)
+    ss.check_slots({"SERVER": {"MAX_CLIENTS": 32}}, [{}] * 32)   # exactly the cap: fine
+    for cfg, entries in (({"SERVER": {"MAX_CLIENTS": "33"}}, []), ({}, [{}] * 33), ({"SERVER": {"MAX_CLIENTS": 20}}, [{}] * 40)):
+        with pytest.raises(ss.ServerError, match="32 slots"):
+            ss.check_slots(cfg, entries)
