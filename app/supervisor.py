@@ -249,7 +249,9 @@ class Instance:
             if not self.acsp or self.acsp.cars:
                 last_active = time.time()
             elif time.time() - last_active > settings.idle_stop_seconds:
-                await stop(self.server_id, reason="idle", only=self)   # through the per-server lock, and only while this is still the registered instance
+                was = self.nascar_config
+                if await stop(self.server_id, reason="idle", only=self):   # through the per-server lock, and only while this is still the registered instance
+                    notify_stopped(self.server_id, was)
                 return
 
     @property
@@ -427,13 +429,27 @@ async def adopt(
     return inst
 
 
-async def stop(server_id: int, reason: str = "manual", only: Instance | None = None) -> None:
+async def stop(server_id: int, reason: str = "manual", only: Instance | None = None) -> bool:
     """`only`: stop the server only if that exact instance is still the registered one, checked once the lock is ours (a restart may
-    have registered a new instance while we waited: an automatic stop aimed at the old one must not hit it)."""
+    have registered a new instance while we waited: an automatic stop aimed at the old one must not hit it). True when something was stopped."""
     async with _lock(server_id):
         inst = _instances.get(server_id)
         if inst and (only is None or inst is only):
             await inst.stop(reason=reason)
+            return True
+    return False
+
+
+stopped_hooks: list = []   # called with (server id, what the stopped instance had armed) when a SESSION is stopped (the director's stop, the end of an event, the idle stop): what belonged to that session goes
+                           # with it (app/racecontrol.py: the NASCAR arming). Never for an apply that restarts the server (it writes the new session first), and only when an instance really was stopped.
+
+
+def notify_stopped(server_id: int, was=None) -> None:
+    for hook in stopped_hooks:
+        try:
+            hook(server_id, was)
+        except Exception:   # noqa: BLE001 - a hook must never keep a stop from finishing
+            log.exception("stopped hook failed for server %s", server_id)
 
 
 program_lock = threading.Lock()   # held by app/binary.py while it replaces the acServer program: a start waits for it (the replacement itself is one atomic rename, so the worst a start that slips in sees is the old or the new complete file)

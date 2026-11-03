@@ -146,7 +146,9 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
 async def stop_instance(server_id: int, inst: supervisor.Instance, reason: str) -> None:
     """Automatic stops (end of an event): same exclusion as the others, and only if `inst` is still the registered one (an apply may have replaced it)."""
     async with server_lock(server_id):
-        await supervisor.stop(server_id, reason=reason, only=inst)
+        was = getattr(inst, "nascar_config", None)
+        if await supervisor.stop(server_id, reason=reason, only=inst):   # (False: an apply replaced the instance meanwhile; the new session keeps what it has)
+            supervisor.notify_stopped(server_id, was)
 
 
 def write_instance(s: Server) -> Path:
@@ -261,7 +263,10 @@ async def start(sess: Session, server_id: int, held: bool = False) -> dict:
 
 async def stop(server_id: int) -> None:
     async with server_lock(server_id):
-        await supervisor.stop(server_id)
+        running = supervisor.get(server_id)
+        was = getattr(running, "nascar_config", None)
+        if await supervisor.stop(server_id):
+            supervisor.notify_stopped(server_id, was)   # (the director's stop: the session is over. The stop inside an apply with restart is another path and does not call this)
 
 
 async def adopt_running(sess: Session) -> int:
