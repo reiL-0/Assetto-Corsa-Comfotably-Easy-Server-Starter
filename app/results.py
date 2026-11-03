@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from app import csp
 from app.models import ChampionshipEvent, LeagueMember, Penalty
 
 
@@ -179,7 +180,7 @@ def parse_result_file(path: Path) -> dict:
 
     return {
         "type": session_type,
-        "track": data.get("TrackName"),
+        "track": csp.clean_track(data.get("TrackName")),
         "track_config": data.get("TrackConfig"),
         "name": data.get("Name"),
         "classification": classification,

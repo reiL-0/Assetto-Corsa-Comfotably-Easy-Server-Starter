@@ -38,11 +38,11 @@ from app import supervisor
 from app.auth import CurrentUser, require, require_any
 from app.config import settings
 from app.db import SessionDep, engine
-from app.models import GiveBackDue, LeagueMember
+from app.models import GiveBackDue, LeagueMember, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -231,10 +231,11 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     if inst and (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
         cut_rule_of(server_id)   # (refreshes the cached rules here, in a request thread: the snapshot and the monitor never touch the database)
         give_back_rule_of(server_id)
+    server = _get(sess, server_id)
     if rc:
-        return rc.snapshot()
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
-    return {"cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -285,12 +286,60 @@ class NascarIn(BaseModel):
     next_delay_min: int | None = Field(default=None, ge=0, le=60)
 
 
+def armed_view(inst, server) -> dict | None:
+    """The NASCAR arming of a SERVER (not of a session): what the director armed, kept for the races until the session is stopped. {total, shares} or None. The engine itself only exists in a race;
+    this is what survives practice, qualifying and restarts (the memory of the running instance, which is the saved session of the server as of the last apply or arming)."""
+    cfg = getattr(inst, "nascar_config", None) if inst is not None else (server.session or {}).get("nascar")
+    return {"total": cfg["total"], "shares": list(cfg["shares"]) if cfg.get("shares") is not None else None} if cfg else None   # (a preset may leave the shares to the default)
+
+
+_arm_lock = threading.Lock()   # one arming at a time: the database and the instance's memory must end with the same one when two directors press at once
+
+
+def _remember_nascar(sess: Session, server_id: int, inst, remembered: dict | None) -> None:
+    """Keep the arming for the next race and for every later one until the session is stopped (the in-memory engine is reset by every new_session; the instance arms a fresh one from this)."""
+    with _arm_lock:
+        server = _get(sess, server_id)
+        saved = dict(server.session or {})   # a new dict: a JSON column does not notice in-place changes
+        saved.pop("nascar", None)
+        if remembered:
+            saved["nascar"] = remembered
+        server.session = saved or None
+        sess.add(server)
+        try:
+            sess.commit()
+        except SQLAlchemyError as e:   # the live engine did change (that is what was asked): say only the memory for later races failed
+            sess.rollback()
+            log.warning("NASCAR could not be saved for server %s: %s", server_id, e)
+            raise HTTPException(503, "NASCAR quedó armado en esta carrera, pero no se pudo guardar para las siguientes") from e
+        inst.nascar_config = remembered
+
+
 @control_router.post("/nascar")
 @control_router.patch("/nascar")
 def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
+    """Arm (or, with total 0, disarm) NASCAR on the server. In a RACE the engine starts now (and is remembered for the races that follow); in practice or qualifying nothing runs: it is armed for the
+    next race only, and the arming stays on the server through practice, qualifying and restarts until the session is stopped (`armed_view`, race-state `nascar_armed`)."""
     inst, rc = _control(server_id, sess)
+    shares = tuple(body.shares) if body.shares is not None else None
+    if (inst.acsp.session or {}).get("session_type") != RACE_TYPE:
+        if body.stages is not None:
+            raise HTTPException(422, "las etapas explícitas solo se pueden armar dentro de una carrera")
+        was = armed_view(inst, None)
+        if shares is None and was and was["shares"] is not None:   # as with a live engine: a change of distance alone keeps the shares that were armed
+            shares = tuple(was["shares"])
+        try:
+            trial = RaceControl(None)   # a throwaway engine: the same checks as a live one, nothing runs
+            trial.configure_nascar(body.total, None, shares, body.next_delay_min)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        remembered = {"total": trial.nascar.total, "shares": list(trial.nascar.shares)} if trial.nascar else None
+        _remember_nascar(sess, server_id, inst, remembered)
+        if (inst.acsp.session or {}).get("session_type") == RACE_TYPE:   # a race began while this was being saved: its engine was armed from the OLD memory, so arm it now
+            return configure_nascar(server_id, body, sess)
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}   # (the wait after the finish, next_delay_min, is a live engine's: it is set when the race has started)
     try:
-        actions = rc.configure_nascar(body.total, body.stages, tuple(body.shares) if body.shares is not None else None, body.next_delay_min)
+        actions = rc.configure_nascar(body.total, body.stages, shares, body.next_delay_min)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     nascar_actions(server_id, rc, actions)
@@ -300,22 +349,27 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     elif not rc.nascar.fixed_ends:
         remembered = {"total": rc.nascar.total, "shares": list(rc.nascar.shares)}
     else:
-        return rc.snapshot()
-    server = _get(sess, server_id)
-    saved = dict(server.session or {})   # a new dict: a JSON column does not notice in-place changes
-    saved.pop("nascar", None)
-    if remembered:
-        saved["nascar"] = remembered
-    server.session = saved or None
-    sess.add(server)
-    try:
-        sess.commit()
-    except SQLAlchemyError as e:   # the live engine did change (that is what was asked): say only the memory for later races failed
-        sess.rollback()
-        log.warning("NASCAR could not be saved for server %s: %s", server_id, e)
-        raise HTTPException(503, "NASCAR quedó armado en esta carrera, pero no se pudo guardar para las siguientes") from e
-    inst.nascar_config = remembered
-    return rc.snapshot()
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
+    _remember_nascar(sess, server_id, inst, remembered)
+    return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
+
+
+def disarm_when_stopped(server_id: int, was) -> None:
+    """The session was stopped (the director's stop, the end of an event, the idle stop): the arming goes with it, but only the arming that INSTANCE had (`was`): if a newer apply has saved another one
+    meanwhile it is the next session's and stays. A restart for an apply is NOT this (it writes the new session first)."""
+    if not was:
+        return
+    with _arm_lock, Session(engine) as sess:
+        server = sess.get(Server, server_id)
+        if server is not None and (server.session or {}).get("nascar") == was:
+            saved = dict(server.session)
+            saved.pop("nascar", None)
+            server.session = saved or None
+            sess.add(server)
+            sess.commit()
+
+
+supervisor.stopped_hooks.append(disarm_when_stopped)
 
 
 PITS_OPEN = "BOXES ABIERTOS: aprovecha para parar"

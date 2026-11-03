@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from app import supervisor
+from app import csp, supervisor
 from app.content import _read_json, _tracks_dir
 
 router = APIRouter(prefix="/servers/{server_id}/acsm", tags=["acsm-compat"])
@@ -29,7 +29,7 @@ def leaderboard(server_id: int) -> dict:
         return inst.acsp.board.leaderboard()
     out = inst.logboard.board.leaderboard()   # no plugin socket (yet): the same table read from acServer's log
     info = _read_json(inst.cwd / "info.json")
-    track, _, config = str(info.get("track", "")).partition("-")
+    track, _, config = csp.clean_track(str(info.get("track", ""))).partition("-")
     out.update(ServerName=info.get("name", ""), Track=track, TrackConfig=config)
     return out
 

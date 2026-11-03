@@ -196,7 +196,9 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
     `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures. Cars and tracks are cut down always: `pack` is kept only so older clients that send it still work.
     `source_url`: the modder's page for the «Descargar» button (without it the content has no button).
     `settings.upload_permissive` (the league's own panel): any archive format, the car/track folder may sit anywhere inside and the kind is detected from it; `auto` = the uploader did not say what it is."""
-    permissive = settings.upload_permissive and dest_parent in (_cars_dir(), _tracks_dir())
+    in_content = dest_parent in (_cars_dir(), _tracks_dir())
+    permissive = settings.upload_permissive and in_content                                       # any archive format (bsdtar) and everything below
+    detect = (settings.upload_permissive or settings.upload_autodetect) and in_content           # the folder anywhere inside, and car-or-track from what it holds (formats stay as they are)
     with archive.open("rb") as fh:
         magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
@@ -216,7 +218,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
             if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
         asked = None if dest_parent not in (_cars_dir(), _tracks_dir()) or auto else "car" if dest_parent == _cars_dir() else "track"
-        if permissive:
+        if detect:
             top, found = uploadguard.find_content_root(scratch, asked)
         else:
             tops = [p for p in scratch.iterdir()]
@@ -238,6 +240,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         with catalog.mutation_lock:   # ponytail: held during copytree/digest (one process, runs in the threadpool); uploads and scans queue up. Staging dir + short swap under the lock if that hurts
             if cataloged:
                 digest, size, nfiles = catalog.digest_dir(top)
+                from app import storage
+                storage.check_install(size, dest_parent / root)   # the size AFTER cutting it down to the server pack, from a fresh count: a small archive cannot expand past the plan (a replaced folder counts only its difference)
                 if full_digest:
                     catalog.check_not_blocked(full_digest)   # again under the lock: a claim may have landed while the upload was cut down or waited
                 catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
@@ -248,6 +252,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 res.kind = kind
                 integrity.seal_installed(kind, root)
                 catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
+        from app import storage
+        storage.forget()   # what is on disk changed: the space card and the quota check count again
         res.note = note
         return res
     except uploadguard.Rejected as e:
@@ -256,11 +262,22 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _room(extra: int = 0) -> None:
+    from app import storage   # (late: storage asks this module for the folders)
+    storage.check_room(extra)
+
+
 async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "", official: bool = False) -> str:
-    """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it."""
+    """Streams an uploaded archive to disk (tracks are hundreds of MB) and unpacks it. Stops as soon as the plan's space would be exceeded (each part is checked against what is installed and what
+    the uploads in progress have already written)."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
-        while chunk := await file.read(1 << 20):
-            tmp.write(chunk)
+        try:
+            while chunk := await file.read(1 << 20):
+                await run_in_threadpool(_room, len(chunk))
+                tmp.write(chunk)
+        except BaseException:
+            Path(tmp.name).unlink(missing_ok=True)
+            raise
     try:
         return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack, catalog.check_source(source_url, official))
     finally:
@@ -411,7 +428,7 @@ _uploads: dict[str, dict] = {}
 
 
 class UploadIn(BaseModel):
-    kind: Literal["track", "car", "skin"] | None = None   # None = detect it from the archive (only when settings.upload_permissive); "skin" = skins for `car`, kept as folder names + ui_skin.json
+    kind: Literal["track", "car", "skin"] | None = None   # None = detect it from the archive (only when settings.upload_permissive or upload_autodetect); "skin" = skins for `car`, kept as folder names + ui_skin.json
     car: str = Field(default="", max_length=80)   # the car model the skins are for (only with kind "skin", when the archive does not say)
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
     source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
@@ -419,7 +436,7 @@ class UploadIn(BaseModel):
 
 
 def _need_kind(kind: str | None) -> None:
-    if kind is None and not settings.upload_permissive:
+    if kind is None and not (settings.upload_permissive or settings.upload_autodetect):
         raise HTTPException(422, "say whether it is a car or a track (kind)")
 
 
@@ -433,6 +450,7 @@ def _upload(uid: str) -> dict:
 @router.post("/uploads", status_code=201)
 def upload_start(body: UploadIn) -> dict:
     _need_kind(body.kind)
+    _room(0)
     if body.car:
         _skin_folder(body.car)
     uid = secrets.token_hex(8)
@@ -453,6 +471,7 @@ async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
     data = await request.body()
     if u["size"] + len(data) > MAX_UPLOAD:
         raise HTTPException(413, "archive too large")
+    await run_in_threadpool(_room, len(data))   # (the plan's space: the upload is stopped where this part would go past it)
     with u["path"].open("ab") as fh:
         fh.write(data)
     u["size"] += len(data)
@@ -506,9 +525,14 @@ def _fetch_then_finish(uid: str, url: str) -> None:
 
     def progress(done: int, total: int | None) -> None:
         u["size"], u["total"] = done, total
+        _room(0)   # (raises 413 when the plan filled up while this was downloading: the download ends as an error)
 
     try:
-        download.fetch(download.resolve(url, download.opener()), u["path"], MAX_UPLOAD, progress)
+        from app import storage
+        left = storage.room()   # a download is cut off at what the plan has left, as well as at the upload cap, and re-checked as it progresses (other uploads may be filling the room meanwhile)
+        cap = MAX_UPLOAD if left is None else min(MAX_UPLOAD, left)
+        storage.check_room(0)
+        download.fetch(download.resolve(url, download.opener()), u["path"], cap, progress)
     except Exception as e:  # noqa: BLE001 - whatever went wrong must reach the panel as text
         u["state"], u["error"] = "error", f"download failed: {e}"
         u["path"].unlink(missing_ok=True)
@@ -528,6 +552,7 @@ def upload_from_link(body: LinkIn) -> dict:
         download.check_url(body.url)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    _room(0)
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
@@ -555,6 +580,7 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
+    _room(0)   # (the archive is already in the data folder, so it is already counted: it is the installed size that is checked, in _extract)
     return _installed(await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url, body.source_official)), "track")
 
 

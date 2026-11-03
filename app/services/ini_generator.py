@@ -42,7 +42,7 @@ def render_ini(sections: dict[str, dict[str, Scalar]]) -> str:
 GAME_PENALTIES_OFF = {"START_RULE": 0, "RACE_GAS_PENALTY_DISABLED": 1, "ALLOWED_TYRES_OUT": -1}
 
 
-def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool, game_penalties_off: bool = False) -> str:
+def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool, game_penalties_off: bool = False, csp_min_build: int = 0) -> str:
     """server_cfg.ini with the allocated ports `p` merged into [SERVER] (user values win, except the game's own penalties when `game_penalties_off`: those are always off)."""
     sections = {name: dict(kv) for name, kv in config.items()}
     server = sections.setdefault("SERVER", {})
@@ -57,6 +57,9 @@ def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welc
     server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
     if game_penalties_off:
         server.update(GAME_PENALTIES_OFF)
+    track = str(server.get("TRACK", ""))
+    if csp_min_build and track and not track.startswith("csp/"):   # CSP's own way of requiring a minimum build: the track is named behind it (the manager keeps the clean name: csp.clean_track)
+        server["TRACK"] = f"csp/{csp_min_build}/../{track}"
     return render_ini(sections)
 
 

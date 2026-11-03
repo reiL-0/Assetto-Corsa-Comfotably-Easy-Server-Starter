@@ -55,7 +55,7 @@ def live(monkeypatch):
     """A server row with a fake running instance whose ACSP client records what it would send."""
     sid = api.post(f"{V}/servers", json={"name": "rc"}).json()["id"]
     c = acsp.ACSPClient(sid)
-    c.session = {"session_index": 0}
+    c.session = {"session_index": 0, "session_type": 3}   # a race: NASCAR arms a live engine only in a race (the arming outside one is only remembered)
     c.cars[3] = {"driver_name": "Ana", "driver_guid": "76561190000000001"}
     sent = []
     c.send = sent.append

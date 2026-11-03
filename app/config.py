@@ -9,6 +9,10 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# The client's hub URL is its OWN site's neutral script (the installer writes it): https, a host, and exactly this path. Anything else (the league's address in any spelling, a typo, another path) = no hub.
+_OWN_HUB_URL = re.compile(r"https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:\d{1,5})?/static/csp/hl_hub\.lua")
+
+
 class Settings(BaseSettings):
     """Runtime config. Every field is overridable via ACM_* env vars or a .env file."""
 
@@ -34,7 +38,17 @@ class Settings(BaseSettings):
             # the league's script says OPRHELLO: another word here and no token is ever issued, with nothing to say why
             raise ValueError("ACM_CLAIM_PREFIX other than OPR needs ACM_PROFILE=client (the script of the league's website speaks with OPR)")
         if self.profile == "client":
-            self.csp_hub, self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = False, "", "", ""
+            # Phase 1 of the client's game scripts: the HUB only (neutral, served by the client's own site: its ACM_CSP_HUB_URL). The league's address is never sent to a client's drivers, so a hub URL that is
+            # still the league's default means no hub; the trainer, the probe and the claim exchange stay off until their phase.
+            self.csp_hub = self.csp_hub and bool(_OWN_HUB_URL.fullmatch(self.csp_hub_url)) and "oppenpaddock" not in self.csp_hub_url.lower()
+            self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = "", "", ""
+            self.csp_hub_required = True if self.csp_hub_required is None else self.csp_hub_required
+            self.csp_min_build = 3898 if self.csp_min_build is None else self.csp_min_build
+            self.upload_permissive = self.upload_autodetect = True   # the owner's decision (2026-11-02): a client uploads any common archive (.zip .rar .7z .tar.gz…) and the kind is detected, as in the league's panel. The
+            # price is the external unpacker (bsdtar/libarchive) for the non-zip formats: it runs in the disposable child of app/unpack.py (rlimits, timeout, real byte counter, magic bytes judged, one at a time) inside the unit's caps and the plan's quota
+        if self.profile != "client":
+            self.csp_hub_required = bool(self.csp_hub_required)
+            self.csp_min_build = self.csp_min_build or 0
         return self
 
     def claim_word(self, suffix: str) -> str:
@@ -48,6 +62,11 @@ class Settings(BaseSettings):
     # The CSP hub script (opr_hub.lua, served by the website): added to the extra options of every server unless its checkbox in Control AC is off (`Server.csp_off`, app/csp.py `extra_for`).
     # `csp_hub_version` goes in the script URL: CSP caches a script by URL, so it is raised whenever the script changes. ACM_CSP_HUB=false turns it off everywhere.
     csp_hub: bool = True
+    # CSP is MANDATORY on a hosted client's servers (the owner's decision, 2026-11-02: all its drivers use it, build 3898 = 0.3.0): the hub script is marked REQUIRED (CSP closes the game of whoever cannot load
+    # it) and the server's TRACK carries the minimum build (`csp/<build>/../<track>`, CSP's own mechanism: cup.acstuff.club/docs/csp/misc/server-extra-options). None = the profile's default
+    # (client: required, build 3898; the league: neither); 0 turns the minimum build off. Env: ACM_CSP_HUB_REQUIRED, ACM_CSP_MIN_BUILD
+    csp_hub_required: bool | None = None
+    csp_min_build: int | None = None
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
     csp_hub_version: str = "18"   # 18: the banner of the place to give back; 17: the cut counter on the left; 16: the banners in English (language poll, key-based images); 15: the NASCAR banners load only with NASCAR = 1 in the hub's section (14: the closed-pits banner gets the lap it opens on written over it)
     # The three lists below take a selector (app/csp.py `server_listed`): `*` = every server, the ones made later too; `2` or `2,3` = those; empty = nobody; `!2` takes one out (`*,!2`).
@@ -118,6 +137,9 @@ class Settings(BaseSettings):
     # Lenient uploads of cars/tracks (the league's own panel): any common archive (.7z, .rar, .tar.gz… through bsdtar), the car or track folder may sit anywhere inside
     # (mods ship `assettocorsa/content/tracks/<name>` plus a README) and its kind is detected. Off = strict (hosting for others): only .zip, one folder at the root, kind declared.
     upload_permissive: bool = False
+    # The kind (car or track) is detected from the archive and its folder may sit anywhere inside (a mod's README beside it, `assettocorsa/content/cars/<name>`) while ONLY .zip is opened (no .rar/.7z/.tar:
+    # those go through an external unpacker; that is upload_permissive). The panel never says whether an upload is a car or a track. The client profile turns on both (below). Env: ACM_UPLOAD_AUTODETECT
+    upload_autodetect: bool = False
     port_range_start: int = 9600
     port_range_end: int = 9700
     resource_log_seconds: int = 30    # how often CPU/RAM/steal are written to <data_dir>/logs/resources-*.jsonl (app/resourcelog.py); 0 = off

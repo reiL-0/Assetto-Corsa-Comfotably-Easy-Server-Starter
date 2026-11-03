@@ -16,7 +16,7 @@ import time
 import urllib.request
 from collections import deque
 
-from app import metrics
+from app import csp, metrics
 from app.config import settings
 from app.live.board import LiveBoard
 from app.live.field import Field
@@ -85,6 +85,7 @@ def _read_session_info(buf: bytes, pos: int) -> tuple[dict, int]:
     pos += 4
     server_name, pos = _read_string(buf, pos)
     track, pos = _read_sstring(buf, pos)
+    track = csp.clean_track(track)   # (a server that requires a minimum CSP build names its track «csp/<build>/../<track>»)
     track_config, pos = _read_sstring(buf, pos)
     name, pos = _read_sstring(buf, pos)
     (session_type,) = struct.unpack_from("<B", buf, pos)
