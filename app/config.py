@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # gets a neutral user agent. A client that serves scripts of its own can say so when this has a way to name them.
     profile: Literal["opr", "client"] = "opr"
     claim_prefix: str = ""   # the chat words are <prefix>HELLO / <prefix>CLAIM: ("" = OPR, or HL in the client profile): 2 to 8 capital letters
+    max_slots: int = 50      # most cars one server may hold (MAX_CLIENTS / entry list): the plan's cap for a client (32), 50 is the panel's own ceiling
     user_agent: str = ""     # what Discord is told we are ("" = OPR-AC-Manager, or HotLapHosting-Manager in the client profile)
 
     @field_validator("claim_prefix")

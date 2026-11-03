@@ -151,7 +151,19 @@ async def stop_instance(server_id: int, inst: supervisor.Instance, reason: str) 
             supervisor.notify_stopped(server_id, was)
 
 
+def check_slots(config: dict, entry_list: list) -> None:
+    """The plan's slot cap (ACM_MAX_SLOTS) on whatever is about to be saved or started: every route that can change MAX_CLIENTS or the entry list, and the start itself, come through here."""
+    try:
+        n = int((config.get("SERVER") or {}).get("MAX_CLIENTS") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    n = max(n, len(entry_list))
+    if n > settings.max_slots:
+        raise ServerError(400, f"this plan allows {settings.max_slots} slots per server at most (asked for {n})")
+
+
 def write_instance(s: Server) -> Path:
+    check_slots(s.config, s.entry_list)
     d = Path(settings.data_dir) / "instances" / str(s.id)
     (d / "cfg").mkdir(parents=True, exist_ok=True)
     (d / "results").mkdir(exist_ok=True)
@@ -181,6 +193,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
         raise ServerError(400, "enable at least one session (practice, qualify or race)")
     cars = list(dict.fromkeys(e.model for e in body.entries)) if body.entries else body.cars
+    if (len(body.entries) or body.max_clients) > settings.max_slots:
+        raise ServerError(400, f"this plan allows {settings.max_slots} slots per server at most (asked for {len(body.entries) or body.max_clients})")
     skins = check_content(body, cars)
     wanted_setups = {e.fixed_setup for e in body.entries if e.fixed_setup} | set(body.car_setups.values())
     missing_setups = sorted(n for n in wanted_setups if not (content.setups_dir() / f"{n}.ini").is_file())
