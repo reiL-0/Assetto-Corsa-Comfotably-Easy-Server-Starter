@@ -9,6 +9,10 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# The client's hub URL is its OWN site's neutral script (the installer writes it): https, a host, and exactly this path. Anything else (the league's address in any spelling, a typo, another path) = no hub.
+_OWN_HUB_URL = re.compile(r"https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:\d{1,5})?/static/csp/hl_hub\.lua")
+
+
 class Settings(BaseSettings):
     """Runtime config. Every field is overridable via ACM_* env vars or a .env file."""
 
@@ -36,7 +40,7 @@ class Settings(BaseSettings):
         if self.profile == "client":
             # Phase 1 of the client's game scripts: the HUB only (neutral, served by the client's own site: its ACM_CSP_HUB_URL). The league's address is never sent to a client's drivers, so a hub URL that is
             # still the league's default means no hub; the trainer, the probe and the claim exchange stay off until their phase.
-            self.csp_hub = self.csp_hub and "oppenpaddockracing" not in self.csp_hub_url
+            self.csp_hub = self.csp_hub and bool(_OWN_HUB_URL.fullmatch(self.csp_hub_url)) and "oppenpaddock" not in self.csp_hub_url.lower()
             self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = "", "", ""
             self.csp_hub_required = True if self.csp_hub_required is None else self.csp_hub_required
             self.csp_min_build = 3898 if self.csp_min_build is None else self.csp_min_build

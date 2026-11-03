@@ -31,9 +31,13 @@ def test_the_client_profile_defaults_to_required_and_build_3898_with_its_own_hub
     assert client_settings(csp_min_build=0).csp_min_build == 0 and client_settings(csp_min_build=4300).csp_min_build == 4300 and client_settings(csp_hub_required=False).csp_hub_required is False
 
 
-def test_a_client_never_gets_the_leagues_hub_address():
-    c = type(settings)(profile="client", csp_hub=True)   # the default URL is the league's
-    assert c.csp_hub is False, "a client's drivers would load the league's script"
+@pytest.mark.parametrize("url", [
+    "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua", "https://WWW.OPPENPADDOCKRACING.SITE/static/csp/hl_hub.lua", "https://oppenpaddockracing.site/static/csp/hl_hub.lua",
+    "http://gridracing.example.test/static/csp/hl_hub.lua", "https://gridracing.example.test/static/csp/opr_hub.lua", "https://gridracing.example.test/hl_hub.lua", "https://gridracing.example.test/static/csp/hl_hub.lua?x=1",
+    "https://gridracing.example.test/static/csp/hl_hub.lua/../opr_hub.lua", "https://x y.test/static/csp/hl_hub.lua", "//gridracing.example.test/static/csp/hl_hub.lua", ""])
+def test_a_client_never_gets_a_hub_that_is_not_its_own_script(url):
+    c = type(settings)(profile="client", csp_hub=True, csp_hub_url=url) if url else type(settings)(profile="client", csp_hub=True)
+    assert c.csp_hub is False, ("a client's drivers would load", url)
 
 
 def test_the_league_is_exactly_as_it_was():
@@ -69,7 +73,8 @@ def test_the_track_carries_the_minimum_build_only_where_the_hub_is_sent(monkeypa
     assert "TRACK=spa" in plain and "csp/" not in plain, "the league's file changed"
 
 
-@pytest.mark.parametrize("raw,clean", [("csp/3898/../spa", "spa"), ("csp/3898/../B/../ks_monza", "ks_monza"), ("spa", "spa"), ("", ""), (None, None), ("ks_nordschleife", "ks_nordschleife"), ("csp/12/../x_y-z", "x_y-z")])
+@pytest.mark.parametrize("raw,clean", [("csp/3898/../spa", "spa"), ("csp/3898/../B/../ks_monza", "ks_monza"), ("spa", "spa"), ("", ""), (None, None), ("ks_nordschleife", "ks_nordschleife"), ("csp/12/../x_y-z", "x_y-z"),
+                                       ("csp/pista", "csp/pista"), ("csp/3898/../grupo/pista", "csp/3898/../grupo/pista"), ("csp/x/../spa", "csp/x/../spa"), ("csp//../spa", "csp//../spa")])
 def test_the_clean_track_name(raw, clean):
     assert csp.clean_track(raw) == clean
 

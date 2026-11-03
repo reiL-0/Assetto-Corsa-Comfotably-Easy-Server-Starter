@@ -51,10 +51,14 @@ def min_build_for(csp_off: str = "") -> int:
     return settings.csp_min_build or 0 if hub_enabled(csp_off) else 0
 
 
+_CSP_TRACK = re.compile(r"csp/\d+/\.\./(?:[A-Za-z0-9_]+/\.\./)?([^/]+)")   # csp/<build>/../<track>  or  csp/<build>/../<options>/../<track>
+
+
 def clean_track(name):
     """The track as the manager knows it, from what the acServer reports. With a minimum CSP build the server's TRACK is `csp/<build>/../<track>` (or `csp/<build>/../<options>/../<track>`) and the acServer
     hands that string back in its session info and its result files: the folder name is the last part. Anything else (including None) is returned as it came."""
-    return name.rsplit("/", 1)[-1] if isinstance(name, str) and name.startswith("csp/") else name
+    m = isinstance(name, str) and _CSP_TRACK.fullmatch(name)
+    return m.group(1) if m else name
 
 
 def nascar_requested(session: dict | None) -> bool:
