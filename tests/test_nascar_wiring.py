@@ -407,12 +407,13 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
     assert armed.keys() == before.keys()
-    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar')}
+    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed')}
+    assert before['nascar_armed'] is None and armed['nascar_armed'] == {'total': 70, 'shares': [30, 45, 25]}   # (the arming of the server: what survives practice, qualifying and restarts)
     assert armed['nascar']['total'] == 70 and armed['rev'] > before['rev']
     assert armed['nascar']['next_delay_min'] == 10
     assert api.patch(url, json={'total': 100}).json()['nascar']['total'] == 100

@@ -147,6 +147,7 @@ async def stop_instance(server_id: int, inst: supervisor.Instance, reason: str) 
     """Automatic stops (end of an event): same exclusion as the others, and only if `inst` is still the registered one (an apply may have replaced it)."""
     async with server_lock(server_id):
         await supervisor.stop(server_id, reason=reason, only=inst)
+        supervisor.notify_stopped(server_id)
 
 
 def write_instance(s: Server) -> Path:
@@ -262,6 +263,7 @@ async def start(sess: Session, server_id: int, held: bool = False) -> dict:
 async def stop(server_id: int) -> None:
     async with server_lock(server_id):
         await supervisor.stop(server_id)
+        supervisor.notify_stopped(server_id)   # (the director's stop: the session is over. The stop inside an apply with restart is another path and does not call this)
 
 
 async def adopt_running(sess: Session) -> int:

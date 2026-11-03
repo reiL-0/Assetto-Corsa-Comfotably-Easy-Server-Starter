@@ -250,6 +250,7 @@ class Instance:
                 last_active = time.time()
             elif time.time() - last_active > settings.idle_stop_seconds:
                 await stop(self.server_id, reason="idle", only=self)   # through the per-server lock, and only while this is still the registered instance
+                notify_stopped(self.server_id)
                 return
 
     @property
@@ -434,6 +435,17 @@ async def stop(server_id: int, reason: str = "manual", only: Instance | None = N
         inst = _instances.get(server_id)
         if inst and (only is None or inst is only):
             await inst.stop(reason=reason)
+
+
+stopped_hooks: list = []   # called with the server id when a SESSION is stopped (the director's stop, the end of an event, the idle stop): what belonged to the session goes with it (app/racecontrol.py: NASCAR arming)
+
+
+def notify_stopped(server_id: int) -> None:
+    for hook in stopped_hooks:
+        try:
+            hook(server_id)
+        except Exception:   # noqa: BLE001 - a hook must never keep a stop from finishing
+            log.exception("stopped hook failed for server %s", server_id)
 
 
 program_lock = threading.Lock()   # held by app/binary.py while it replaces the acServer program: a start waits for it (the replacement itself is one atomic rename, so the worst a start that slips in sees is the old or the new complete file)
