@@ -196,7 +196,9 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
     `pack`: keep only what acServer reads (a car's `data`, a track's `surfaces.ini`/`models.ini`…), not the 3D models and textures. Cars and tracks are cut down always: `pack` is kept only so older clients that send it still work.
     `source_url`: the modder's page for the «Descargar» button (without it the content has no button).
     `settings.upload_permissive` (the league's own panel): any archive format, the car/track folder may sit anywhere inside and the kind is detected from it; `auto` = the uploader did not say what it is."""
-    permissive = settings.upload_permissive and dest_parent in (_cars_dir(), _tracks_dir())
+    in_content = dest_parent in (_cars_dir(), _tracks_dir())
+    permissive = settings.upload_permissive and in_content                                       # any archive format (bsdtar) and everything below
+    detect = (settings.upload_permissive or settings.upload_autodetect) and in_content           # the folder anywhere inside, and car-or-track from what it holds (formats stay as they are)
     with archive.open("rb") as fh:
         magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
@@ -216,7 +218,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
             if f.is_symlink() or scratch.resolve() not in f.resolve().parents:
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
         asked = None if dest_parent not in (_cars_dir(), _tracks_dir()) or auto else "car" if dest_parent == _cars_dir() else "track"
-        if permissive:
+        if detect:
             top, found = uploadguard.find_content_root(scratch, asked)
         else:
             tops = [p for p in scratch.iterdir()]
@@ -425,7 +427,7 @@ _uploads: dict[str, dict] = {}
 
 
 class UploadIn(BaseModel):
-    kind: Literal["track", "car", "skin"] | None = None   # None = detect it from the archive (only when settings.upload_permissive); "skin" = skins for `car`, kept as folder names + ui_skin.json
+    kind: Literal["track", "car", "skin"] | None = None   # None = detect it from the archive (only when settings.upload_permissive or upload_autodetect); "skin" = skins for `car`, kept as folder names + ui_skin.json
     car: str = Field(default="", max_length=80)   # the car model the skins are for (only with kind "skin", when the archive does not say)
     pack: bool = False   # keep only what acServer reads (app/uploadguard.py)
     source_url: str = ""   # the modder's page («Descargar» button); without it the content has no button
@@ -433,7 +435,7 @@ class UploadIn(BaseModel):
 
 
 def _need_kind(kind: str | None) -> None:
-    if kind is None and not settings.upload_permissive:
+    if kind is None and not (settings.upload_permissive or settings.upload_autodetect):
         raise HTTPException(422, "say whether it is a car or a track (kind)")
 
 

@@ -35,6 +35,8 @@ class Settings(BaseSettings):
             raise ValueError("ACM_CLAIM_PREFIX other than OPR needs ACM_PROFILE=client (the script of the league's website speaks with OPR)")
         if self.profile == "client":
             self.csp_hub, self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = False, "", "", ""
+            self.upload_permissive = self.upload_autodetect = True   # the owner's decision (2026-11-02): a client uploads any common archive (.zip .rar .7z .tar.gz…) and the kind is detected, as in the league's panel. The
+            # price is the external unpacker (bsdtar/libarchive) for the non-zip formats: it runs in the disposable child of app/unpack.py (rlimits, timeout, real byte counter, magic bytes judged, one at a time) inside the unit's caps and the plan's quota
         return self
 
     def claim_word(self, suffix: str) -> str:
@@ -118,6 +120,9 @@ class Settings(BaseSettings):
     # Lenient uploads of cars/tracks (the league's own panel): any common archive (.7z, .rar, .tar.gz… through bsdtar), the car or track folder may sit anywhere inside
     # (mods ship `assettocorsa/content/tracks/<name>` plus a README) and its kind is detected. Off = strict (hosting for others): only .zip, one folder at the root, kind declared.
     upload_permissive: bool = False
+    # The kind (car or track) is detected from the archive and its folder may sit anywhere inside (a mod's README beside it, `assettocorsa/content/cars/<name>`) while ONLY .zip is opened (no .rar/.7z/.tar:
+    # those go through an external unpacker; that is upload_permissive). The panel never says whether an upload is a car or a track. The client profile turns on both (below). Env: ACM_UPLOAD_AUTODETECT
+    upload_autodetect: bool = False
     port_range_start: int = 9600
     port_range_end: int = 9700
     resource_log_seconds: int = 30    # how often CPU/RAM/steal are written to <data_dir>/logs/resources-*.jsonl (app/resourcelog.py); 0 = off
