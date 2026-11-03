@@ -143,7 +143,7 @@ class RaceControl:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
-            if self.nascar and field is not None:
+            if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
             self._bump()
             log.info("flag %s source=%s was_caution=%s actions=%s", flag, source, was_caution, actions)
@@ -341,7 +341,9 @@ class RaceControl:
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
-            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits)
+            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits, pace_only=self.nascar is None)
+            if self.caution.pace_only:
+                return []   # (no messages of the NASCAR rules: the yellow banner is already out)
             if self.nascar and self.nascar.phase == BREAK:
                 self.caution.open_pits()   # (from the first instant: a report cannot be judged between the caution and the notice)
             return [("caution", self.caution.free_pass)]
@@ -467,6 +469,8 @@ class RaceControl:
                 lead = c.restart[0] if c.restart else self.pace_car
                 if lead in progress and GO_ARM_FROM <= progress[lead] % 1.0 <= GO_ARM_TO:
                     self.go_armed = True
+            if c.pace_only:
+                return out   # (practice behind a pace car: nobody is judged)
             if c.free_pass is not None and c.free_pass in c.pitted:
                 out.append(("no_free_pass", c.void_free_pass()))
             exempt = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}

@@ -1302,3 +1302,26 @@ def test_the_caution_eta_stops_promising_laps_that_are_past_and_gives_up_after_t
     assert eta['one'] == nxt and eta['green'] == nxt + 1 and eta['two'] is None, 'the track is not clear: the next clear crossing, never a lap in the past'
     rc.caution_notified = True
     assert rc.caution_eta()['green'] is None, 'after the six-lap warning the "to go" is the director\'s'
+
+
+def test_a_yellow_behind_a_pace_car_without_nascar_runs_the_to_go_and_the_green_but_judges_nobody(live):
+    sid, client, _ = live
+    client.session = {'session_index': 0, 'session_type': 1}   # practice
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    _field(client, c3=(0.50, 9), c4=(0.30, 9), c5=(0.10, 7))   # 5 is the pace car
+    rc.set_flag('yellow', field=client.field)
+    assert rc.caution is None, 'no pace car: a plain flag'
+    rc.set_flag('green')
+    rc.set_pace_car(5)
+    assert rc.nascar is None
+    assert rc.set_flag('yellow', field=client.field) == [] and rc.caution and rc.caution.pace_only and rc.caution.free_pass is None and rc.caution.pits_open
+    assert rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60}, 100.0) == []
+    steward = _client('steward')
+    r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={'to_go': 1})
+    assert r.status_code == 200 and r.json()['caution']['restart'] == [3, 4] and rc.pace_car_in
+    assert ('UNA PARA VERDE', -1) in {(n['text'], n['to']) for n in r.json()['notices']}
+    assert rc.snapshot()['pacecar']['mode'] == 'in'
+    rc.report_pit(5, True, now=50.0)
+    rc.go_armed = True
+    adapter.auto_green(sid, rc, 3)
+    assert rc.flag == 'green' and rc.caution is None, 'the restart leader crossing brings the green'

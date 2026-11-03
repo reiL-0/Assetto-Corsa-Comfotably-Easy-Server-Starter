@@ -36,7 +36,8 @@ PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader w
 
 
 class Caution:
-    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=()) -> None:
+    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=(), pace_only: bool = False) -> None:
+        self.pace_only = pace_only   # a yellow without NASCAR (practice, qualifying) behind a pace car: only its lap count, the "to go" and the green; no free pass, no wave-around, no judging, pits open
         self.t0 = now
         self.p0 = dict(progress)
         self.frozen = sorted(self.p0, key=lambda c: -self.p0[c])
@@ -47,7 +48,7 @@ class Caution:
         self.pit_ok: set[int] = set(pitted) | set(involved)   # cars that may be in the pit lane: there already when the yellow came out, involved (damaged), or let in by the director
         self.pit_entered: set[int] = set()                    # cars that reported the pit lane without being in pit_ok, not judged yet
         self.pit_broken: set[int] = set()                     # cars already judged for it (once per caution)
-        self.pits_open = False                                # the stage break: the pit lane is open to everybody (that is what the break is for)
+        self.pits_open = pace_only                            # the stage break: the pit lane is open to everybody (that is what the break is for)
         self._pending: dict[tuple[int, int], dict] = {}   # (passer, the car it passed) -> {t0, lap, back}: judged at the passer's next crossing of the line (GIVE_BACK_MIN s later at least)
         self._pit_start: set[tuple[int, int]] = set()      # pairs whose move began with one of the two in the pit lane (a car leaving the pits is not judged, whatever the report says later)
         self._passed_by: dict[int, list[tuple[float, int]]] = {}   # passed car -> [(when, passer)] of the passes that were not exempt
@@ -57,7 +58,7 @@ class Caution:
         self._signs: dict[tuple[int, int], int] = {}
         self._since: dict[tuple[int, int], float] = {}
         self.gone: set[int] = set()       # cars that left the track list during the caution (disconnected): the slot may be somebody else's now, it is never judged again
-        self.free_pass = self._pick_free_pass()
+        self.free_pass = None if pace_only else self._pick_free_pass()
         if self.free_pass is not None:
             self.allowed.add(self.free_pass)   # it has to make its way up to the pace car through the line
         self._seed(progress)
@@ -109,6 +110,9 @@ class Caution:
 
     def call_restart(self, progress: dict[int, float], pace_progress: float | None = None) -> tuple[list[int], list[int], set[int]]:
         """'To go': the wave-around cars may pass (they are not violators any more) and the restart order is fixed. -> (order, waved, cars that may choose their lane)."""
+        if self.pace_only:   # (nobody was frozen: the restart is the order of the moment)
+            self.waved, self.restart = [], sorted(progress, key=lambda c: -progress[c])
+            return self.restart, [], set()
         self.waved = self.wave_around(progress, pace_progress)
         self.allowed.update(self.waved)
         self.restart = self.restart_order(self.waved)
