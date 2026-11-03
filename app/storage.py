@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import content
 from app.auth import require
@@ -58,10 +58,37 @@ def measure() -> dict:
     return {"used_bytes": sum(parts.values()), "quota_bytes": settings.storage_quota_mb * 1024 * 1024 or None, "parts": parts, "counted_at": int(time.time())}
 
 
-@router.get("")
-def usage() -> dict:
+def current() -> dict:
     global _cache
     with _lock:   # one walk at a time: the others wait for it and are given its answer
         if _cache is None or time.monotonic() - _cache[0] > CACHE_SECONDS:
             _cache = (time.monotonic(), measure())
         return _cache[1]
+
+
+def forget() -> None:
+    """Content was installed or removed: the next question walks the disk again instead of waiting out the cache."""
+    global _cache
+    with _lock:
+        _cache = None
+
+
+def room() -> int | None:
+    """Bytes the plan still has, or None when no quota is set (the league's own manager: no limit). 0 when it is full or over."""
+    quota = settings.storage_quota_mb * 1024 * 1024
+    return max(0, quota - current()["used_bytes"]) if quota else None
+
+
+def check_room(extra: int = 0) -> None:
+    """Refuse (413, a sentence for the client) when `extra` more bytes would not fit in the plan's space. Called as an upload starts and as each part arrives, so a client can neither start nor keep
+    sending past its quota; with no quota set it never refuses. The figure is the cached count (a few minutes old at worst) plus this upload: uploads running side by side are not summed, but each one
+    is stopped at the quota, and the unpacker checks the real free disk as well."""
+    left = room()
+    if left is not None and (left == 0 or extra > left):   # (a full plan refuses even to start: 0 bytes extra would otherwise pass)
+        q = settings.storage_quota_mb * 1024 * 1024
+        raise HTTPException(413, f"No queda espacio en tu plan: usas {current()['used_bytes'] / 1024**3:.1f} GB de {q / 1024**3:.0f} GB. Retira contenido que no uses o pide ampliar el plan.")
+
+
+@router.get("")
+def usage() -> dict:
+    return current()

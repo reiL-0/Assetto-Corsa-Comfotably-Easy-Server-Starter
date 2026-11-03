@@ -248,6 +248,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 res.kind = kind
                 integrity.seal_installed(kind, root)
                 catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
+        from app import storage
+        storage.forget()   # what is on disk changed: the space card and the quota check count again
         res.note = note
         return res
     except uploadguard.Rejected as e:
@@ -256,11 +258,23 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _room(extra: int = 0) -> None:
+    from app import storage   # (late: storage asks this module for the folders)
+    storage.check_room(extra)
+
+
 async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "", official: bool = False) -> str:
-    """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it."""
+    """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it. Stops as soon as the plan's space would be exceeded."""
+    size = 0
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
-        while chunk := await file.read(1 << 20):
-            tmp.write(chunk)
+        try:
+            while chunk := await file.read(1 << 20):
+                size += len(chunk)
+                await run_in_threadpool(_room, size)
+                tmp.write(chunk)
+        except BaseException:
+            Path(tmp.name).unlink(missing_ok=True)
+            raise
     try:
         return await run_in_threadpool(_extract, Path(tmp.name), dest_parent, pack, catalog.check_source(source_url, official))
     finally:
@@ -433,6 +447,7 @@ def _upload(uid: str) -> dict:
 @router.post("/uploads", status_code=201)
 def upload_start(body: UploadIn) -> dict:
     _need_kind(body.kind)
+    _room(0)
     if body.car:
         _skin_folder(body.car)
     uid = secrets.token_hex(8)
@@ -453,6 +468,7 @@ async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
     data = await request.body()
     if u["size"] + len(data) > MAX_UPLOAD:
         raise HTTPException(413, "archive too large")
+    await run_in_threadpool(_room, u["size"] + len(data))   # (the plan's space: the upload is stopped where it would go past it)
     with u["path"].open("ab") as fh:
         fh.write(data)
     u["size"] += len(data)
@@ -508,7 +524,9 @@ def _fetch_then_finish(uid: str, url: str) -> None:
         u["size"], u["total"] = done, total
 
     try:
-        download.fetch(download.resolve(url, download.opener()), u["path"], MAX_UPLOAD, progress)
+        from app import storage
+        left = storage.room()   # a download is cut off at what the plan has left, as well as at the upload cap
+        download.fetch(download.resolve(url, download.opener()), u["path"], MAX_UPLOAD if left is None else min(MAX_UPLOAD, left), progress)
     except Exception as e:  # noqa: BLE001 - whatever went wrong must reach the panel as text
         u["state"], u["error"] = "error", f"download failed: {e}"
         u["path"].unlink(missing_ok=True)
@@ -528,6 +546,7 @@ def upload_from_link(body: LinkIn) -> dict:
         download.check_url(body.url)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    _room(0)
     uid = secrets.token_hex(8)
     path = _scratch() / f"upload-{uid}"
     path.write_bytes(b"")
@@ -555,6 +574,7 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
+    _room(src.stat().st_size)
     return _installed(await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url, body.source_official)), "track")
 
 
