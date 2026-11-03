@@ -20,14 +20,14 @@ def client_settings(**kw):
 
 
 def use(monkeypatch, s):
-    for k in ("profile", "csp_hub", "csp_hub_url", "csp_hub_required", "csp_min_build", "csp_hub_version", "csp_trainer_servers", "csp_probe_servers", "csp_claim_servers"):
+    for k in ("profile", "csp_hub", "csp_hub_url", "csp_hub_required", "csp_min_build", "csp_hub_version", "csp_trainer_servers", "csp_trainer_url", "csp_probe_servers", "csp_claim_servers"):
         monkeypatch.setattr(settings, k, getattr(s, k))
 
 
 def test_the_client_profile_defaults_to_required_and_build_3898_with_its_own_hub():
     c = client_settings()
     assert c.csp_hub is True and c.csp_hub_required is True and c.csp_min_build == 3898 and c.csp_hub_url == OWN_HUB
-    assert (c.csp_trainer_servers, c.csp_probe_servers, c.csp_claim_servers) == ("", "", ""), "a later phase's script was switched on"
+    assert (c.csp_trainer_servers, c.csp_probe_servers) == ("", ""), "the league's trainer or probe was switched on (the trainer needs the client's own address: tests/test_client_profile.py)"
     assert client_settings(csp_min_build=0).csp_min_build == 0 and client_settings(csp_min_build=4300).csp_min_build == 4300 and client_settings(csp_hub_required=False).csp_hub_required is False
 
 

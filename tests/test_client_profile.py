@@ -19,7 +19,7 @@ def test_the_league_profile_is_what_it_always_was():
 
 def test_the_client_profile_sends_no_script_of_the_league_and_speaks_with_its_own_words():
     c = type(settings)(profile="client", csp_hub=True, csp_trainer_servers="*", csp_claim_servers="*", csp_probe_servers="1")   # whatever was asked, the profile wins
-    assert (c.csp_hub, c.csp_trainer_servers, c.csp_claim_servers, c.csp_probe_servers) == (False, "", "", "")
+    assert (c.csp_hub, c.csp_trainer_servers, c.csp_probe_servers) == (False, "", "")   # (the claim exchange is answered only with ACM_CLAIM_SECRET: its own switch)
     assert (c.claim_word("HELLO"), c.claim_word("CLAIM:"), c.claim_word("PROBE")) == ("HLHELLO", "HLCLAIM:", "HLPROBE")
     assert c.agent() == "HotLapHosting-Manager"
     mine = type(settings)(profile="client", claim_prefix="GR", user_agent="Grid-Manager")
@@ -100,3 +100,17 @@ def test_discord_is_told_a_neutral_agent(monkeypatch):
     discord._send("hola")
     discord._api("GET", "/users/@me")
     assert [r.get_header("User-agent") for r in seen] == ["HotLapHosting-Manager", "HotLapHosting-Manager"]
+
+
+def test_a_clients_trainer_comes_only_from_its_own_site(monkeypatch):
+    """Phase 2: hl_trainer.lua of the client's own website is sent (to every server, switchable per server like the hub); the league's address, or anybody else's, never is."""
+    own = "https://grid.example.test/static/csp/hl_trainer.lua"
+    c = type(settings)(profile="client", csp_hub=True, csp_hub_url="https://grid.example.test/static/csp/hl_hub.lua", csp_trainer_url=own, csp_probe_servers="1")
+    assert c.csp_trainer_servers == "*" and c.csp_probe_servers == ""
+    for k in ("profile", "csp_hub", "csp_hub_url", "csp_trainer_url", "csp_trainer_servers", "csp_probe_servers", "csp_hub_required", "csp_min_build"):
+        monkeypatch.setattr(settings, k, getattr(c, k))
+    out = csp.extra_for(1, "", "", None)
+    assert own in out and "hl_hub.lua" in out and "oppenpaddock" not in out and "probe" not in out, out
+    assert own not in csp.extra_for(1, "", "trainer", None), "the checkbox of the server does not switch the trainer off"
+    for bad in ("https://www.oppenpaddockracing.site/static/csp/opr_trainer.lua", "https://evil.test/static/csp/opr_trainer.lua", "https://grid.example.test/x/hl_trainer.lua", "http://grid.example.test/static/csp/hl_trainer.lua"):
+        assert type(settings)(profile="client", csp_trainer_url=bad).csp_trainer_servers == "", bad

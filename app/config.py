@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The client's hub URL is its OWN site's neutral script (the installer writes it): https, a host, and exactly this path. Anything else (the league's address in any spelling, a typo, another path) = no hub.
 _OWN_HUB_URL = re.compile(r"https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:\d{1,5})?/static/csp/hl_hub\.lua")
+_OWN_TRAINER_URL = re.compile(r"https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:\d{1,5})?/static/csp/hl_trainer\.lua")
 
 
 class Settings(BaseSettings):
@@ -39,9 +40,13 @@ class Settings(BaseSettings):
             raise ValueError("ACM_CLAIM_PREFIX other than OPR needs ACM_PROFILE=client (the script of the league's website speaks with OPR)")
         if self.profile == "client":
             # Phase 1 of the client's game scripts: the HUB only (neutral, served by the client's own site: its ACM_CSP_HUB_URL). The league's address is never sent to a client's drivers, so a hub URL that is
-            # still the league's default means no hub; the trainer, the probe and the claim exchange stay off until their phase.
+            # still the league's default means no hub.
             self.csp_hub = self.csp_hub and bool(_OWN_HUB_URL.fullmatch(self.csp_hub_url)) and "oppenpaddock" not in self.csp_hub_url.lower()
-            self.csp_probe_servers, self.csp_trainer_servers, self.csp_claim_servers = "", "", ""
+            # Phase 2: the trainer (+ telemetry) too, only from the client's own site (ACM_CSP_TRAINER_URL: the league's default, or anything that is not its own hl_trainer.lua, means no trainer). The claim exchange
+            # (HLHELLO) answers only with ACM_CLAIM_SECRET set, and the client's site gives a code only to the drivers its admin switched on. The league's probe is never sent.
+            self.csp_probe_servers = ""
+            if not _OWN_TRAINER_URL.fullmatch(self.csp_trainer_url) or "oppenpaddock" in self.csp_trainer_url.lower():
+                self.csp_trainer_servers = ""
             self.csp_hub_required = True if self.csp_hub_required is None else self.csp_hub_required
             self.csp_min_build = 3898 if self.csp_min_build is None else self.csp_min_build
             self.upload_permissive = self.upload_autodetect = True   # the owner's decision (2026-11-02): a client uploads any common archive (.zip .rar .7z .tar.gz…) and the kind is detected, as in the league's panel. The
