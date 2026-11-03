@@ -240,6 +240,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         with catalog.mutation_lock:   # ponytail: held during copytree/digest (one process, runs in the threadpool); uploads and scans queue up. Staging dir + short swap under the lock if that hurts
             if cataloged:
                 digest, size, nfiles = catalog.digest_dir(top)
+                from app import storage
+                storage.check_install(size, dest_parent / root)   # the size AFTER cutting it down to the server pack, from a fresh count: a small archive cannot expand past the plan (a replaced folder counts only its difference)
                 if full_digest:
                     catalog.check_not_blocked(full_digest)   # again under the lock: a claim may have landed while the upload was cut down or waited
                 catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
@@ -266,13 +268,12 @@ def _room(extra: int = 0) -> None:
 
 
 async def _unzip_upload(file: UploadFile, dest_parent: Path, pack: bool = False, source_url: str = "", official: bool = False) -> str:
-    """Streams an uploaded .zip to disk (tracks are hundreds of MB) and unpacks it. Stops as soon as the plan's space would be exceeded."""
-    size = 0
+    """Streams an uploaded archive to disk (tracks are hundreds of MB) and unpacks it. Stops as soon as the plan's space would be exceeded (each part is checked against what is installed and what
+    the uploads in progress have already written)."""
     with tempfile.NamedTemporaryFile(suffix=".upload", dir=_scratch(), delete=False) as tmp:
         try:
             while chunk := await file.read(1 << 20):
-                size += len(chunk)
-                await run_in_threadpool(_room, size)
+                await run_in_threadpool(_room, len(chunk))
                 tmp.write(chunk)
         except BaseException:
             Path(tmp.name).unlink(missing_ok=True)
@@ -470,7 +471,7 @@ async def upload_chunk(uid: str, offset: int, request: Request) -> dict:
     data = await request.body()
     if u["size"] + len(data) > MAX_UPLOAD:
         raise HTTPException(413, "archive too large")
-    await run_in_threadpool(_room, u["size"] + len(data))   # (the plan's space: the upload is stopped where it would go past it)
+    await run_in_threadpool(_room, len(data))   # (the plan's space: the upload is stopped where this part would go past it)
     with u["path"].open("ab") as fh:
         fh.write(data)
     u["size"] += len(data)
@@ -524,11 +525,14 @@ def _fetch_then_finish(uid: str, url: str) -> None:
 
     def progress(done: int, total: int | None) -> None:
         u["size"], u["total"] = done, total
+        _room(0)   # (raises 413 when the plan filled up while this was downloading: the download ends as an error)
 
     try:
         from app import storage
-        left = storage.room()   # a download is cut off at what the plan has left, as well as at the upload cap
-        download.fetch(download.resolve(url, download.opener()), u["path"], MAX_UPLOAD if left is None else min(MAX_UPLOAD, left), progress)
+        left = storage.room()   # a download is cut off at what the plan has left, as well as at the upload cap, and re-checked as it progresses (other uploads may be filling the room meanwhile)
+        cap = MAX_UPLOAD if left is None else min(MAX_UPLOAD, left)
+        storage.check_room(0)
+        download.fetch(download.resolve(url, download.opener()), u["path"], cap, progress)
     except Exception as e:  # noqa: BLE001 - whatever went wrong must reach the panel as text
         u["state"], u["error"] = "error", f"download failed: {e}"
         u["path"].unlink(missing_ok=True)
@@ -576,7 +580,7 @@ async def import_track(body: InboxIn) -> dict:
     src = inbox_dir() / _safe(body.file)
     if not src.is_file():
         raise HTTPException(404, f"{body.file!r} is not in the inbox")
-    _room(src.stat().st_size)
+    _room(0)   # (the archive is already in the data folder, so it is already counted: it is the installed size that is checked, in _extract)
     return _installed(await run_in_threadpool(_extract, src, _tracks_dir(), body.pack, catalog.check_source(body.source_url, body.source_official)), "track")
 
 
