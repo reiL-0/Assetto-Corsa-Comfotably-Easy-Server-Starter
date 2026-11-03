@@ -661,6 +661,8 @@ def _restart(inst, rc, to_go: int) -> dict:
     order, waved, choosers = plan
     log.info("restart called: %s to go", to_go)
     _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag", hold="togo")
+    if rc.caution and rc.caution.pace_only:
+        return rc.snapshot()   # (no places or lanes to give outside NASCAR)
     for car in waved:
         _say(rc, "WAVE-AROUND: pasa al pace car y al líder, y ponte al final de la fila", "race", car, hold=f"wave-{car}")
     for i, car in enumerate(order, 1):
