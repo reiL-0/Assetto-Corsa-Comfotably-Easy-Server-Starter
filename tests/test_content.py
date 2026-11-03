@@ -70,3 +70,34 @@ def test_upload_rejects_zip_slip():
         zf.writestr("../evil/data.acd", b"x")
     r = client.post("/api/v1/content/cars", files={"file": ("evil.zip", buf.getvalue(), "application/zip")})
     assert r.status_code == 400
+
+
+def _png(w: int = 88, h: int = 88) -> bytes:
+    import struct, zlib
+    def chunk(k: bytes, d: bytes) -> bytes:
+        return struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d))
+    return content.PNG_SIG + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\0" + b"\0" * w) * 1) + chunk(b"IEND", b"")
+
+
+def _skin_pack(**skins: bytes | None) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, logo in skins.items():
+            zf.writestr(f"pack/{name}/ui_skin.json", '{"skinname": "x"}')
+            if logo is not None:
+                zf.writestr(f"pack/{name}/Livery.PNG", logo)
+    return buf.getvalue()
+
+
+def test_skin_pack_keeps_a_valid_livery_serves_it_and_drops_it_on_a_bad_resend():
+    client.post("/api/v1/content/cars", files={"file": ("lcar.zip", _car_zip("lcar"), "application/zip")})
+    up = lambda **s: client.post("/api/v1/content/cars/lcar/skins", files={"file": ("p.zip", _skin_pack(**s), "application/zip")})
+    assert up(cortana=_png(), bad=b"png-bytes", huge=_png(5000, 5000), cut=_png()[:-12], none=None).status_code == 201
+    car = next(c for c in client.get("/api/v1/content/cars").json() if c["car"] == "lcar")
+    assert set(car["liveries"]) == {"cortana"} and {"cortana", "bad", "huge", "cut", "none"} <= set(car["skins"])
+    r = client.get("/api/v1/content/cars/lcar/skins/cortana/livery.png")
+    assert r.status_code == 200 and r.content == _png() and r.headers["content-type"] == "image/png" and r.headers["x-content-type-options"] == "nosniff"
+    assert client.get("/api/v1/content/cars/lcar/skins/bad/livery.png").status_code == 404
+    assert client.get("/api/v1/content/cars/lcar/skins/red/livery.png").status_code == 404, "a whole-car upload's unchecked file is not served"
+    assert up(cortana=b"junk").status_code == 201
+    assert client.get("/api/v1/content/cars/lcar/skins/cortana/livery.png").status_code == 404, "the pack replaces the skin: the old logo goes"

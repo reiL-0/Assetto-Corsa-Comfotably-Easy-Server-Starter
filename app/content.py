@@ -84,6 +84,36 @@ def _read_json(p: Path) -> dict:
         return {}
 
 
+LIVERY = "livery.png"   # the skin's small logo (what the game's skin picker draws): the only file of a skin besides ui_skin.json that the server keeps
+MAX_LIVERY, MAX_DIM = 64 * 1024, 1024
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+PNG_END = bytes.fromhex("0000000049454e44ae426082")
+
+
+def _livery_ver(f: Path) -> str:
+    """«mtime-size» of a stored logo, "" if there is none (or it is a link: never followed)."""
+    try:
+        st = f.lstat()
+    except OSError:
+        return ""
+    return f"{st.st_mtime_ns}-{st.st_size}" if f.is_file() and not f.is_symlink() else ""
+
+
+def _valid_livery(f: Path) -> bytes | None:
+    """The bytes of an archive's logo if it is a real, small PNG (signature, an IHDR first, sides 1..MAX_DIM), else None. The file is read, never trusted by name or size alone."""
+    try:
+        if f.is_symlink() or not f.is_file() or f.stat().st_size > MAX_LIVERY:
+            return None
+        with f.open("rb") as fh:
+            data = fh.read(MAX_LIVERY + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_LIVERY or len(data) < 33 or data[:8] != PNG_SIG or data[12:16] != b"IHDR" or data[-12:] != PNG_END:   # (and the closing IEND: a cut-off file is not a logo)
+        return None
+    w, h = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return data if 1 <= w <= MAX_DIM and 1 <= h <= MAX_DIM else None
+
+
 def list_cars() -> list[dict]:
     cars = []
     for d in sorted(_cars_dir().iterdir()):
@@ -92,6 +122,7 @@ def list_cars() -> list[dict]:
         ui = _read_json(d / "ui" / "ui_car.json")
         skins_dir = d / "skins"
         skins = sorted(p.name for p in skins_dir.iterdir() if p.is_dir()) if skins_dir.is_dir() else []
+        liveries = {s: v for s in skins if (v := _livery_ver(skins_dir / s / LIVERY))}   # skin -> version (changes when the logo does: the page puts it in the image URL)
         cars.append(
             {
                 "car": d.name,
@@ -101,6 +132,7 @@ def list_cars() -> list[dict]:
                 "class": ui.get("class"),
                 "tags": ui.get("tags", []),
                 "skins": skins,
+                "liveries": liveries,
             }
         )
     return cars
@@ -324,7 +356,7 @@ def _find_skins(base: Path, car: str | None) -> list[tuple[str, Path]]:
 
 
 def _install_skins(archive: Path, car: str | None) -> dict:
-    """The server only needs a skin's folder name (it goes into the entry list) and its ui_skin.json: whatever the archive holds, nothing else is kept
+    """The server only needs a skin's folder name (it goes into the entry list), its ui_skin.json and its livery.png (the logo of the assign window): whatever the archive holds, nothing else is kept
     (textures live on the players' PCs, shared by link). Returns {car, skins: ["car/skin", ...]}."""
     permissive = settings.upload_permissive
     with archive.open("rb") as fh:
@@ -365,6 +397,15 @@ def _install_skins(archive: Path, car: str | None) -> dict:
             dest.mkdir(parents=True, exist_ok=True)
             if (src / "ui_skin.json").is_file():
                 shutil.copyfile(src / "ui_skin.json", dest / "ui_skin.json")
+            logo = next((p for p in src.iterdir() if p.name.lower() == LIVERY), None)   # (Livery.PNG, livery.png...)
+            data = _valid_livery(logo) if logo else None
+            target = dest / LIVERY
+            if data:
+                tmp = dest / (LIVERY + ".new")
+                tmp.write_bytes(data)
+                os.replace(tmp, target)   # fresh bytes under OUR name, never a path from the archive
+            elif target.is_file() or target.is_symlink():
+                target.unlink()   # the pack replaces the skin: an old logo must not outlive a skin that has none (or a bad one)
         return {"car": plan[0][0], "skins": [f"{o}/{n}" for o, n, _ in plan]}
     except uploadguard.Rejected as e:
         raise HTTPException(400, str(e)) from e
@@ -382,6 +423,14 @@ async def upload_skin(car: str, file: UploadFile) -> dict:
     finally:
         Path(tmp.name).unlink(missing_ok=True)
     return {**res, "skin": res["skins"][0].split("/", 1)[1]}   # `skin`: the first, for older clients
+
+
+@router.get("/cars/{car}/skins/{skin}/livery.png")
+def skin_livery(car: str, skin: str) -> FileResponse:
+    f = _cars_dir() / _safe(car) / "skins" / _skin_folder(skin) / LIVERY
+    if not _livery_ver(f) or _valid_livery(f) is None:   # (a whole-car upload keeps its files as they came: what is served is checked here too)
+        raise HTTPException(404, "no logo for this skin")
+    return FileResponse(f, media_type="image/png", headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/cars/{car}/skins/{skin}.zip")
