@@ -293,22 +293,26 @@ def armed_view(inst, server) -> dict | None:
     return {"total": cfg["total"], "shares": list(cfg["shares"]) if cfg.get("shares") is not None else None} if cfg else None   # (a preset may leave the shares to the default)
 
 
+_arm_lock = threading.Lock()   # one arming at a time: the database and the instance's memory must end with the same one when two directors press at once
+
+
 def _remember_nascar(sess: Session, server_id: int, inst, remembered: dict | None) -> None:
     """Keep the arming for the next race and for every later one until the session is stopped (the in-memory engine is reset by every new_session; the instance arms a fresh one from this)."""
-    server = _get(sess, server_id)
-    saved = dict(server.session or {})   # a new dict: a JSON column does not notice in-place changes
-    saved.pop("nascar", None)
-    if remembered:
-        saved["nascar"] = remembered
-    server.session = saved or None
-    sess.add(server)
-    try:
-        sess.commit()
-    except SQLAlchemyError as e:   # the live engine did change (that is what was asked): say only the memory for later races failed
-        sess.rollback()
-        log.warning("NASCAR could not be saved for server %s: %s", server_id, e)
-        raise HTTPException(503, "NASCAR quedó armado en esta carrera, pero no se pudo guardar para las siguientes") from e
-    inst.nascar_config = remembered
+    with _arm_lock:
+        server = _get(sess, server_id)
+        saved = dict(server.session or {})   # a new dict: a JSON column does not notice in-place changes
+        saved.pop("nascar", None)
+        if remembered:
+            saved["nascar"] = remembered
+        server.session = saved or None
+        sess.add(server)
+        try:
+            sess.commit()
+        except SQLAlchemyError as e:   # the live engine did change (that is what was asked): say only the memory for later races failed
+            sess.rollback()
+            log.warning("NASCAR could not be saved for server %s: %s", server_id, e)
+            raise HTTPException(503, "NASCAR quedó armado en esta carrera, pero no se pudo guardar para las siguientes") from e
+        inst.nascar_config = remembered
 
 
 @control_router.post("/nascar")
@@ -331,7 +335,9 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
             raise HTTPException(422, str(e)) from e
         remembered = {"total": trial.nascar.total, "shares": list(trial.nascar.shares)} if trial.nascar else None
         _remember_nascar(sess, server_id, inst, remembered)
-        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
+        if (inst.acsp.session or {}).get("session_type") == RACE_TYPE:   # a race began while this was being saved: its engine was armed from the OLD memory, so arm it now
+            return configure_nascar(server_id, body, sess)
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}   # (the wait after the finish, next_delay_min, is a live engine's: it is set when the race has started)
     try:
         actions = rc.configure_nascar(body.total, body.stages, shares, body.next_delay_min)
     except ValueError as e:
@@ -348,11 +354,14 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
 
 
-def disarm_when_stopped(server_id: int) -> None:
-    """The session was stopped (the director's stop, the end of an event, the idle stop): the arming goes with it. A restart for an apply is NOT this (it writes the new session first)."""
-    with Session(engine) as sess:
+def disarm_when_stopped(server_id: int, was) -> None:
+    """The session was stopped (the director's stop, the end of an event, the idle stop): the arming goes with it, but only the arming that INSTANCE had (`was`): if a newer apply has saved another one
+    meanwhile it is the next session's and stays. A restart for an apply is NOT this (it writes the new session first)."""
+    if not was:
+        return
+    with _arm_lock, Session(engine) as sess:
         server = sess.get(Server, server_id)
-        if server is not None and (server.session or {}).get("nascar"):
+        if server is not None and (server.session or {}).get("nascar") == was:
             saved = dict(server.session)
             saved.pop("nascar", None)
             server.session = saved or None
