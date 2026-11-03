@@ -96,7 +96,9 @@ def variables(title: str, server: str, session: dict, start_at: float, counts: d
     if rg := session.get("reversed_grid"):
         fmt.append("🔄 Parrilla invertida" + (" (toda)" if rg == -1 else f" (los primeros {rg})"))
     c = " · ".join(f"{e} {counts[st]}" for e, st in RSVP.items())
-    role = f"<@&{settings.discord_role}>" if settings.discord_role else ""
+    from app import discord   # (late: discord asks discord_config, which asks the database)
+    rid = discord.role_id()
+    role = f"<@&{rid}>" if rid else ""
     clima = weather_name(session)
     extra = "\n".join(x for x in (notes.strip(), info.strip()) if x)
     req = requirements.lines(requirements.current(league_id))   # the league's own list, else the global one

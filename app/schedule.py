@@ -111,7 +111,8 @@ def create(body: ScheduleIn, sess: SessionDep) -> ScheduleOut:
         if body.start_at < end_at(other) and other.start_at < new_end:   # queued one after another is fine; on top of each other is not
             ev = sess.get(Event, other.event_id)
             raise HTTPException(409, f"overlaps with «{ev.title if ev else other.event_id}» (schedule {other.id}) on that server")
-    reminders = sorted(set(body.reminders), reverse=True)
+    from app import discord_config
+    reminders = sorted(set(body.reminders if "reminders" in body.model_fields_set else discord_config.reminders()), reverse=True)   # (not asked: the client's own cadence, else 24 h / 1 h / 10 min)
     sc = Schedule(event_id=body.event_id, server_id=body.server_id, start_at=body.start_at, duration_min=body.duration_min,
                   info=body.info, notes=body.notes, reminders=reminders,
                   sent=[m for m in reminders if body.silent_past and body.start_at - m * 60 <= time.time()])
@@ -234,13 +235,18 @@ def _rsvp_payload(sess: Session, sc: Schedule, ev: Event, srv: Server, counts: d
 async def _rsvp(sess: Session, sc: Schedule, ev: Event, srv: Server) -> None:
     """Post the sign-up announcement once, then each tick turn its reactions into `Rsvp` rows (linked to the user whose
     Discord account matches) and keep the counts on the message current. Needs ACM_DISCORD_BOT_TOKEN + ACM_DISCORD_CHANNEL."""
-    if not (settings.discord_bot_token and settings.discord_channel):
+    if not discord.rsvp_enabled():
         return
     try:
         if not sc.rsvp_message:
             payload = _rsvp_payload(sess, sc, ev, srv, dict.fromkeys(discord.RSVP.values(), 0))
+            before = discord.bot_rev()
+            mid = await asyncio.to_thread(discord.rsvp_post, payload)
+            if discord.bot_rev() != before:   # the bot or the channel was changed while this was being posted: that message is in the old place, it is not this event's announcement
+                log.warning("rsvp of schedule %s: the bot changed while posting; it will be posted again", sc.id)
+                return
             sc.rsvp_text = json.dumps(payload, sort_keys=True)
-            sc.rsvp_message = await asyncio.to_thread(discord.rsvp_post, payload)
+            sc.rsvp_message = mid
             return
         found = await asyncio.to_thread(discord.rsvp_read, sc.rsvp_message)
     except urllib.error.HTTPError as e:
