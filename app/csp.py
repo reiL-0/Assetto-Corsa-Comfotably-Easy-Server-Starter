@@ -46,6 +46,17 @@ def hub_enabled(csp_off: str = "") -> bool:
     return settings.csp_hub and "hub" not in scripts_off(csp_off)
 
 
+def min_build_for(csp_off: str = "") -> int:
+    """The minimum CSP build the server's TRACK must demand (0 = none): only where the hub is sent, since it is the hub's penalties that need every driver to run CSP."""
+    return settings.csp_min_build or 0 if hub_enabled(csp_off) else 0
+
+
+def clean_track(name):
+    """The track as the manager knows it, from what the acServer reports. With a minimum CSP build the server's TRACK is `csp/<build>/../<track>` (or `csp/<build>/../<options>/../<track>`) and the acServer
+    hands that string back in its session info and its result files: the folder name is the last part. Anything else (including None) is returned as it came."""
+    return name.rsplit("/", 1)[-1] if isinstance(name, str) and name.startswith("csp/") else name
+
+
 def nascar_requested(session: dict | None) -> bool:
     """Whether the session applied to a server asks for NASCAR (`Server.session["nascar"]`: the total and, optionally, the stage shares): only then does the hub load the NASCAR caution banners."""
     return bool((session or {}).get("nascar"))
@@ -61,7 +72,8 @@ def extra_for(server_id: int, extra: str, csp_off: str = "", session: dict | Non
     off = scripts_off(csp_off)
     scripts = []   # (switch of the checkbox, ACM_CSP_*_SERVERS selector, script URL, extra lines)
     nascar = "NASCAR = 1\n" if nascar_requested(session) and "nascar" not in off else ""   # (the NASCAR banners of the hub: loaded only when the session asks for stages, and the admin has not switched them off)
-    scripts.append(("hub", "*", f"{settings.csp_hub_url}?v={settings.csp_hub_version}", f"SERVER = {server_id}\n{nascar}"))
+    required = "REQUIRED = 1\n" if settings.csp_hub_required else ""   # (CSP closes the game of a driver whose CSP cannot load the script: no CSP, no race)
+    scripts.append(("hub", "*", f"{settings.csp_hub_url}?v={settings.csp_hub_version}", f"SERVER = {server_id}\n{required}{nascar}"))
     scripts.append(("probe", settings.csp_probe_servers, settings.csp_probe_url, ""))
     scripts.append(("trainer", settings.csp_trainer_servers, f"{settings.csp_trainer_url}?v={settings.csp_trainer_version}", ""))
     out, n = [], 100
