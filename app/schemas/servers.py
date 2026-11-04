@@ -96,7 +96,7 @@ class OptionsIn(BaseModel):
     tyre_wear_rate: int | None = Field(default=None, ge=0, le=500)
     allowed_tyres_out: int | None = Field(default=None, ge=-1, le=4)  # wheels outside the line before a cut; -1 = never
     legal_tyres: str | None = Field(default=None, pattern=r"^[\w;]{0,60}$")  # e.g. "SV;S;M;H"
-    max_ballast_kg: int | None = Field(default=None, ge=0, le=500)
+    max_ballast_kg: int | None = Field(default=None, ge=0, le=10000)
     start_rule: int | None = Field(default=None, ge=0, le=2)  # 0 locked until green, 1 teleport to pits, 2 drive-through
     race_gas_penalty_disabled: bool | None = None
     max_contacts_per_km: int | None = Field(default=None, ge=-1, le=50)  # -1 = off
@@ -122,8 +122,8 @@ class EntryIn(BaseModel):
     driver_name: str = Field(default="", max_length=60)
     team: str = Field(default="", max_length=60)
     guid: str = Field(default="", pattern=r"^(\d{17}(;\d{17})*)?$")  # SteamID64; several joined by ';' share the car
-    ballast: int = Field(default=0, ge=0, le=300)  # kg
-    restrictor: int = Field(default=0, ge=0, le=100)  # %
+    ballast: int = Field(default=0, ge=0, le=10000)  # kg (acServer takes any value; the cfg's MAX_BALLAST_KG follows it, ini_generator.server_cfg)
+    restrictor: int = Field(default=0, ge=0, le=100)  # % (acServer's own hard cap: >100 aborts the start)
     spectator: bool = False
     fixed_setup: str = ""   # name (without «.ini») of an uploaded setup (/content/setups) this car is locked to; the entry list gets FIXED_SETUP=<name>.ini
 

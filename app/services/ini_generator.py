@@ -42,7 +42,14 @@ def render_ini(sections: dict[str, dict[str, Scalar]]) -> str:
 GAME_PENALTIES_OFF = {"START_RULE": 0, "RACE_GAS_PENALTY_DISABLED": 1, "ALLOWED_TYRES_OUT": -1}
 
 
-def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool, game_penalties_off: bool = False, csp_min_build: int = 0) -> str:
+def _int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welcome: bool, game_penalties_off: bool = False, csp_min_build: int = 0, entries: list | None = None) -> str:
     """server_cfg.ini with the allocated ports `p` merged into [SERVER] (user values win, except the game's own penalties when `game_penalties_off`: those are always off)."""
     sections = {name: dict(kv) for name, kv in config.items()}
     server = sections.setdefault("SERVER", {})
@@ -57,6 +64,10 @@ def server_cfg(config: dict[str, dict[str, Scalar]], p: dict[str, int], has_welc
     server.setdefault("UDP_PLUGIN_ADDRESS", f"127.0.0.1:{p['plugin_local']}")
     if game_penalties_off:
         server.update(GAME_PENALTIES_OFF)
+    # acServer refuses to start when an entry's BALLAST > MAX_BALLAST_KG (default 100): raise the limit to the heaviest entry, never lower it
+    limit, need = _int(server.get("MAX_BALLAST_KG"), 100), max((_int(c.get("BALLAST"), 0) for c in entries or []), default=0)
+    if need > limit:
+        server["MAX_BALLAST_KG"] = need
     track = str(server.get("TRACK", ""))
     if csp_min_build and track and not track.startswith("csp/"):   # CSP's own way of requiring a minimum build: the track is named behind it (the manager keeps the clean name: csp.clean_track)
         server["TRACK"] = f"csp/{csp_min_build}/../{track}"

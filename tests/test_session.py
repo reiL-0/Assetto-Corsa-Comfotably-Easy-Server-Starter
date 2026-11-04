@@ -194,6 +194,23 @@ def test_entry_list_with_drivers_ballast_and_locking():
     assert r.json()["config"]["SERVER"]["PICKUP_MODE_ENABLED"] == 1 and r.json()["config"]["SERVER"]["LOCKED_ENTRY_LIST"] == 0
 
 
+def test_cfg_max_ballast_follows_the_entries():
+    """acServer aborts the start when an entry's BALLAST > MAX_BALLAST_KG (default 100): the cfg must raise it by itself."""
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": [{"model": "bmw", "ballast": 110}, {"model": "bmw"}]})
+    assert r.status_code == 200
+    assert "MAX_BALLAST_KG=110" in api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": [{"model": "bmw", "ballast": 90}]})
+    assert "MAX_BALLAST_KG" not in api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    # the file acServer really reads (write_instance), a lower explicit limit, and junk values
+    from app.services import ini_generator as ig
+    P = {"tcp": 1, "udp": 1, "http_internal": 2, "plugin": 3, "plugin_local": 4}
+    assert "MAX_BALLAST_KG=90" in ig.server_cfg({"SERVER": {"MAX_BALLAST_KG": 50}}, P, False, entries=[{"BALLAST": 90}])
+    assert "MAX_BALLAST_KG=50" in ig.server_cfg({"SERVER": {"MAX_BALLAST_KG": 50}}, P, False, entries=[{"BALLAST": 20}])
+    assert "MAX_BALLAST_KG=110" in ig.server_cfg({"SERVER": {"MAX_BALLAST_KG": "x"}}, P, False, entries=[{"BALLAST": "junk"}, {"BALLAST": 110}])
+
+
 def test_entry_list_is_validated():
     _install()
     sid = _server()
@@ -205,7 +222,7 @@ def test_entry_list_is_validated():
     assert post(entries=[ENTRIES[0], {**ENTRIES[1], "guid": f"{G3};{G1}"}]).status_code == 400  # ...inside a shared one
     assert post(entries=[{"model": "bmw"}], locked=True).status_code == 400  # locked but nobody could join
     assert post(entries=[{"model": "ghost", "guid": G1}]).status_code == 400  # car not installed
-    for bad in ({"guid": "123"}, {"guid": "abcdefghijklmnopq"}, {"ballast": 301}, {"restrictor": 101}, {"ballast": -1}):
+    for bad in ({"guid": "123"}, {"guid": "abcdefghijklmnopq"}, {"ballast": 10001}, {"restrictor": 101}, {"ballast": -1}):
         assert post(entries=[{**ENTRIES[0], **bad}]).status_code == 422, bad
     assert post(entries=[]).status_code == 422  # neither cars nor entries
     assert post(entries=ENTRIES * 20).status_code == 422  # 60 slots
