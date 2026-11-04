@@ -4,10 +4,13 @@ import zipfile
 
 from conftest import ADMIN
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 from app import content, supervisor
 from app.config import settings
+from app.db import engine
 from app.main import app
+from app.models import Server
 
 V = "/api/v1"
 api = TestClient(app, headers=ADMIN)
@@ -298,3 +301,27 @@ def test_apply_stores_the_session_and_only_a_session_change_resets_the_clock():
     api.post(f"{V}/servers/{sid}/apply", json={**FORM, "practice_min": 20, "restart": False})  # a different set-up: the clock starts over
     with Session(engine) as db:
         assert db.get(Server, sid).anchor_index is None
+
+
+def test_race_est_min_is_kept_when_a_client_leaves_it_out_and_a_change_restarts_the_clock():
+    """The minutes a race by laps lasts for the clock of a stopped server (app/timeline.py): a preset or an old event that does not send it must not wipe it,
+    and a different figure starts the clock over, like any other change of the set-up."""
+    _install()
+    sid = _server()
+    saved = lambda: api.get(f"{V}/servers/{sid}").json()["session"]["race_est_min"]
+    api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_est_min": 60})
+    assert saved() == 60
+    with Session(engine) as s:
+        srv = s.get(Server, sid)
+        srv.anchor_index, srv.anchor_at = 1, 1000.0
+        s.add(srv)
+        s.commit()
+    api.post(f"{V}/servers/{sid}/apply", json=FORM)   # leaves the field out
+    assert saved() == 60
+    with Session(engine) as s:
+        assert s.get(Server, sid).anchor_at == 1000.0, "nothing changed: the clock keeps its anchor"
+    api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_est_min": 45})
+    assert saved() == 45
+    with Session(engine) as s:
+        assert s.get(Server, sid).anchor_at is None, "the race lasts otherwise: the clock starts over"
+    assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, "race_est_min": -1}).status_code == 422

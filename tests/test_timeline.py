@@ -171,3 +171,19 @@ def test_the_lobby_durations_are_the_configured_ones_not_a_shortened_snapshot():
     with Session(engine) as s:
         info = wake.facade_info(s.get(Server, sid))
     assert info["durations"] == [15, 15, 5] and info["clients"] == 0 and info["timeleft"] == 15 * M   # (laps race: 5 laps)
+
+
+def test_a_race_by_laps_lasts_what_the_admin_says_else_the_default():
+    race = lambda est: timeline.segments(CFG, est)[2].secs
+    assert race(0) == (timeline.RACE_LAPS_EST_MIN + 1) * M and race(60) == 61 * M
+    # the clock of a stopped server at minute 55: 15 + 15 min of practice and qualify, then the race. With 60 min it is still racing (36 min left);
+    # with the default 21 min the race ended at minute 51 and the loop is back in the practice
+    pos = lambda minutes, est: timeline.position(CFG, 0, 0.0, minutes * M, est)
+    assert pos(55, 60)["index"] == 2 and pos(55, 0)["index"] == 0
+    assert round(pos(55, 60)["remaining_s"]) == 36 * M
+
+
+def test_race_est_min_is_read_from_the_saved_session():
+    assert timeline.race_est(None) == 0 and timeline.race_est(Server(name="x", base_port=1, session=None)) == 0
+    assert timeline.race_est(Server(name="x", base_port=1, session={"race_est_min": 60})) == 60
+    assert timeline.race_est(Server(name="x", base_port=1, session={"race_est_min": "nope"})) == 0

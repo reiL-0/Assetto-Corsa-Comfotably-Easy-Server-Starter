@@ -236,12 +236,14 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
-    if body.restart or _clock_key(cfg) != _clock_key(s.config):
-        s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart): the clock starts over with the next start
+    old_est = timeline.race_est(s)
+    est = old_est if body.race_est_min is None else body.race_est_min   # a client that does not know the field (a preset, an old event) must not wipe it
+    if body.restart or _clock_key(cfg) != _clock_key(s.config) or est != old_est:
+        s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart, or a race that lasts otherwise): the clock starts over with the next start
     s.config = cfg
     s.welcome = body.welcome.strip()
     old_pace = (s.session or {}).get("pace_steam_id")
-    s.session = body.model_dump(exclude={"admin_password", "restart"})
+    s.session = {**body.model_dump(exclude={"admin_password", "restart"}), "race_est_min": est}
     if body.entries:
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or _skin_for(skins, e.model, body.random_skins), "SPECTATOR_MODE": int(e.spectator),
