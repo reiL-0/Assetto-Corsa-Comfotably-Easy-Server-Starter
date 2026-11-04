@@ -142,3 +142,13 @@ def test_setup_names_cannot_carry_newlines_or_ini_keys(bad):
     assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": [entry]}).status_code == (200 if bad == "" else 422)
     if bad:
         assert api.post(f"{V}/servers/{sid}/apply", json={**FORM, "car_setups": {"bmw": bad}}).status_code == 422
+
+
+def test_uploaded_setup_leaves_fuel_tyres_and_pressures_free():
+    """acServer locks the sections a fixed setup has: wings and suspension stay, fuel/tyres/pressures/pit strategy go."""
+    _install()
+    full = "[CAR]\nMODEL=bmw\n[FUEL]\nVALUE=30\n[TYRES]\nNAME=SM\n[PRESSURE_LF]\nVALUE=26\n[PIT_STRATEGY]\nX=1\n[WING_1]\nANGLE=5\n[ARB]\nFRONT=3\n"
+    assert _put("free_fuel", full).status_code == 201
+    got = (content.setups_dir() / "free_fuel.ini").read_text()
+    assert "[WING_1]" in got and "[ARB]" in got and "[CAR]" in got
+    assert not any(k in got for k in ("FUEL", "TYRES", "PRESSURE", "PIT_"))

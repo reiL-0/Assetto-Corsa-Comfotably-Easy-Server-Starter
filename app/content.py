@@ -676,6 +676,19 @@ def setup_users(name: str) -> list[str]:
     return users
 
 
+def _free_sections(text: str) -> str:
+    """acServer locks every section a fixed setup has: fuel, tyres, pressures and pit strategy are dropped so the driver keeps them."""
+    out, keep = [], True
+    for line in text.splitlines(keepends=True):
+        t = line.strip()
+        if t.startswith("[") and t.endswith("]"):
+            n = t[1:-1].strip().upper()
+            keep = not (n in ("FUEL", "TYRES") or n.startswith(("PRESSURE_", "PIT")))
+        if keep:
+            out.append(line)
+    return "".join(out)
+
+
 @router.get("/setups", dependencies=_admin)
 def list_setups() -> list[dict]:
     return [{"name": p.stem, "size": p.stat().st_size} for p in sorted(setups_dir().glob("*.ini")) if p.is_file() and not p.is_symlink()]
@@ -697,6 +710,7 @@ async def put_setup(name: str, request: Request) -> dict:
         raise HTTPException(400, "the setup is not a text (UTF-8) file") from None
     if not text.strip() or "\0" in text:
         raise HTTPException(400, "the setup is empty or not a text file")
+    raw = _free_sections(text).encode()
     d = setups_dir()
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
     try:
