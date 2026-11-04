@@ -346,6 +346,7 @@ class ACSPClient(asyncio.DatagramProtocol):
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
+        self.keep_off = False  # a new set-up was applied to this running server: its practice is no longer the one to keep (app/services/server_service.apply)
         self.on_client_loaded = None  # callable(car_id) or None: a car finished loading (app/live/cspweather.py greets it with the current weather)
         self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
         self.events: deque[dict] = deque(maxlen=max_events)
@@ -404,6 +405,10 @@ class ACSPClient(asyncio.DatagramProtocol):
                     else:
                         from app.racecontrol import rolling_start
                         rolling_start(rc, self.cars)
+            if event.get("session_type") != 1 and (t == "new_session" or self.board.has_kept()):   # qualify / race (also when found already running): what the practice kept is over
+                from app import practicekeep
+                practicekeep.clear(self.server_id)
+                self.board.drop_kept()
             if event.get("session_type") == 2:
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
@@ -412,6 +417,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
         elif t == "lap_completed":
+            if (self.session or {}).get("session_type") == 1 and not self.keep_off:   # the practice is kept across an idle stop (app/practicekeep.py)
+                from app import practicekeep
+                practicekeep.save(self.server_id, self.board, event.get("grip_level"))
             from app.live.racecontrol import on_lap, state_of
             from app.racecontrol import nascar_actions  # adapter owns ACSP I/O, like timeline above
             rc0 = state_of(self.server_id, True, self.session)
@@ -590,6 +598,9 @@ async def connect(
     loop = asyncio.get_running_loop()
     protocol = ACSPClient(server_id)
     protocol.car_slots = car_slots
+    from app import practicekeep   # late: it imports the board, and the board is imported here
+    if kept := practicekeep.load(server_id):
+        practicekeep.seed(protocol.board, kept.drivers)
     await loop.create_datagram_endpoint(
         lambda: protocol,
         local_addr=(host, local_port),

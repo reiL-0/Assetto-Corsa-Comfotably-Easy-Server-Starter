@@ -26,6 +26,7 @@ class Driver:
     top_kmh: float = 0.0
     valid_laps: int | None = None  # laps without cuts (None: this board does not know, as when it is read from the log); the best of them is `best_valid_ms` (0 = none)
     best_valid_ms: int = 0
+    kept_ms: int = 0  # best lap brought from the practice kept across an idle stop (app/practicekeep.py): the server's own table starts empty and must not lower it
     pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     spline: float = 0.0
 
@@ -36,7 +37,25 @@ class LiveBoard:
     def __init__(self) -> None:
         self.session: dict = {}  # last new_session / session_info event
         self.session_at = 0.0  # wall clock when it arrived: elapsed time keeps running from there
+        self.keep_next = False  # the drivers of the kept practice (app/practicekeep.py) were seeded: the next practice session does not wipe them
         self.drivers: list[Driver] = []
+
+    def has_kept(self) -> bool:
+        return self.keep_next or any(d.kept_ms for d in self.drivers)
+
+    @staticmethod
+    def _reset(d: Driver) -> None:
+        d.best_ms = d.last_ms = d.laps = d.total_ms = d.kept_ms = 0
+        d.top_kmh = 0.0
+        d.valid_laps, d.best_valid_ms = None, 0
+
+    def drop_kept(self) -> None:
+        """The kept practice does not belong to this session: its drivers go (one already back on track starts from zero)."""
+        self.keep_next = False
+        self.drivers = [d for d in self.drivers if d.connected]
+        for d in self.drivers:
+            if d.kept_ms:
+                self._reset(d)
 
     def _by_car(self, car_id: int) -> Driver | None:
         """Newest driver that used this car slot (slots are reused by whoever joins next)."""
@@ -47,12 +66,12 @@ class LiveBoard:
         t = e["type"]
         if t in ("new_session", "session_info"):
             self.session, self.session_at = e, now
-            if t == "new_session":  # each session starts its own table; whoever is still connected stays
+            if t == "new_session" and not (self.keep_next and e.get("session_type") == 1):  # each session starts its own table; whoever is still connected stays
+                self.drop_kept()
                 self.drivers = [d for d in self.drivers if d.connected]
                 for d in self.drivers:
-                    d.best_ms = d.last_ms = d.laps = d.total_ms = 0
-                    d.top_kmh = 0.0
-                    d.valid_laps, d.best_valid_ms = None, 0
+                    self._reset(d)
+            self.keep_next = False   # the first session event (new_session or the session_info that finds it) is the one the kept practice belongs to; a later one is another session
         elif t == "new_connection":
             old = next((d for d in self.drivers if e["driver_guid"] and d.guid == e["driver_guid"]), None)
             d = old or Driver(car_id=e["car_id"])
@@ -84,7 +103,7 @@ class LiveBoard:
                 if r:
                     r.laps = max(r.laps, row["laps"])
                     if 0 < row["laptime_ms"] < NO_TIME:
-                        r.best_ms = row["laptime_ms"]
+                        r.best_ms = min(row["laptime_ms"], r.kept_ms) if r.kept_ms else row["laptime_ms"]
 
     def elapsed_ms(self, now: float | None = None) -> int:
         now = time.time() if now is None else now

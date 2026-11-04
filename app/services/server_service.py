@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app import content, csp, integrity, supervisor, timeline
+from app import content, csp, integrity, practicekeep, supervisor, timeline
 from app.config import settings
 from app.models import Server
 from app.schemas.servers import OptionsIn, SessionIn
@@ -183,7 +183,7 @@ def write_instance(s: Server) -> Path:
         link = d / name
         if bin_dir and not link.exists() and (bin_dir / name).is_dir():
             link.symlink_to(bin_dir / name)
-    (d / "cfg" / "server_cfg.ini").write_text(ini_generator.server_cfg(s.config, ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra, s.csp_off, s.session).strip()), csp.hub_enabled(s.csp_off), csp.min_build_for(s.csp_off), s.entry_list))
+    (d / "cfg" / "server_cfg.ini").write_text(ini_generator.server_cfg(practicekeep.with_grip(s.config, (kept.grip if (kept := practicekeep.load(s.id)) else None)), ports(s.base_port), bool(s.welcome or csp.extra_for(s.id, s.csp_extra, s.csp_off, s.session).strip()), csp.hub_enabled(s.csp_off), csp.min_build_for(s.csp_off), s.entry_list))
     (d / "cfg" / "entry_list.ini").write_text(ini_generator.entry_list(s.entry_list))
     welcome = d / "cfg" / "welcome.txt"
     extra = csp.extra_for(s.id, s.csp_extra, s.csp_off, s.session)
@@ -262,6 +262,9 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     sess.commit()
     sess.refresh(s)
     inst = supervisor.get(server_id)
+    practicekeep.clear(server_id)   # a new set-up: the practice kept from the old one is not this one's
+    if inst and inst.acsp:
+        inst.acsp.keep_off = True   # (a server still running the old practice must not save it again; a restart makes a new client)
     if inst:
         inst.nascar_config = (s.session or {}).get("nascar")
         if body.pace_steam_id != old_pace:   # the same one again must not undo what the director did since

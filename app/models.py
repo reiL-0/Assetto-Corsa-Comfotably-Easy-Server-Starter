@@ -391,3 +391,13 @@ class ChampionshipEvent(SQLModel, table=True):
     event_id: int | None = None  # the saved event whose run produced it (counted automatically, league.count_results); None = added by hand
     scores: bool = True  # False = shown in the league's results but adds nothing to its table (a practice); the admin can flip it
     created_at: datetime = Field(default_factory=_now)
+
+
+class PracticeKeep(SQLModel, table=True):
+    """What the practice of a server had when it was stopped for idleness (app/practicekeep.py): the best laps of the drivers and the grip of the dynamic track.
+    One row per server; it lives until another kind of session starts or a new set-up is applied."""
+    __tablename__ = "practice_keep"
+
+    server_id: int = Field(primary_key=True)
+    grip: float | None = None   # grip_level of the last practice lap, 0..1
+    drivers: list = Field(default_factory=list, sa_type=JSON)   # [{guid, name, model, skin, best_ms, best_valid_ms, laps, valid_laps}]
