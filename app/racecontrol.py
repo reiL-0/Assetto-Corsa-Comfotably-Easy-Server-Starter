@@ -51,6 +51,12 @@ state_router = APIRouter(prefix="/servers/{server_id}", tags=["race-control"], d
 control_router = APIRouter(prefix="/servers/{server_id}/race-control", tags=["race-control"], dependencies=[Depends(require("steward"))])
 
 SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARILLA: sin adelantar", "white": "BANDERA BLANCA: última vuelta", "checkered": "BANDERA DE CUADROS"}
+# the flags a director shows by hand to one driver (`car_id`) or to everybody: only a notice on the hub's screen, they change no rule or penalty (the website gives each its banner by text: OPR WP/banner_i18n.py)
+FLAG_NOTICES = {"blue": "BANDERA AZUL: deja pasar al más rápido", "bw-warning": "BANDERA NEGRA Y BLANCA: advertencia de conducta",
+                "meatball": "BANDERA NEGRA CON DISCO NARANJA: problema mecánico, entra a boxes", "black": "BANDERA NEGRA: entra a boxes",
+                "yellow-double": "DOBLE AMARILLA: peligro en pista, prepárate para parar", "red": "BANDERA ROJA: carrera detenida",
+                "track-limits": "LÍMITES DE PISTA: aviso por salirte de la pista"}
+PER_DRIVER = ("blue", "bw-warning", "meatball", "black", "track-limits")   # these are for somebody: a flag to everybody would be a mistake
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
 
 
@@ -276,6 +282,23 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     else:
         _say(rc, SAY[body.flag], "flag")
     nascar_actions(server_id, rc, actions)   # (after the director's own notice: a white flag the engine adds comes last)
+    return rc.snapshot()
+
+
+class FlagNoticeIn(BaseModel):
+    kind: Literal["blue", "bw-warning", "meatball", "black", "yellow-double", "red", "track-limits"]
+    car_id: int | None = Field(default=None, ge=0, le=255)   # None = every driver (yellow-double and red only)
+
+
+@control_router.post("/flag-notice")
+def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
+    """A flag shown by hand: blue, black-and-white, black, orange disc and track limits go to ONE driver; the double yellow and the red to everybody. Only a notice: no penalty is set (the black flag
+    here does not make the game's own black flag, and the red does not stop the session)."""
+    if body.kind in PER_DRIVER and body.car_id is None:
+        raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
+    _, rc = _control(server_id, sess)
+    _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
+    log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()
 
 

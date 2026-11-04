@@ -30,7 +30,9 @@ def fragments():
                     out.update(_pieces(node.args[0]))
             elif isinstance(node, ast.Tuple) and len(node.elts) == 2 and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == "say":
                 out.update(_pieces(node.elts[1]))
-        out.update(_pieces(next((n.value for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in ("SAY", "PITS_OPEN") for t in n.targets)), ast.Constant(value=""))))
+        for n in tree.body:   # (every table of messages, not only the first one)
+            if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in ("SAY", "PITS_OPEN", "FLAG_NOTICES") for t in n.targets):
+                out.update(p for v in (n.value.values if isinstance(n.value, ast.Dict) else [n.value]) for p in _pieces(v))   # (a table's messages, not its keys)
     return sorted(s for s in out if s.strip())
 
 

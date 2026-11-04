@@ -277,6 +277,19 @@ def test_an_fcy_is_a_pace_flag_too_and_its_notice_comes_with_the_state(live):
     assert rc.due(105.0) and [v["car_id"] for v in rc.evaluate(105.0)] == [1] and rc.penalties, "an FCY is judged like a VSC"
 
 
+def test_a_flag_shown_by_hand_is_a_notice_for_one_driver_or_for_everybody(live):
+    sid, _, _ = live
+    steward = _client("steward")
+    url = f"{V}/servers/{sid}/race-control/flag-notice"
+    assert steward.post(url, json={"kind": "blue"}).status_code == 422, "a blue flag is for somebody"
+    assert steward.post(url, json={"kind": "nope", "car_id": 3}).status_code == 422
+    assert steward.post(url, json={"kind": "blue", "car_id": 3}).status_code == 200
+    assert steward.post(url, json={"kind": "red"}).status_code == 200, "the red is for everybody"
+    n = {x["text"]: x for x in steward.get(f"{V}/servers/{sid}/race-state").json()["notices"]}
+    assert n["BANDERA AZUL: deja pasar al más rápido"]["to"] == 3 and n["BANDERA ROJA: carrera detenida"]["to"] == -1
+    assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "green" and steward.get(f"{V}/servers/{sid}/race-state").json()["penalties"] == [], "only a notice: no rule changes"
+
+
 def test_notices_expire_are_capped_and_never_carry_quotes():
     rc = RaceControl()
     a = rc.notify('di "hola" \\ adios', "race", now=100.0)
