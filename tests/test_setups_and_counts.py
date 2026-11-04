@@ -152,3 +152,18 @@ def test_uploaded_setup_leaves_fuel_tyres_and_pressures_free():
     got = (content.setups_dir() / "free_fuel.ini").read_text()
     assert "[WING_1]" in got and "[ARB]" in got and "[CAR]" in got
     assert not any(k in got for k in ("FUEL", "TYRES", "PRESSURE", "PIT_"))
+
+
+def test_session_ballast_restrictor_and_random_skins():
+    """A session-wide ballast/restrictor fills every slot whose own is 0 (open ones too); a driver's own value wins; random_skins draws from the car's skins."""
+    _install()
+    sid = _server()
+    r = api.post(f"{V}/servers/{sid}/apply", json={**COUNTS, "ballast": 20, "restrictor": 5, "random_skins": True})
+    assert r.status_code == 200, r.text
+    el = api.get(f"{V}/servers/{sid}").json()["entry_list"]
+    assert el and all(e["BALLAST"] == 20 and e["RESTRICTOR"] == 5 for e in el)
+    entry = {"model": "bmw", "driver_name": "Ana", "guid": "76561198000000001", "ballast": 50}
+    r = api.post(f"{V}/servers/{sid}/apply", json={**FORM, "cars": [], "entries": [entry], "ballast": 20, "restrictor": 5})
+    assert r.status_code == 200, r.text
+    got = api.get(f"{V}/servers/{sid}").json()["entry_list"][0]
+    assert (got["BALLAST"], got["RESTRICTOR"]) == (50, 5)

@@ -12,6 +12,7 @@ The database session is the caller's (`sess`): the service commits what it chang
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from dataclasses import dataclass
 from contextlib import nullcontext
@@ -87,6 +88,12 @@ def check_content(body: SessionIn, wanted: list[str]) -> dict[str, list[str]]:
     if missing:
         raise ServerError(400, f"cars not installed: {', '.join(missing)}")
     return {c: cars[c]["skins"] for c in wanted}
+
+
+def _skin_for(skins: dict[str, list[str]], car: str, rand: bool) -> str:
+    """The skin of a slot nobody chose: the pack's first, or a random one of the car's when the session asks for it."""
+    pool = skins[car] or [""]
+    return random.choice(pool) if rand else pool[0]
 
 
 def _apply_options(cfg: dict, srv: dict, o: OptionsIn) -> None:
@@ -237,15 +244,17 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     s.session = body.model_dump(exclude={"admin_password", "restart"})
     if body.entries:
         s.entry_list = [
-            {"MODEL": e.model, "SKIN": e.skin or (skins[e.model] or [""])[0], "SPECTATOR_MODE": int(e.spectator),
-             "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast, "RESTRICTOR": e.restrictor,
+            {"MODEL": e.model, "SKIN": e.skin or _skin_for(skins, e.model, body.random_skins), "SPECTATOR_MODE": int(e.spectator),
+             "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast or (0 if e.spectator else body.ballast), "RESTRICTOR": e.restrictor or (0 if e.spectator else body.restrictor),   # (the pace car / a spectator is not weighed down)
+            
              **({"FIXED_SETUP": f"{setup}.ini"} if (setup := e.fixed_setup or body.car_setups.get(e.model)) else {})}   # its own setup, else the one set for its car
             for e in body.entries
         ]
     else:  # one open slot per client: the models in the counts asked for (grouped), or in turns; the skin is the pack's first (clients pick their own)
         plan = [car for car, n in body.car_counts.items() for _ in range(n)] if body.car_counts else [cars[i % len(cars)] for i in range(body.max_clients)]
         s.entry_list = [
-            {"MODEL": car, "SKIN": (skins[car] or [""])[0], **({"FIXED_SETUP": f"{body.car_setups[car]}.ini"} if car in body.car_setups else {})}
+            {"MODEL": car, "SKIN": _skin_for(skins, car, body.random_skins), **({"BALLAST": body.ballast} if body.ballast else {}), **({"RESTRICTOR": body.restrictor} if body.restrictor else {}),
+             **({"FIXED_SETUP": f"{body.car_setups[car]}.ini"} if car in body.car_setups else {})}
             for car in plan
         ]
     s.updated_at = datetime.now(UTC)
