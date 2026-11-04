@@ -702,6 +702,7 @@ async def put_setup(name: str, request: Request) -> dict:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(raw)
+        os.chmod(tmp, 0o644)   # mkstemp makes it 0600: the acServer runs as another user on a client host and could not read it (permission denied, no start)
         os.replace(tmp, d / f"{name}.ini")
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
