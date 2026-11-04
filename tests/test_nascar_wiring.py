@@ -1084,8 +1084,8 @@ def test_the_car_that_completes_the_distance_is_announced_as_the_winner(live):
     state, actions = live_rc.on_lap(sid, 3, 3)
     adapter.nascar_actions(sid, state, actions, 3)
     assert rc.flag == 'checkered'
-    won = [n for n in rc.snapshot()['notices'] if n['kind'] == 'winner']
-    assert [n['text'] for n in won] == ['GANADOR: Ana'] and won[0]['left_s'] > 60
+    won = [n for n in rc.snapshot()['notices'] if n['text'].startswith('GANADOR')]
+    assert [n['text'] for n in won] == ['GANADOR: Ana'] and won[0]['kind'] == 'hold' and won[0]['left_s'] > 60, 'the winner is held (until the session restarts)'
 
 
 def test_the_director_can_launch_a_fake_winner_notice_to_see_the_banner(live):
@@ -1105,7 +1105,7 @@ def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the
     monkeypatch.setattr(engine, 'on_event', lambda *args: None)
     _field(client, c3=(0.50, 2), c4=(0.48, 2))
     lap = lambda car, laps: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps - 1, 'laptime_ms': 1000}] if car == 3 else [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps, 'laptime_ms': 1000}]})
-    winners = lambda: [n['text'] for n in live_rc.state_of(sid, True, client.session, create=True).snapshot()['notices'] if n['kind'] == 'winner']
+    winners = lambda: [n['text'] for n in live_rc.state_of(sid, True, client.session, create=True).snapshot()['notices'] if n['text'].startswith('GANADOR')]
     client.session = {'session_type': 3, 'laps': 3, 'time_min': 0}; client.winner_done = False
     lap(3, 2)
     assert winners() == [], 'two laps of three'

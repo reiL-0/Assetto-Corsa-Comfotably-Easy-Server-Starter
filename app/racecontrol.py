@@ -419,7 +419,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
         elif action[0] == "finish" and crossing is not None:   # the checkered came with the lap of the first car to complete the distance: that car is the winner (AC ranks by laps, then by time)
             log.info("winner: car %s (%s)", crossing, _name(inst, crossing))
             _mark_finish(server_id, rc.leader_laps_seen)
-            rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", ttl=90)
+            rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", hold="winner")   # (stays until the session restarts: state_of forgets it with the session)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
             eta = rc.caution_eta() or {}
@@ -524,7 +524,7 @@ def plain_winner(client, event: dict) -> None:
     rc = state_of(client.server_id, True, s, create=True)
     name = client.cars.get(event["car_id"], {}).get("driver_name") or f"#{event['car_id']}"
     log.info("winner: car %s (%s)", event["car_id"], name)
-    rc.notify(f"GANADOR: {name}", "winner", ttl=90)
+    rc.notify(f"GANADOR: {name}", "winner", hold="winner")
 
 
 def auto_green(server_id: int, rc, car: int) -> None:

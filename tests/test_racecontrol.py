@@ -290,6 +290,20 @@ def test_a_flag_shown_by_hand_is_a_notice_for_one_driver_or_for_everybody(live):
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "green" and steward.get(f"{V}/servers/{sid}/race-state").json()["penalties"] == [], "only a notice: no rule changes"
 
 
+def test_the_winner_stays_on_the_screen_until_the_session_restarts():
+    ref = object()
+    rc = state_of(77, True, ref, create=True)
+    rc.notify("GANADOR: Ana", "winner", hold="winner")
+    rc.set_flag("yellow"); rc.set_flag("green")   # a flag leaving a caution drops the held notices... except the winner
+    held = [n for n in rc.snapshot()["notices"] if n["text"] == "GANADOR: Ana"]
+    assert held and held[0]["kind"] == "hold", "the winner is held through the flags"
+    rc.notify("FREE PASS: Beto", "race", hold="freepass"); rc.set_flag("white"); rc.set_flag("green")
+    assert not any(n["text"].startswith("FREE PASS") for n in rc.snapshot()["notices"]), "other held notices still go with the caution"
+    fresh = state_of(77, True, object(), create=True)   # the session restarted
+    assert not fresh.snapshot()["notices"], "a new session starts clean"
+    state_of(77, False)
+
+
 def test_notices_expire_are_capped_and_never_carry_quotes():
     rc = RaceControl()
     a = rc.notify('di "hola" \\ adios', "race", now=100.0)

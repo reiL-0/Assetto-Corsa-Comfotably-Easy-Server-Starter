@@ -140,7 +140,7 @@ class RaceControl:
             self.flag, self.pace_kmh = flag, None
             self.pace_out = flag == "yellow" or (self.pace_out and flag in SLOWING)
             if flag not in CAUTION:
-                self.notices = [x for x in self.notices if not x.get("hold")]   # (the caution is over: what was held on the screen goes with it)
+                self.notices = [x for x in self.notices if not x.get("hold") or x.get("hold") == "winner"]   # (the caution is over: what was held on the screen goes with it, but the winner stays until the session restarts)
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
