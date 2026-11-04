@@ -157,6 +157,9 @@ class SessionIn(BaseModel):
     race_min: int | None = Field(default=None, ge=0, le=1440)  # a timed race (endurance) instead of laps; not both
     car_counts: dict[str, Annotated[int, Field(strict=True, ge=0, le=MAX_SLOTS)]] | None = None   # open slots per model («5 of this, 2 of that»); then `cars` and `max_clients` follow from it. Ignored with `entries`
     pace_steam_id: str | None = Field(default=None, pattern=r"^[0-9]{17}$")   # the pace car's driver (SteamID): named once when the server starts or the session is applied; the director can change it afterwards
+    ballast: int = Field(default=0, ge=0, le=10000)   # kg for every slot (open ones too) whose own ballast is 0: a driver's own value wins
+    restrictor: int = Field(default=0, ge=0, le=100)   # % for every slot whose own restrictor is 0, same rule
+    random_skins: bool = False   # each open slot (and each entry with no skin) gets a random skin of its car instead of the pack's first
     car_setups: dict[str, str] = {}   # model -> uploaded setup name, locked on that model's open slots (the league's roster slots get it too)
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
     race_wait_s: int = Field(default=60, ge=0, le=600)
