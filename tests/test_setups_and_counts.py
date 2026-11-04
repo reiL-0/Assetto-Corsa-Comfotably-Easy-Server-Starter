@@ -18,6 +18,13 @@ def _put(name, data=SETUP, client=api):
     return client.put(f"{V}/content/setups/{name}", content=data if isinstance(data, bytes) else data.encode())
 
 
+def test_uploaded_setup_is_readable_by_the_acserver_user():
+    """mkstemp gives 0600; on a client host the acServer is another user (same group) and 'permission denied' stops the start."""
+    _install()
+    assert _put("readable_one").status_code == 201
+    assert (content.setups_dir() / "readable_one.ini").stat().st_mode & 0o044 == 0o044
+
+
 def test_car_counts_build_grouped_open_slots():
     _install()
     sid = _server()
