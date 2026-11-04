@@ -84,6 +84,7 @@ class RaceControl:
         self.pace_guid = ""                # the SteamID of the pace car's DRIVER: who it is, whatever slot he connects in (the director names a driver, not a car id; see app/racecontrol.py)
         self.pace_car: int | None = None   # the slot where that driver sits now (None while he is not on the server) (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
         self.pace_car_kmh = PACE_CAR_KMH
+        self.pace_out = False              # the pace car came out under a yellow: it keeps leading if that yellow turns into a VSC/FCY (a VSC/FCY from green does not bring it out)
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
@@ -137,6 +138,7 @@ class RaceControl:
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
+            self.pace_out = flag == "yellow" or (self.pace_out and flag in SLOWING)
             if flag not in CAUTION:
                 self.notices = [x for x in self.notices if not x.get("hold")]   # (the caution is over: what was held on the screen goes with it)
             if flag in SLOWING:
@@ -157,7 +159,7 @@ class RaceControl:
         """What the pace car's own hub reads: wait in the pits / lead the field / come in."""
         if self.pace_car is None:
             return None
-        mode = "in" if self.pace_car_in else ("lead" if self.flag in CAUTION else "wait")   # after "to go" it stays «in» through the green (it still has to park); a new caution or a new pace car resets it
+        mode = "in" if self.pace_car_in else ("lead" if self.pace_out else "wait")   # only a plain yellow brings the pace car out (a VSC/FCY from green sets its own pace and it stays in the pits); after "to go" it stays «in» through the green (it still has to park); a new caution or a new pace car resets it
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
 
     def _end_formation(self) -> None:
@@ -309,7 +311,7 @@ class RaceControl:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
         with _lock:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid   # (a driver named but not connected: no slot yet, the guid stays)
-            self.pace_car_in = self.pace_car_pitted = self.one_more = False
+            self.pace_car_in = self.pace_car_pitted = self.one_more = self.pace_out = False
             self.blocked_crossings = 0
             if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
                 self._end_formation()
