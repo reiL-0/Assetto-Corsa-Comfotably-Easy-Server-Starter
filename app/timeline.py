@@ -12,7 +12,7 @@ A stopped server that the manager shows in the lobby (app/wake.py) must not free
   redefined to the minutes that are left (`SET_SESSION_INFO`; its unit is minutes, and the running session's time left is that
   length minus what has elapsed) and `NEXT_SESSION` is sent until it is the current one. The original definition is put back
   as soon as the next session starts. Granularity: a minute.
-- A race by laps has no known length: it counts as `RACE_LAPS_EST_MIN` minutes (plus its wait).
+- A race by laps has no known length: it counts as the minutes the admin gave for that server (`SessionIn.race_est_min`, kept in `Server.session`), else `RACE_LAPS_EST_MIN` (plus its wait).
 """
 
 from __future__ import annotations
@@ -46,22 +46,22 @@ class Seg:
     wait: int    # seconds
 
 
-def segments(config: dict) -> list[Seg]:
+def segments(config: dict, est_min: int = 0) -> list[Seg]:
     out = []
     for section, typ in TYPES:
         sec = config.get(section)
         if not sec:
             continue
         minutes, laps, wait = int(sec.get("TIME") or 0), int(sec.get("LAPS") or 0), int(sec.get("WAIT_TIME") or 0) if section == "RACE" else 0
-        length = minutes * 60 if minutes and not laps else RACE_LAPS_EST_MIN * 60 if laps else 0
+        length = minutes * 60 if minutes and not laps else (est_min or RACE_LAPS_EST_MIN) * 60 if laps else 0
         if length:
             out.append(Seg(len(out), typ, str(sec.get("NAME") or section.title()), length + wait, minutes, laps, wait))
     return out
 
 
-def position(config: dict, anchor_index: int | None, anchor_at: float | None, now: float | None = None) -> dict | None:
+def position(config: dict, anchor_index: int | None, anchor_at: float | None, now: float | None = None, est_min: int = 0) -> dict | None:
     """{index, remaining_s, elapsed_s} of the clock now, or None when it has no position (never ran, or ended)."""
-    segs = segments(config)
+    segs = segments(config, est_min)
     if not segs or anchor_index is None or anchor_at is None:
         return None
     now = time.time() if now is None else now
@@ -77,8 +77,16 @@ def position(config: dict, anchor_index: int | None, anchor_at: float | None, no
     return {"index": i, "remaining_s": segs[i].secs - t, "elapsed_s": t}
 
 
+def race_est(s: Server | None) -> int:
+    """Minutes the admin says a race by laps of this server lasts (0: not said, RACE_LAPS_EST_MIN)."""
+    try:
+        return max(0, int(((s.session if s else None) or {}).get("race_est_min") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def server_position(s: Server, now: float | None = None) -> dict | None:
-    return position(s.config, s.anchor_index, s.anchor_at, now)
+    return position(s.config, s.anchor_index, s.anchor_at, now, race_est(s))
 
 
 def set_anchor(server_id: int, index: int, at: float) -> None:
@@ -101,7 +109,7 @@ def on_session_event(server_id: int, event: dict) -> None:
             shorter = 0
             with Session(engine) as sess:
                 s = sess.get(Server, server_id)
-                segs = segments(s.config) if s else []
+                segs = segments(s.config, race_est(s)) if s else []
             if int(cur) < len(segs) and segs[int(cur)].minutes and event.get("time_min"):
                 shorter = max(0, segs[int(cur)].minutes * 60 - int(event["time_min"]) * 60)
             set_anchor(server_id, int(cur), time.time() - event.get("elapsed_ms", 0) / 1000 - shorter)
@@ -134,7 +142,7 @@ async def resume(server_id: int, planned: dict | None, planned_at: float, settle
         return None
     with Session(engine) as sess:
         s = sess.get(Server, server_id)
-        segs = segments(s.config) if s else []
+        segs = segments(s.config, race_est(s)) if s else []
     if not segs:
         return None
     cur = int(inst.acsp.session.get("current_session_index", 0))
