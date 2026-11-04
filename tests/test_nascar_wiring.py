@@ -722,6 +722,14 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
     assert r.json()['pacecar']['mode'] == 'lead'
     assert rc.caution.leader == 3 and 9 not in rc.caution.frozen and rc.caution.free_pass == 5, 'the pace car is not the leader nor in the order'
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
+    for f in ('vsc', 'fcy'):   # a VSC/FCY from green sets its own pace: the pace car stays in the pits
+        r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': f, 'pace_kmh': 60, 'grace_s': 10, 'tolerance_kmh': 5})
+        assert r.json()['pacecar']['mode'] == 'wait', f
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'vsc', 'pace_kmh': 60, 'grace_s': 10, 'tolerance_kmh': 5})
+    assert r.json()['pacecar']['mode'] == 'lead', 'a yellow turned VSC: the pace car already out keeps leading, it is not left on the track'
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
     r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={})
     assert r.json()['pacecar']['mode'] == 'in' and 9 not in r.json()['caution']['restart']
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
