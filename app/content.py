@@ -79,8 +79,13 @@ def _tracks_dir() -> Path:
 
 def _read_json(p: Path) -> dict:
     try:
-        return json.loads(p.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
+        raw = p.read_bytes()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1252", errors="replace")   # Kunos files saved as Windows-1252 (ks_nordschleife's "°"): one of them 500'd the whole track list
+        return json.loads(text)
+    except (OSError, ValueError):
         return {}
 
 
