@@ -1335,3 +1335,23 @@ def test_a_yellow_behind_a_pace_car_without_nascar_runs_the_to_go_and_the_green_
     rc.go_armed = True
     adapter.auto_green(sid, rc, 3)
     assert rc.flag == 'green' and rc.caution is None, 'the restart leader crossing brings the green'
+
+
+def test_manual_to_go_works_under_a_plain_yellow_without_nascar_or_pace_car(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    steward = _client('steward')
+    url = f'{V}/servers/{sid}/race-control/restart'
+    assert rc.nascar is None and rc.pace_car is None
+    assert steward.post(url, json={'to_go': 2}).status_code == 409, 'green: nothing to call'
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    assert rc.caution is None, 'a plain yellow with nobody to lead makes no NASCAR caution'
+    r = steward.post(url, json={'to_go': 2})
+    assert r.status_code == 200
+    assert ('DOS PARA VERDE', -1) in {(n['text'], n['to']) for n in r.json()['notices']}
+    r = steward.post(url, json={'to_go': 1})
+    texts = {(n['text'], n['to']) for n in r.json()['notices']}
+    assert ('UNA PARA VERDE', -1) in texts and ('DOS PARA VERDE', -1) not in texts, 'the second call replaces the first banner'
+    assert rc.flag == 'yellow', 'the green stays the director\'s'
+    steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
+    assert steward.post(url, json={'to_go': 1}).status_code == 409

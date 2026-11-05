@@ -42,7 +42,7 @@ from app.db import SessionDep, engine
 from app.models import GiveBackDue, LeagueMember, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
-from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
+from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
@@ -806,7 +806,13 @@ class RestartIn(BaseModel):
 def _restart(inst, rc, to_go: int) -> dict:
     plan = rc.restart_plan(inst.acsp.field.snapshot(), to_go)
     if plan is None:
-        raise HTTPException(409, "no hay una amarilla de NASCAR en curso")
+        if rc.flag not in CAUTION:
+            raise HTTPException(409, "no hay una amarilla en curso")
+        # a yellow / VSC / FCY with no NASCAR caution (no NASCAR armed, no pace car): nobody to place or lead, only the notice; the green stays the director's
+        log.info("restart called: %s to go (plain %s, no NASCAR caution)", to_go, rc.flag)
+        rc.audit("manual_to_go", to_go=to_go, flag=rc.flag, nascar_caution=False, executed=True)
+        _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag", hold="togo")
+        return rc.snapshot()
     order, waved, choosers = plan
     log.info("restart called: %s to go", to_go)
     _say(rc, ("UNA" if to_go == 1 else "DOS") + " PARA VERDE", "flag", hold="togo")
