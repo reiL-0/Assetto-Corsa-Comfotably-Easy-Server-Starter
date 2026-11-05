@@ -32,7 +32,7 @@ def enabled(server_id):
 # Exhaustive public RaceControl inventory: see docs/neutralization.md for callers.
 # Exclusions are explicit so a new public entry requires a recording decision.
 EXCLUDED = {
-    **dict.fromkeys(("without_pace_car", "pace_car_state", "caution_eta", "grace_left", "due",
+    **dict.fromkeys(("track_clear", "without_pace_car", "pace_car_state", "caution_eta", "grace_left", "due",
                     "auto_for", "auto_live", "judging_continuously", "delta_block", "autoflags_view",
                     "give_back_peek", "give_back_view", "cuts_view", "snapshot"), "Read-only view/filter"),
     "audit": "Output sink; replay installs its own decision collector",

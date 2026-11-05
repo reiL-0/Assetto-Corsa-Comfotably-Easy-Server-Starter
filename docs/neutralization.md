@@ -21,16 +21,69 @@ parcial; las siguientes cuentan vueltas completas. Solo cuenta el líder actual,
 fuera de boxes, en carrera y con telemetría reciente. Un cambio de líder,
 generación o anclaje de posición descarta la vuelta parcial; no concede vueltas.
 
-Con `green_after_laps` vueltas completas y `green_clear_s` segundos limpios, el
-modo `live` pone verde. Una pista sucia retrasa la decisión hasta la siguiente
-pasada válida del líder. Al llegar a `green_after_laps + green_max_extra_laps`
-se avisa una sola vez al director, sin forzar verde. Se sigue comprobando en las
-vueltas posteriores. En `shadow` la decisión «habría vuelto a verde en vuelta N»
-se guarda una sola vez en `autoflags.log`, sin bandera ni notices visibles.
+El criterio compartido `RaceControl.track_clear` conserva exactamente la regla
+NASCAR cuando `strict=False`: velocidades menores que `STANDING` fuera de boxes
+(`PIT_CLEAR`) y contactos recientes de `watch.recent_involved(now, INVOLVED_FOR)`.
+No cambia sus resultados ni los eventos `caution_lap`/`caution_clear`.
+Solo el verde virtual usa `strict=True`: exige velocidad finita y muestra reciente
+para **todos los conectados** fuera de boxes, aunque todavía no aparezcan en
+`Field.samples()` o en `speeds`. El adaptador entrega el roster de ACSP; el grabador
+lo conserva como argumento `connected`. El modo estricto usa la exención corta de
+boxes (`PIT_EXEMPT_FOR`). El monitor y los cruces añaden la comprobación de coches
+lentos respecto a la mediana; los contactos recientes también reinician la ventana.
 
-El verde manual cancela todos los contadores. Una nueva VSC/FCY los reinicia,
-incluso si sustituye otra neutralización. Las salidas detrás de SC físico conservan su procedimiento; el verde virtual
+Con pista limpia en cada cruce y `green_clear_s` segundos continuos limpios, se
+anuncia `two` («DOS PARA VERDE / TWO TO GREEN») desde
+`green_after_laps - 1` vueltas completas; en el siguiente cruce válido se anuncia
+`one` («UNA PARA VERDE / ONE TO GREEN»). El verde llega en otro cruce posterior,
+nunca en el del aviso «una». Con los valores por defecto: parcial → vuelta 1 →
+vuelta 2 «dos» → vuelta 3 «una» → vuelta 4 verde. Una pista sucia retrasa el paso
+pendiente. Con `green_after_laps=1`, la primera oportunidad de «dos» es la primera
+vuelta completa. Los avisos usan `kind=flag` y el mismo `hold=togo` que el adaptador
+NASCAR: «una» sustituye «dos», y verde o entrega al director los retira.
+
+Se recomprueban telemetría, parados, lentos e implicados **en el cruce que daría
+verde**, además de la ventana continua. Cualquier obstáculo retiene el verde y
+guarda `green_held`, con `stopped`, `slow`, `involved`, `missing` y el estado del
+intervalo. No basta con haber estado limpio al anunciar «dos» o «una».
+
+Si se alcanza `green_after_laps + green_max_extra_laps` sin completar el verde,
+o transcurren `green_max_wait_s` desde el inicio (600 s por defecto, rango
+60–1800), se registra `auto_green_extension`, se emite **un** aviso `warn` y el
+verde queda exclusivamente en manos del director. El límite temporal se comprueba
+en el monitor aun sin cruces ni líder válido. En el cruce del límite de vueltas
+solo se permite verde si la secuencia ya llegó a «una» y la pista sigue limpia;
+el límite de tiempo entrega al director antes de evaluar el cruce. Nunca se
+fuerza verde ni se recupera el automatismo después de esa entrega.
+
+`auto_green_notice` audita `two`/`one`/`warn`. En `shadow`, los avisos y el verde
+hipotéticos quedan en `autoflags.log` y auditoría (`executed=false`), sin bandera
+ni notices visibles; tras simular verde no se simula una entrega posterior.
+El verde manual cancela los contadores. Una nueva VSC/FCY los reinicia, incluso
+si sustituye otra neutralización. `off` y el kill switch impiden avisos y verde.
+Las salidas detrás de SC físico conservan su procedimiento; el verde virtual
 entrega las acciones al adaptador NASCAR existente cuando ese motor está armado.
+
+## Fin de trompo (fase 3)
+
+La decisión `spin` existente es una entrada del historial de neutralización: no
+crea una bandera amarilla local ni un notice visible. Se conserva ese contrato.
+Cada decisión mantiene ahora un estado de cierre por slot/generación, propiedad
+de `RaceControl` durante la sesión. Se cierra cuando el coche supera
+`spin.resume_kmh` (30 km/h por defecto, rango 5–100), entra en boxes o es retirado
+(desconexión o sustitución del slot), y no hay ningún implicado reciente durante
+`spin.clear_s` continuos (5 s por defecto, rango 1–60). Para reanudar se exige
+telemetría fresca; una ausencia de datos de un conectado no demuestra retirada.
+Una interrupción de muestreo o un nuevo contacto reinicia ese intervalo.
+
+El cierre guarda `spin_cleared` con coche y motivo (`resumed`, `pits`, `retired`)
+y una entrada `close` en el historial; no inventa bandera ni aviso que retirar.
+Es una decisión sin actuación de bandera (`executed=false` también en live).
+`shadow` registra el mismo cierre sin efectos visibles. `off` y el kill switch
+pausan el cierre y reinician su intervalo. El monitor de peligro local que ya
+existe (`AutoFlags.danger`) conserva su ciclo de vida independiente.
+Los snapshots antiguos reciben los nuevos valores por defecto al validarlos.
+No se añaden rutas HTTP ni migraciones.
 
 ## Tope de sanciones automáticas
 
@@ -285,7 +338,7 @@ la prueba estructural exige clasificación y decorador para cada entrada.
 | add_penalty, clear_penalty | Excluidos: ledger manual de drive-through, no entrada de detectores; las sanciones automáticas se regeneran dentro de los jueces |
 | add_cuts | Excluido: contador independiente, no consumido por los jueces del campo; on_cuts |
 | audit | Excluido: salida; replay instala su colector |
-| without_pace_car, pace_car_state, caution_eta, grace_left, due, auto_for, auto_live, judging_continuously, delta_block, autoflags_view, give_back_peek, give_back_view, cuts_view, snapshot | Solo lectura/filtros; panel, hub y llamadas internas |
+| track_clear, without_pace_car, pace_car_state, caution_eta, grace_left, due, auto_for, auto_live, judging_continuously, delta_block, autoflags_view, give_back_peek, give_back_view, cuts_view, snapshot | Solo lectura/filtros; panel, hub y llamadas internas |
 
 Las asignaciones externas de reglas/kill switches/pace/configuración y formación
 se capturan en `context` antes de cada entrada; incluye `flag_modes` del monitor.

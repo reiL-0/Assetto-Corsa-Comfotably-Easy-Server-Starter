@@ -234,7 +234,7 @@ def incident_tick(now: float) -> None:
         out = _non_racing_guids(now)   # (the director and the caster are not racing: their stops are no incident)
         speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out}
         rc.neutralization_excluded = {i for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") in out}
-        prop, actions = rc.incident_step(speeds, inst.acsp.field, now)
+        prop, actions = rc.incident_step(speeds, inst.acsp.field, now, connected=set(inst.acsp.cars))
         if prop:
             who = ", ".join(_name(inst, c) for c in prop["cars"])
             _say(rc, f"{prop['text']}: {who}" + (" · AMARILLA AUTOMÁTICA" if rc.auto_yellow else ""), "flag")
@@ -661,7 +661,7 @@ def auto_green(server_id: int, rc, car: int) -> None:
     with _lock:
         if inst and rc.flag in ("vsc", "fcy"):
             speeds = {c: v for c, info in inst.acsp.cars.items() if (v := speed_kmh(info)) is not None}
-            rc.neutralization_clear_tick(inst.acsp.field.samples(), speeds, time.monotonic(), time.time())
+            rc.neutralization_clear_tick(inst.acsp.field.samples(), speeds, time.monotonic(), time.time(), connected=set(inst.acsp.cars))
         actions = rc.green_if_due(car, field=inst.acsp.field) if inst else None
     if actions is None:
         if rc.take_blocked_warning():

@@ -89,16 +89,16 @@ def test_pace_judge_and_auto_green_use_real_methods(monkeypatch):
     def feed(rc, field, clock):
         rc.neutralization_rule.update(green_after_laps=1, green_clear_s=1)
         rc.set_flag("vsc", 100, grace_s=3, now=1000, field=field)
-        for tick in range(17):
+        for tick in range(21):
             t = tick / 2
             clock[0] = t
             field.update(0, .1, now=t)
             field.progress[0] = 1 + t / 10
-            field.completed_laps[0] = 1 if t < 7 else 2
+            field.completed_laps[0] = 1 if t < 7 else int(t - 5)
             samples = field.samples()
             rc.incident_step({0: 150}, field, 1000 + t)
             rc.pace_tick(samples, {0: 150}, t, 1000 + t)
-            if t in (6, 7):
+            if t in (6, 7, 8, 9):
                 rc.green_if_due(0, field)
     events, rc = record_scenario(monkeypatch, feed)
     result = replay(events)

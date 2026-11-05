@@ -87,6 +87,8 @@ class SlowCarRule(_Strict):
 
 
 class SpinRule(_Strict):
+    resume_kmh: float = Field(default=30, ge=5, le=100)
+    clear_s: float = Field(default=5, ge=1, le=60)
     stopped_s: float = Field(default=5, ge=1, le=120)
 
 
@@ -110,6 +112,7 @@ class Neutralization(_Strict):
     max_auto_time_penalty_s: int = Field(default=10, ge=1, le=60)
     green_after_laps: int = Field(default=3, ge=1, le=10)
     green_clear_s: float = Field(default=15, ge=1, le=300)
+    green_max_wait_s: int = Field(default=600, ge=60, le=1800)
     green_max_extra_laps: int = Field(default=3, ge=0, le=10)
     slow_car: SlowCarRule = Field(default_factory=SlowCarRule)
     spin: SpinRule = Field(default_factory=SpinRule)

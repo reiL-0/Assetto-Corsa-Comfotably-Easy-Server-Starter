@@ -325,21 +325,24 @@ def test_green_after_full_leader_laps_and_continuous_clear_track(green_race, fla
     feed(1)
     assert feed(2, lap=6, crossing=True) is None
     feed(3, lap=6)
-    assert feed(4, lap=7, crossing=True) == []
+    assert feed(4, lap=7, crossing=True) is None
+    assert [n["text"] for n in rc.notices] == [f"{flag.upper()}: UNA PARA VERDE / ONE TO GREEN"]
+    feed(5, lap=7)
+    assert feed(6, lap=8, crossing=True) == []
     assert rc.flag == "green" and not rc.penalties
 
 
-def test_dirty_track_extends_then_warns_once_without_forcing_and_can_recover(green_race):
+def test_dirty_track_hands_off_once_without_forcing_even_after_recovery(green_race):
     rc, _field, feed = green_race
     for t in range(9):
         feed(t, lap=5 + t // 2, speed=0, crossing=t % 2 == 0)
     assert rc.flag == "vsc"
-    assert len(rc.notices) == 1 and "máximo" in rc.notices[0]["text"]
+    assert len(rc.notices) == 1 and "Máximo" in rc.notices[0]["text"]
     feed(9, lap=9)
     feed(10, lap=10, crossing=True)  # only one clear second
     feed(11, lap=10)
-    assert feed(12, lap=11, crossing=True) == []
-    assert rc.flag == "green"
+    assert feed(12, lap=11, crossing=True) is None
+    assert rc.flag == "vsc" and len(rc.notices) == 1
 
 
 @pytest.mark.parametrize("mode,killed", [("off", False), ("shadow", False), ("live", True)])
@@ -357,7 +360,7 @@ def test_green_shadow_off_and_kill_switch_emit_no_green(green_race, mode, killed
     decisions = [d for d in rc.autoflags.log if d.get("op") == "green"]
     assert len(decisions) == (1 if mode == "shadow" else 0)
     if decisions:
-        assert decisions[0]["lap"] == 7 and "vuelta 7" in decisions[0]["text"]
+        assert decisions[0]["lap"] == 8 and "vuelta 8" in decisions[0]["text"]
 
 
 def test_manual_green_cancels_and_new_neutralization_resets(green_race):
@@ -372,7 +375,9 @@ def test_manual_green_cancels_and_new_neutralization_resets(green_race):
     for t in range(4, 8):
         assert feed(t, lap=7 + (t - 4) // 2, crossing=t % 2 == 0) is None
     assert rc.flag == "fcy"
-    assert feed(8, lap=9, crossing=True) == []
+    assert feed(8, lap=9, crossing=True) is None
+    feed(9, lap=9)
+    assert feed(10, lap=10, crossing=True) == []
 
 
 def test_new_flag_while_active_restarts_lap_and_clear_counters(green_race):
@@ -385,7 +390,9 @@ def test_new_flag_while_active_restarts_lap_and_clear_counters(green_race):
     feed(4, lap=6)
     assert feed(5, lap=7, crossing=True) is None
     feed(6, lap=7)
-    assert feed(7, lap=8, crossing=True) == []
+    assert feed(7, lap=8, crossing=True) is None
+    feed(8, lap=8)
+    assert feed(9, lap=9, crossing=True) == []
 
 
 @pytest.mark.parametrize("bad", ["stale", "pit", "prestart", "no_leader", "follower", "epoch"])
@@ -443,7 +450,7 @@ def test_auto_green_adapter_uses_current_telemetry_and_announces_existing_green(
     say, actions = Mock(), Mock()
     monkeypatch.setattr(adapter, "_say", say)
     monkeypatch.setattr(adapter, "nascar_actions", actions)
-    for t in range(5):
+    for t in range(7):
         feed(t, lap=5 + t // 2)
         if t % 2 == 0:
             adapter.auto_green(42, rc, 1)
@@ -477,7 +484,7 @@ def test_virtual_green_still_applies_when_nascar_is_armed(green_race):
     from app.live.nascar import Nascar
     rc, _field, feed = green_race
     rc.nascar = Nascar(100)
-    for t in range(5):
+    for t in range(7):
         feed(t, lap=5 + t // 2, crossing=t % 2 == 0)
     assert rc.flag == "green"
 

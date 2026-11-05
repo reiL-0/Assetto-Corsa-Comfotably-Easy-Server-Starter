@@ -25,6 +25,7 @@ import threading
 import time
 from collections import deque
 from copy import deepcopy
+from typing import NamedTuple
 
 from app.live import (
     autoflags as flag_rules,
@@ -84,6 +85,17 @@ PIT_CLEAR = 6.0                  # s after a pit-lane report during which a stan
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
 
+class TrackClear(NamedTuple):
+    stopped: list[int]
+    involved: set[int]
+    missing: list[int]
+    slow: tuple[int, ...] = ()
+
+    @property
+    def clear(self):
+        return not self.stopped and not self.involved and not self.missing and not self.slow
+
+
 class RaceControl:
     def __init__(self, session_ref: object = None, clock=None) -> None:
         self.clock = clock or time
@@ -106,6 +118,7 @@ class RaceControl:
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
         self.neutralization_watch = NeutralizationWatch()
+        self._spins = {}  # session-owned local decisions; no local flag is emitted
         self._neutralization_flag = False
         self._neutralization_sc = False
         self._sc_cooldown_until = 0.0
@@ -154,6 +167,9 @@ class RaceControl:
         self._green_laps = -1  # first leader crossing is partial
         self._green_warned = self._green_logged = False
         self._green_crossing = None
+        self._green_stage = None
+        self._green_started = self.clock.monotonic()
+        self._green_speeds, self._green_connected = {}, set()
         self.legacy = False   # the pace is judged by the old single judgement at the end of the grace (set when a VSC / FCY starts with the kill switch `pace` on): never both judges in one flag
         self._samples: dict[int, deque] = {}   # car id -> (time, km/h) of the last few seconds
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
@@ -319,8 +335,72 @@ class RaceControl:
                 return None
             return self.set_flag("green", field=field)
 
+    def track_clear(self, speeds, pit_seen, now, *, pace_car=None, fresh=None, strict=False, connected=None):
+        """NASCAR's unchanged stopped/contact test; strict callers also require telemetry.
+
+        fresh is the set whose speed AND position are recent. connected must come
+        from the connection roster, not the subset that already has telemetry.
+        """
+        pits = {c for c, t in pit_seen.items() if now - t < (PIT_EXEMPT_FOR if strict else PIT_CLEAR)}
+        stopped = [c for c, v in speeds.items() if c != pace_car and v < STANDING and c not in pits]
+        involved = self.watch.recent_involved(now, INVOLVED_FOR)
+        missing = []
+        if strict:
+            missing = sorted(c for c in (connected if connected is not None else speeds)
+                             if c != pace_car and c not in pits
+                             and (fresh is None or c not in fresh or c not in speeds
+                                  or not math.isfinite(speeds[c])))
+        return TrackClear(stopped, involved, missing)
+
+    def _green_track(self, samples, speeds, connected, mono, now):
+        cars = set(connected) - self.neutralization_excluded - {self.pace_car}
+        fresh = {c for c, sample in samples.items()
+                 if 0 <= mono - sample.stamp <= self.neutralization_rule["stale_telemetry_s"]}
+        status = self.track_clear({c: v for c, v in speeds.items() if c in cars}, self._pit_seen, now,
+                                  pace_car=self.pace_car, fresh=fresh, strict=True, connected=cars)
+        track = cars - {c for c, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
+        stopped, slow = list(status.stopped), []
+        for c in track & fresh & speeds.keys():
+            v = speeds[c]
+            others = [speeds[k] for k in track & fresh & speeds.keys() if k != c
+                      and math.isfinite(speeds[k]) and speeds[k] >= MOVING_KMH]
+            pace = statistics.median(others) if others else 0
+            if not math.isfinite(v):
+                continue
+            if v <= STOP_KMH:
+                if c not in stopped:
+                    stopped.append(c)
+            elif pace and v < pace * self.neutralization_rule["slow_car"]["pace_ratio"]:
+                slow.append(c)
+        return status._replace(stopped=stopped, slow=tuple(sorted(slow)))
+
+    def _green_notice(self, verdict, now):
+        mode = self.neutralization_rule.get("mode")
+        texts = {
+            "two": "DOS PARA VERDE / TWO TO GREEN",
+            "one": "UNA PARA VERDE / ONE TO GREEN",
+            "warn": "Máximo de vueltas o tiempo: verde manual / Lap or time limit: director controls green",
+        }
+        text = f"{self.flag.upper()}: {texts[verdict]}"
+        self.audit("auto_green_notice", verdict=verdict, text=text, laps=self._green_laps, executed=mode == "live")
+        if mode == "live":
+            if verdict == "warn":
+                self.drop_hold("togo")
+            self.notify(text, "flag", hold="togo" if verdict != "warn" else None)
+        else:
+            self.autoflags.log.append({"op": verdict, "decision": verdict, "mode": mode,
+                                      "timestamp": now, "text": text})
+
+    def _green_handoff(self, now, reason):
+        if not self._green_warned:
+            self._green_warned = True
+            self.audit("auto_green_extension", laps=self._green_laps, reason=reason,
+                       director_notified=self.neutralization_rule.get("mode") == "live",
+                       executed=self.neutralization_rule.get("mode") == "live")
+            self._green_notice("warn", now)
+
     @fieldrec.capture(_lock)
-    def neutralization_clear_tick(self, samples, speeds, mono, now):
+    def neutralization_clear_tick(self, samples, speeds, mono, now, connected=None):
         """Monitor-owned freshness/clear interval; no I/O, shared with the lap callback under _lock.
 
         Any stopped/slow evidence interrupts the clear interval immediately (without
@@ -334,6 +414,12 @@ class RaceControl:
             if not active:
                 self._green_clear_since = self._green_last_look = None
                 return
+            self._green_speeds = dict(speeds)
+            self._green_connected = set(connected) if connected is not None else set(samples) | set(speeds)
+            if self._green_logged:
+                return
+            if mono - self._green_started >= rule.get("green_max_wait_s", 600):
+                self._green_handoff(now, "time_limit")
             age = rule["stale_telemetry_s"]
             cars = {c: s for c, s in samples.items() if c != self.pace_car and c not in self.neutralization_excluded}
             pits = {c for c, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
@@ -342,19 +428,9 @@ class RaceControl:
                     or not 0 <= mono - cars[leader].stamp <= age):
                 self._green_anchor = None
             track = set(cars) - pits
-            clear = bool(track)
-            stopped, slow = [], []
-            for c in track:
-                s, v = cars[c], speeds.get(c)
-                if (not 0 <= mono - s.stamp <= age or v is None or not math.isfinite(v)):
-                    clear = False
-                    continue
-                others = [speeds[k] for k in track if k != c and k in speeds
-                          and math.isfinite(speeds[k]) and speeds[k] >= MOVING_KMH]
-                pace = statistics.median(others) if others else 0
-                if v <= STOP_KMH or (pace and v < pace * rule["slow_car"]["pace_ratio"]):
-                    (stopped if v <= STOP_KMH else slow).append(c)
-                    clear = False
+            status = self._green_track(samples, speeds, self._green_connected, mono, now)
+            stopped, slow = status.stopped, list(status.slow)
+            clear = bool(track) and status.clear
             previous_clear = self._green_clear_since
             if self._green_last_look is None or mono - self._green_last_look > age:
                 self._green_clear_since = None
@@ -376,12 +452,16 @@ class RaceControl:
         """
         rule = self.neutralization_rule
         mode = rule.get("mode", "off")
-        if (mode == "off" or "neutralization" in self.auto_off or field is None
+        if (self._green_logged or mode == "off" or "neutralization" in self.auto_off or field is None
                 or self.formation or (self.session_ref or {}).get("session_type") != RACE_TYPE):
             return None
         mono, now = self.clock.monotonic(), self.clock.time()
         samples = {c: s for c, s in field.samples().items()
                    if c != self.pace_car and c not in self.neutralization_excluded}
+        if mono - self._green_started >= rule.get("green_max_wait_s", 600):
+            self._green_handoff(now, "time_limit")
+        if self._green_warned:
+            return None
         if not samples:
             self._green_anchor = None
             return None
@@ -394,7 +474,6 @@ class RaceControl:
             return None
         if car != leader:
             return None
-        # ponytail: if the leader goes silent without disconnecting, the lap count stops and no green or director notice follows (it fails towards no-green; the manual green still works). Add a "no leader data for N s" notice if staging shows it.
         identity = (leader, s.generation, s.epoch)
         completed = s.completed_laps
         if completed is None:
@@ -411,15 +490,25 @@ class RaceControl:
         self._green_laps += 1
         self.audit("auto_green_lap", car=car, laps=self._green_laps, clear_since=self._green_clear_since, rule=rule, executed=False)
         laps = self._green_laps
-        if laps < rule["green_after_laps"]:
-            return None
-        pits = {c for c, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
-        fresh = all(0 <= mono - sample.stamp <= rule["stale_telemetry_s"]
-                    for c, sample in samples.items() if c not in pits)
-        clear = (fresh and self._green_clear_since is not None and self._green_last_look is not None
+        status = self._green_track(samples, self._green_speeds, self._green_connected | set(samples), mono, now)
+        clear = (status.clear and self._green_clear_since is not None and self._green_last_look is not None
                  and 0 <= mono - self._green_last_look <= rule["stale_telemetry_s"]
                  and mono - self._green_clear_since >= rule["green_clear_s"])
-        if clear:
+        # Recheck the same criterion at EVERY crossing, especially the green itself.
+        if not clear:
+            self.audit("green_held", car=car, reason="track_not_clear", stopped=status.stopped,
+                       involved=sorted(status.involved), missing=status.missing, slow=status.slow,
+                       clear_since=self._green_clear_since, executed=False)
+            if laps >= rule["green_after_laps"] + rule["green_max_extra_laps"]:
+                self._green_handoff(now, "lap_limit")
+            return None
+        if self._green_stage is None and laps >= rule["green_after_laps"] - 1:
+            self._green_stage = "two"
+            self._green_notice("two", now)
+        elif self._green_stage == "two":
+            self._green_stage = "one"
+            self._green_notice("one", now)
+        elif self._green_stage == "one":
             if not self._green_logged:
                 self.audit("auto_green_decision", laps=laps, clear=clear, executed=mode == "live")
             if mode == "shadow":
@@ -430,15 +519,8 @@ class RaceControl:
                     self._green_logged = True
                 return None
             return self.set_flag("green", source="neutralization", field=field)
-        if laps >= rule["green_after_laps"] + rule["green_max_extra_laps"] and not self._green_warned:
-            self._green_warned = True
-            self.audit("auto_green_extension", laps=laps, clear=clear, director_notified=mode == "live", executed=mode == "live")
-            text = "La pista no está limpia tras el máximo de vueltas extra: se mantiene la neutralización"
-            if mode == "live":
-                self.notify(text, "flag")
-            else:
-                self.autoflags.log.append({"op": "green_wait", "decision": "wait", "mode": mode,
-                                          "timestamp": now, "laps": laps, "text": text})
+        if laps >= rule["green_after_laps"] + rule["green_max_extra_laps"]:
+            self._green_handoff(now, "lap_limit")
         return None
 
     @fieldrec.capture(_lock)
@@ -472,9 +554,8 @@ class RaceControl:
             if self.caution_laps < CAUTION_MIN_LAPS - 1:
                 log.info("caution lap %s/%s counted (car %s): too early for the automatic to go", self.caution_laps, CAUTION_MIN_LAPS, car)
                 return None
-            pits = {i for i, t in self._pit_seen.items() if now - t < PIT_CLEAR}
-            stopped = [i for i, v in speeds.items() if i != self.pace_car and v < STANDING and i not in pits]
-            involved = self.watch.recent_involved(now, INVOLVED_FOR)
+            status = self.track_clear(speeds, self._pit_seen, now, pace_car=self.pace_car)
+            stopped, involved = status.stopped, status.involved
             self.audit("caution_clear", laps=self.caution_laps, stopped=stopped, involved=sorted(involved), min_laps=CAUTION_MIN_LAPS, max_laps=CAUTION_MAX_LAPS, executed=False)
             log.info("caution lap %s counted (car %s): stopped=%s recent_involved=%s", self.caution_laps, car, stopped, bool(involved))
             if not stopped and not involved:
@@ -662,13 +743,13 @@ class RaceControl:
                         self.caution.pit_enter(car_id)
 
     @fieldrec.capture(_lock)
-    def incident_step(self, speeds: dict[int, float], field, now: float) -> tuple[dict | None, list[tuple]]:
+    def incident_step(self, speeds: dict[int, float], field, now: float, connected=None) -> tuple[dict | None, list[tuple]]:
         """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
         with _lock:
             rule = self.neutralization_rule
             mono = self.clock.monotonic()
             samples = field.samples()
-            self.neutralization_clear_tick(samples, speeds, mono, now)
+            self.neutralization_clear_tick(samples, speeds, mono, now, connected)
             if self.flag in CAUTION and mono - self._audit_last_status >= 5:
                 self.audit("neutralization_status", flag=self.flag, pacecar=self.pace_car_state(),
                            leader=max((c for c in samples if c != self.pace_car), key=lambda c: samples[c].progress, default=None),
@@ -688,8 +769,13 @@ class RaceControl:
                                kill_switch="neutralization" in self.auto_off, racing=racing, rule=rule,
                                telemetry_age_s={c: mono - samples[c].stamp for c in stale}, executed=False)
                     self._audit_gate = gate
+                self._spin_clear_tick(samples, speeds, in_pit, connected, mono, now, mode)
                 decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode})
                 if decision:
+                    if decision["kind"] == "spin":
+                        for c in decision["cars"]:
+                            sample = samples[c]
+                            self._spins[c] = {"generation": sample.generation, "since": None, "last": mono}
                     category = rule.get("category", "")
                     target = "local"
                     if decision["kind"] == "pileup":
@@ -737,6 +823,36 @@ class RaceControl:
             else:
                 self._bump()
             return prop, actions
+
+    def _spin_clear_tick(self, samples, speeds, in_pit, connected, mono, now, mode):
+        if mode == "off":
+            for state in self._spins.values():
+                state["since"] = None
+            return
+        rule = self.neutralization_rule
+        spin = rule["spin"]
+        roster = set(connected) if connected is not None else set(samples)
+        involved = self.track_clear({}, {}, now).involved
+        for car, state in list(self._spins.items()):
+            sample = samples.get(car)
+            retired = car not in roster or (sample is not None and sample.generation != state["generation"])
+            fresh = sample is not None and 0 <= mono - sample.stamp <= rule["stale_telemetry_s"]
+            recovered = retired or car in in_pit or (fresh and math.isfinite(speeds.get(car, float("nan")))
+                                                     and speeds[car] > spin.get("resume_kmh", 30))
+            if mono - state["last"] > rule["stale_telemetry_s"]:
+                state["since"] = None
+            state["last"] = mono
+            if not recovered or involved:
+                state["since"] = None
+                continue
+            if state["since"] is None:
+                state["since"] = mono
+            if mono - state["since"] >= spin.get("clear_s", 5):
+                self.audit("spin_cleared", car=car, reason="retired" if retired else "pits" if car in in_pit else "resumed",
+                           clear_s=spin.get("clear_s", 5), executed=False)
+                self.autoflags.log.append({"op": "close", "decision": "spin_cleared", "cars": [car],
+                                          "mode": mode, "timestamp": now})
+                del self._spins[car]
 
     @fieldrec.capture(_lock)
     def restart_plan(self, progress: dict[int, float], to_go: int = 1) -> tuple[list[int], list[int], set[int]] | None:
