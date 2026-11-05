@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import secrets
 import struct
 import time
@@ -20,6 +21,7 @@ from app import csp, metrics
 from app.config import settings
 from app.live.board import LiveBoard
 from app.live.field import Field
+from app.live.tracklen import TrackLength, lookup
 
 log = logging.getLogger("acmanager.acsp")
 
@@ -359,6 +361,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.winner_done = False   # the winner of this race has been announced
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
+        self.length = TrackLength()  # the track's length in metres (the blue flag and the danger warning say HOW FAR): from ui_track.json or estimated from the cars, app/live/tracklen.py
+        self._length_logged: float | None = None
         self.transport: asyncio.DatagramTransport | None = None
         self._hello: asyncio.Task | None = None
         self._claim_last: dict[int, float] = {}  # car_id -> monotonic time of the last automatic-token request answered (see `_claim_issue`)
@@ -394,6 +398,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                 else:
                     self.session = event
                     self.field.clear()
+                    self.length.reset()
+                    self._length_logged = None
+                    self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
                 self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None)
@@ -443,7 +450,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             from app.racecontrol import claim_stages   # the NASCAR stage order of the race that just ended becomes that result's own
             claim_stages(self.server_id, event["filename"])
         elif t == "new_connection":
-            self.field.drop(event["car_id"])   # (the slot may be a new driver: they start from their own position)
+            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
             if bans.is_banned(event["driver_guid"]):
@@ -453,7 +460,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
-            self.field.drop(event["car_id"])
+            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])
         elif t == "client_loaded":
             if self.on_client_loaded:
                 self.on_client_loaded(event["car_id"])
@@ -476,10 +483,41 @@ class ACSPClient(asyncio.DatagramProtocol):
         elif t == "car_update":
             self.cars.setdefault(event["car_id"], {}).update(event)
             d = self.board._by_car(event["car_id"])
-            self.field.update(event["car_id"], event["spline_pos"], d.laps if d else None)
+            cid, mono = event["car_id"], time.monotonic()
+            self.field.update(cid, event["spline_pos"], d.laps if d else None, mono)
+            v = event.get("velocity")
+            if self.length.configured is None and v and len(v) >= 3:   # (a configured length needs no estimate)
+                self.length.estimator.observe(cid, self.field.progress[cid], math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2), mono, self.field.epoch[cid], self.field.generation.get(cid, 0))
+                m = self.length.metres()
+                if m is not None and self._length_logged is None:
+                    self._length_logged = m
+                    log.info("track length for server %s: about %.0f m (%s)", self.server_id, m, self.length.source())
             self.trail.setdefault(event["car_id"], deque(maxlen=TRAIL)).append((time.time(), event["pos"], event["velocity"]))
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)
+
+    def _look_up_length(self, track: str | None, config: str | None) -> None:
+        """The track's own `ui_track.json`, read OFF the event loop (this runs in the datagram callback, on the loop that receives the UDP: a slow disk must not hold it up). The answer counts only if the
+        session is still the one that asked."""
+        token = self.session
+
+        def apply(m: float | None) -> None:
+            if m is not None and self.session is token:
+                self.length.configured = m
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:   # no loop (a test, a script): there is nothing to hold up
+            apply(lookup(track, config))
+            return
+        fut = loop.run_in_executor(None, lookup, track, config)
+
+        def done(f: "asyncio.Future[float | None]") -> None:
+            try:
+                apply(f.result())
+            except Exception:
+                log.exception("server %s: the track length could not be looked up", self.server_id)
+        fut.add_done_callback(done)
 
     def _claim_probe_on(self) -> bool:
         from app.config import settings   # (late, like the others here)
