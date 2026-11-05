@@ -620,7 +620,7 @@ class RaceControl:
 
     def autoflags_view(self) -> dict:
         with _lock:
-            return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:]}
+            return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:], "auto_off": sorted(self.auto_off)}
 
     def give_back_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
         """One look at the advantage gained off the track. -> the events of app/live/giveback.py (open / cleared / due); [] and nothing kept when this is not a race with the rule on."""

@@ -279,7 +279,7 @@ def autoflags_view(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
-    return rc.autoflags_view() if rc else {"blue": [], "danger": [], "unknown_length": False, "log": []}
+    return rc.autoflags_view() if rc else {"blue": [], "danger": [], "unknown_length": False, "log": [], "pace": [], "auto_off": []}
 
 
 @state_router.get("/race-state/auto")

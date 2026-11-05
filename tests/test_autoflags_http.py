@@ -66,3 +66,4 @@ def test_the_director_changes_the_pace_rules_of_a_running_vsc_over_http(live):
     assert _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 9}}).status_code == 422
     assert _client("reporter").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code in (401, 403)
     assert _client("steward").post(f"{url}/autoflags", json={"kind": "pace", "off": True}).json() == {"auto_off": ["pace"]}, "the kill switch of the pace judge"
+    assert _client("steward").get(f"{url}/autoflags").json()["auto_off"] == ["pace"], "the panel reads the switch back from the manager"
