@@ -25,6 +25,7 @@ import threading
 import time
 from collections import deque
 
+from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
 from app.live.giveback import GiveBack
 from app.live.incidents import Watch
@@ -73,6 +74,7 @@ class RaceControl:
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
+        self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
@@ -544,6 +546,18 @@ class RaceControl:
             self._samples = {}
             self._bump()
             return out
+
+    def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
+        """One look for the blue flag and the danger warning (shadow). `mono`: time.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
+        with _lock:
+            racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
+            in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
+            pc = self.pace_car
+            self.autoflags.step(mono, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit, length, racing)
+
+    def autoflags_view(self) -> dict:
+        with _lock:
+            return self.autoflags.view()
 
     def give_back_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
         """One look at the advantage gained off the track. -> the events of app/live/giveback.py (open / cleared / due); [] and nothing kept when this is not a race with the rule on."""

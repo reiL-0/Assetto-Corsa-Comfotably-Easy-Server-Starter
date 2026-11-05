@@ -224,6 +224,22 @@ def incident_tick(now: float) -> None:
             nascar_actions(inst.server_id, rc, actions)
 
 
+def autoflags_tick(now: float) -> None:
+    """The blue flag and the danger warning of every server in a race, in SHADOW (decided and written down, shown to nobody). The director and the caster are not racing."""
+    mono = time.monotonic()
+    for inst in supervisor.live():
+        if (inst.acsp.session or {}).get("session_type") != RACE_TYPE:
+            continue
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        if not rc:
+            continue
+        out = _non_racing_guids(now)
+        cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
+        speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
+        samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
+        rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
+
+
 def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
     """What used to go to the chat now goes on the screen of every hub (race-state `notices`): it arrives with the flag itself, so it can never come before it."""
     rc.notify(text, kind, to, hold=hold)
@@ -243,6 +259,15 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+
+
+@control_router.get("/autoflags")
+def autoflags_view(server_id: int, sess: SessionDep) -> dict:
+    """What the automatic blue flag and danger warning WOULD show (shadow: nobody sees them), and their last decisions: for the steward to judge them against the race before they go live."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
+    return rc.autoflags_view() if rc else {"blue": [], "danger": [], "unknown_length": False, "log": []}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -792,6 +817,7 @@ async def monitor_forever() -> None:
                 except Exception:   # noqa: BLE001 - kept and tried again; the loop must not stop
                     log.exception("give-back: %s penalties could not be saved, they will be tried again", len(batch))
             incident_tick(now)
+            autoflags_tick(now)
             pace_car_check()
             for server_id, violations in tick(now, live):
                 announce(server_id, violations)
