@@ -288,7 +288,7 @@ def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> d
     generation = inst.acsp.field.generation.get(slot, 0)   # (taken WITH the name check: if the slot changes hands during the database read below, the new driver's flags do not go to this request)
     modes = flag_modes_of(server_id) or {}   # (refreshes the cached modes here, in a request thread; a failed reading shows nothing live)
     rc = state_of(server_id, True, inst.acsp.session)
-    return {"auto": rc.auto_for(slot, generation, time.monotonic(), modes) if rc else None}
+    return {"auto": rc.auto_for(slot, generation, time.monotonic(), modes) if rc else None, "live": rc.auto_live(modes) if rc else []}
 
 
 class AutoOffIn(BaseModel):

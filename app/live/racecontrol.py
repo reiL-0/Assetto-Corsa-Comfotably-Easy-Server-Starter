@@ -568,6 +568,11 @@ class RaceControl:
                 return None
             return self.autoflags.for_slot(slot, generation, mono, live)
 
+    def auto_live(self, fresh_modes: dict | None = None) -> list[str]:
+        """The types a screen may be shown now (what `auto_for` would serve if there were something): the hub asks every second when this is not empty and rarely otherwise."""
+        with _lock:
+            return sorted(k for k, v in self.flag_modes.items() if v == "live" and k not in self.auto_off and (fresh_modes is None or fresh_modes.get(k) == "live"))
+
     def autoflags_view(self) -> dict:
         with _lock:
             return self.autoflags.view()
