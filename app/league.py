@@ -205,6 +205,7 @@ def _applied_rulebook(sess: Session, server_id: int, c: Championship | None):
 
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
+_NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
 _FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
@@ -213,7 +214,7 @@ CUT_RULE_TTL = 30.0
 def invalidate_rule_cache(server_id: int) -> None:
     """An applied session has a new snapshot; discard the previous session's rules."""
     with _cut_rule_lock:
-        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES):
+        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES):
             cache.pop(server_id, None)
 
 
@@ -298,6 +299,42 @@ def flag_modes_cached(server_id: int) -> dict | None:
 
 def flag_modes_stale(server_id: int) -> bool:
     hit = _FLAG_MODES.get(server_id)
+    return not hit or time.monotonic() - hit[0] >= CUT_RULE_TTL
+
+
+def neutralization_rule(server_id: int) -> dict:
+    """Applied neutralization thresholds and category, cached like flags; no event means off."""
+    hit = _NEUTRALIZATION_RULES.get(server_id)
+    if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    with _cut_rule_lock:
+        hit = _NEUTRALIZATION_RULES.get(server_id)
+        if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        modes = {"mode": "off"}
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            rb = _applied_rulebook(s, server_id, c)
+            if rb:
+                modes = rb.neutralization.model_dump()
+                server = s.get(Server, server_id)
+                modes["category"] = (server.session or {}).get("category", "") if server else ""
+        if len(_NEUTRALIZATION_RULES) > 64:
+            _NEUTRALIZATION_RULES.clear()
+        _NEUTRALIZATION_RULES[server_id] = (time.monotonic(), modes)
+        return modes
+
+
+def neutralization_rule_cached(server_id: int) -> dict | None:
+    """What `neutralization_rule` read last (no database, no waiting) or None when it is missing or old (3 x the TTL): the monitor then does NOT show anything live."""
+    hit = _NEUTRALIZATION_RULES.get(server_id)
+    return hit[1] if hit and time.monotonic() - hit[0] < 3 * CUT_RULE_TTL else None
+
+
+def neutralization_rule_stale(server_id: int) -> bool:
+    hit = _NEUTRALIZATION_RULES.get(server_id)
     return not hit or time.monotonic() - hit[0] >= CUT_RULE_TTL
 
 

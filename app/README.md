@@ -68,15 +68,34 @@ La sesión de un preset admite `nascar: {"total": int de 2 a 1000, "shares": [de
 
 ### Neutralización: configuración de backend
 
-`Rulebook.neutralization` es opcional y mantiene `schema_version: 1`. No activa detectores,
-escalada ni verde automático: `mode` admite off/shadow/live y su default es off.
+`Rulebook.neutralization` es opcional y mantiene `schema_version: 1`. `mode` admite off/shadow/live y su default es off. No implementa verde automático.
+Fuera de NASCAR, slow_car/spin aislados registran una decisión local; pileup escala a
+`mode_by_category[category]` o `default_mode` (VSC/FCY). La categoría opcional de
+`SessionIn.category` se conserva al aplicar el evento; vacía usa el default.
+El monitor lee el snapshot aplicado con el mismo caché/TTL de detectors.flags.
+Shadow escribe evidencia en `/race-control/autoflags` (`log`) sin bandera ni banners;
+live llama al set de bandera existente, a `pace_car_kmh` (120 km/h por defecto),
+con gracia, tolerancia, penalización y juez continuo existentes. El director puede
+desactivar la escalada con POST `/race-control/autoflags`,
+`{"kind":"neutralization","off":true}`. Los switches pace/pass conservan su contrato.
+NASCAR conserva su detector, propuestas y auto-yellow existentes.
 `default_mode` es VSC; `mode_by_category` admite hasta 100 categorías con VSC/FCY.
 Los valores por defecto son: green_after_laps=3 (1..10), green_clear_s=15 (1..300),
 green_max_extra_laps=3 (0..10), slow_car.pace_ratio=0.6 (0 < ratio < 1),
 slow_car.sustained_s=8 (1..120), spin.stopped_s=5 (1..120), pileup.cars=3 (2..50),
 pileup.window_s=10 (1..120), pileup.escalate_to=FCY, severe.cars=5 (2..50),
 severe.escalate_to=SC y stale_telemetry_s=1.5 (0 < segundos <= 10).
-SC y los umbrales solo se guardan en esta fase.
+Al alcanzar severe.cars se registra SC en shadow incluso en modo live, independientemente
+de pileup.cars: no se despliega SC.
+Solo los disparadores nuevos de neutralization descartan muestras más viejas que
+stale_telemetry_s, con mode distinto de off y sin su kill switch; los jueces existentes
+de ritmo, pase y devolución conservan sus reglas. Un hueco reinicia el tiempo sostenido,
+y reconectar/reanclar elimina el historial del coche.
+El rearme exige dos muestras frescas consecutivas fuera de slow/stopped. La recuperación
+no renueva la ventana del incidente ni repite pileups solapados dentro de ella.
+Pileup cuenta coches con slow_car/spin confirmado dentro de window_s; contactos
+por sí solos no disparan. pileup.escalate_to sigue siendo FCY en el esquema;
+la selección efectiva VSC/FCY la determina la categoría/default_mode.
 
 `session_for` copia el reglamento al aplicar un evento de liga. El JSON existente de
 `Server.session` conserva `rulebook_snapshot` (incluido schema_version), `rulebook_revision`

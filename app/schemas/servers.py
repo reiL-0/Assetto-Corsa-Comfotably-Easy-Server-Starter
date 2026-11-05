@@ -163,6 +163,7 @@ class SessionIn(BaseModel):
     restrictor: int = Field(default=0, ge=0, le=100)   # % for every slot whose own restrictor is 0, same rule
     random_skins: bool = False   # each open slot (and each entry with no skin) gets a random skin of its car instead of the pack's first
     car_setups: dict[str, str] = {}   # model -> uploaded setup name, locked on that model's open slots (the league's roster slots get it too)
+    category: str = Field(default="", max_length=64)  # applied event category for neutralization
     rulebook_revision: str | None = None  # SHA-256 of the applied document
     rulebook_league_id: int | None = None
     rulebook_snapshot: Rulebook | None = None  # versioned copy saved with the applied session

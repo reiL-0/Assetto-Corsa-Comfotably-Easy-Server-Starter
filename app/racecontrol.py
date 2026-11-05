@@ -216,11 +216,15 @@ def _non_racing_guids(now: float) -> frozenset:
 
 
 def incident_tick(now: float) -> None:
-    """Contacts and stopped cars of every server racing under NASCAR: a proposal for the director, or the yellow itself when the director asked for that."""
+    """Applied neutralization decisions, plus the existing NASCAR proposals."""
+    from app.league import neutralization_rule_cached
+
     for inst in supervisor.live():
-        rc = state_of(inst.server_id, True, inst.acsp.session)
-        if not rc or not rc.nascar:
+        rule = neutralization_rule_cached(inst.server_id) or {"mode": "off"}
+        rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off")
+        if not rc:
             continue
+        rc.neutralization_rule = rule
         out = _non_racing_guids(now)   # (the director and the caster are not racing: their stops are no incident)
         speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out}
         prop, actions = rc.incident_step(speeds, inst.acsp.field, now)
@@ -317,7 +321,7 @@ def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> d
 
 
 class AutoOffIn(BaseModel):
-    kind: Literal["blue", "danger", "pace", "pass"]
+    kind: Literal["blue", "danger", "pace", "pass", "neutralization"]
     off: bool
 
 
@@ -879,9 +883,12 @@ async def monitor_forever() -> None:
     while True:
         try:
             now = time.time()
-            live = [(i.server_id, i.acsp.cars) for i in supervisor.live()]
             finish_nascar(now)
             caution_tick(now)
+            from app.league import neutralization_rule, neutralization_rule_stale
+            for inst in supervisor.live():
+                if neutralization_rule_stale(inst.server_id):
+                    await asyncio.to_thread(neutralization_rule, inst.server_id)
             for sid in flag_modes_stale_servers():
                 await asyncio.to_thread(flag_modes_of, sid)
             for sid in give_back_stale_servers():
@@ -900,6 +907,7 @@ async def monitor_forever() -> None:
             incident_tick(now)
             autoflags_tick(now)
             pace_car_check()
+            live = [(inst.server_id, inst.acsp.cars) for inst in supervisor.live()]
             for server_id, violations in tick(now, live):
                 announce(server_id, violations)
         except Exception:   # a bug here must not stop the loop: the next tick tries again

@@ -102,7 +102,7 @@ class SevereRule(_Strict):
 
 
 class Neutralization(_Strict):
-    """Configuration only. Missing categories use VSC; off never enables automation."""
+    """Automatic incident escalation. Missing categories use default_mode; off does nothing."""
 
     mode: Literal["off", "shadow", "live"] = "off"
     default_mode: Literal["VSC", "FCY"] = "VSC"

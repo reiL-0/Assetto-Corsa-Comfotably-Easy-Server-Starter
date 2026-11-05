@@ -28,7 +28,7 @@ from collections import deque
 from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
 from app.live.giveback import GiveBack
-from app.live.incidents import Watch
+from app.live.incidents import NeutralizationWatch, Watch
 from app.live.nopass import PassJudge
 from app.live.pacejudge import PaceJudge
 from app.live.sectors import DeltaJudge, RefLaps, SectorClock
@@ -85,6 +85,8 @@ class RaceControl:
         self.passjudge = PassJudge()            # no overtaking under a VSC / FCY (app/live/nopass.py): give the place back or the flag's penalty
         self.pacejudge = PaceJudge()            # the continuous judge of a VSC / FCY's pace (app/live/pacejudge.py), SHADOW only for now: it writes down who it WOULD penalise; `evaluate` below still decides
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
+        self.neutralization_rule = {"mode": "off"}
+        self.neutralization_watch = NeutralizationWatch()
         self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
         self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
@@ -457,6 +459,27 @@ class RaceControl:
     def incident_step(self, speeds: dict[int, float], field, now: float) -> tuple[dict | None, list[tuple]]:
         """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
         with _lock:
+            rule = self.neutralization_rule
+            if not self.nascar:
+                mode = "off" if "neutralization" in self.auto_off else rule.get("mode", "off")
+                mono = time.monotonic()
+                samples = {c: s for c, s in field.samples().items() if c != self.pace_car}
+                in_pit = {c for c, t in self._pit_seen.items() if now - t < PIT_RECENT}
+                racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white") and not self.formation
+                decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode})
+                if decision:
+                    category = rule.get("category", "")
+                    target = "local"
+                    if decision["kind"] == "pileup":
+                        target = rule["mode_by_category"].get(category, rule.get("default_mode", rule["pileup"]["escalate_to"]))
+                    if len(decision["events"]) >= rule["severe"]["cars"]:
+                        target = "SC"
+                        decision["cars"] = sorted(decision["events"])
+                    self.autoflags.log.append({**decision, "op": "open", "decision": target, "mode": "shadow" if target == "SC" else mode,
+                                              "state": self.flag, "timestamp": now, "category": category})
+                    if mode == "live" and target in ("VSC", "FCY"):
+                        return None, self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field)
+                return None, []
             racing = bool(self.nascar and self.nascar.phase in ("racing", "ot_run") and self.nascar.laps >= 1 and self.flag in ("green", "white"))
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             prop = self.watch.step(now, {c: v for c, v in speeds.items() if c != self.pace_car}, in_pit, racing)

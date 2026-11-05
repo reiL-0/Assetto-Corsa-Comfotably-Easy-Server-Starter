@@ -11,6 +11,9 @@ and a contact is reported 1.5-2.5 s late: these numbers are first guesses to tun
 
 from __future__ import annotations
 
+import math
+import statistics
+
 CONTACT_KMH = 20.0   # a contact slower than this does not make a car 'involved'
 STOP_KMH, STOP_S = 5.0, 6.0
 MOVING_KMH = 30.0    # a car that has been this fast is racing: the one that never was (a spectator, a car in the garage) is not a stopped car
@@ -116,3 +119,79 @@ class Watch:
 
     def recent_involved(self, now: float, within: float) -> set[int]:
         return {c for c, t in self.involved.items() if now - t < within}
+
+
+RECOVERY_TICKS = 2  # consecutive fresh recovered samples before a neutralization car rearms
+
+
+class NeutralizationWatch:
+    """Session-owned threshold state; only fresh samples advance sustained timers."""
+
+    def __init__(self):
+        self.state = {}  # car -> [identity, last stamp, was moving, stopped since, slow since]
+        self.events = {}  # car -> (confirmed at, kind), bounded by current slots and window
+        self.flagged = set()
+        self.recovered = {}  # car -> consecutive fresh recovered samples
+        self.last_pileup = None  # (time, involved cars), suppress overlapping incidents within the window
+
+    def step(self, now, samples, speeds, in_pit, racing, rule):
+        if not racing or rule.get("mode", "off") == "off":
+            self.state.clear(); self.events.clear(); self.flagged.clear()
+            self.recovered.clear(); self.last_pileup = None
+            return None
+        fresh = {c: s for c, s in samples.items() if c not in in_pit
+                 and 0 <= now - s.stamp <= rule["stale_telemetry_s"]
+                 and c in speeds and math.isfinite(speeds[c])}
+        for c in list(self.state):
+            if c not in fresh:
+                self.state.pop(c); self.events.pop(c, None); self.flagged.discard(c)
+                self.recovered.pop(c, None)
+        new = []
+        for c, sample in fresh.items():
+            v = speeds[c]
+            identity = (sample.generation, sample.epoch)
+            st = self.state.get(c)
+            if st is None or st[0] != identity or sample.stamp - st[1] > rule["stale_telemetry_s"]:
+                st = [identity, sample.stamp, False, None, None]
+                self.events.pop(c, None); self.flagged.discard(c)
+                self.recovered.pop(c, None)
+                self.state[c] = st
+            elif sample.stamp <= st[1]:
+                continue
+            others = [speeds[k] for k in fresh if k != c and speeds[k] >= MOVING_KMH]
+            pace = statistics.median(others) if others else 0
+            if v >= MOVING_KMH:
+                st[2] = True
+            stopped = st[2] and v <= STOP_KMH
+            slow = st[2] and v > STOP_KMH and pace > 0 and v < pace * rule["slow_car"]["pace_ratio"]
+            for idx, active in ((3, stopped), (4, slow)):
+                st[idx] = (sample.stamp if st[idx] is None else st[idx]) if active else None
+            st[1] = sample.stamp
+            kind = "spin" if st[3] is not None and sample.stamp - st[3] >= rule["spin"]["stopped_s"] else (
+                "slow_car" if st[4] is not None and sample.stamp - st[4] >= rule["slow_car"]["sustained_s"] else None)
+            if not stopped and not slow:
+                self.recovered[c] = min(RECOVERY_TICKS, self.recovered.get(c, 0) + 1)
+                if self.recovered[c] >= RECOVERY_TICKS:
+                    self.flagged.discard(c)
+            else:
+                self.recovered.pop(c, None)
+            if kind and c not in self.flagged:
+                self.flagged.add(c)
+                # Retain the original evidence: recovery cannot restart an incident's window.
+                if c not in self.events or now - self.events[c][0] > rule["pileup"]["window_s"]:
+                    self.events[c] = (now, kind)
+                    new.append(c)
+        self.events = {c: e for c, e in self.events.items() if c in fresh and now - e[0] <= rule["pileup"]["window_s"]}
+        if not new:
+            return None
+        cars = sorted(self.events)
+        pileup = len(cars) >= rule["pileup"]["cars"]
+        if pileup:
+            if (self.last_pileup is not None
+                    and now - self.last_pileup[0] <= rule["pileup"]["window_s"]
+                    and self.last_pileup[1].intersection(cars)):
+                return None
+            self.last_pileup = (now, set(cars))
+        return {"kind": "pileup" if pileup else self.events[new[0]][1], "cars": cars if pileup else new,
+                "speeds": {c: speeds[c] for c in cars}, "window_s": rule["pileup"]["window_s"], "t": now,
+                "events": {c: {"t": self.events[c][0], "kind": self.events[c][1]} for c in cars}}
