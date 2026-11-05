@@ -107,6 +107,7 @@ class RaceControl:
         self.pace_car_kmh = PACE_CAR_KMH
         self.pace_out = False              # the pace car came out under a yellow: it keeps leading if that yellow turns into a VSC/FCY (a VSC/FCY from green does not bring it out)
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
+        self.pace_park = False             # green with the pace car out, without "to go": return only, no restart procedure
         self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
         self.pace_car_pitted = False       # ...and its hub has said it is in the pit lane (the green waits for it)
         self.go_early = 0                  # crossings of the restart leader that came before go_armed (a second one brings the green anyway: if the progress never showed it mid-lap, the green must not wait for ever)
@@ -174,6 +175,10 @@ class RaceControl:
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
+            if flag == "yellow":
+                self.pace_park = False
+            elif flag == "green" and self.pace_out and not self.pace_car_in:
+                self.pace_park = True
             self.pace_out = flag == "yellow" or (self.pace_out and flag in SLOWING)
             if flag not in CAUTION:
                 self.caution = None
@@ -200,7 +205,7 @@ class RaceControl:
         """What the pace car's own hub reads: wait in the pits / lead the field / come in."""
         if self.pace_car is None:
             return None
-        mode = "in" if self.pace_car_in else ("lead" if self.pace_out else "wait")   # only a plain yellow brings the pace car out (a VSC/FCY from green sets its own pace and it stays in the pits); after "to go" it stays «in» through the green (it still has to park); a new caution or a new pace car resets it
+        mode = "in" if self.pace_car_in or self.pace_park else ("lead" if self.pace_out else "wait")   # only yellow deploys it; green returns it even without "to go", without arming the restart
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
 
     def _end_formation(self) -> None:
@@ -466,6 +471,7 @@ class RaceControl:
         with _lock:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid   # (a driver named but not connected: no slot yet, the guid stays)
             self.pace_car_in = self.pace_car_pitted = self.one_more = self.pace_out = False
+            self.pace_park = False
             self.blocked_crossings = 0
             if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
                 self._end_formation()
@@ -575,6 +581,8 @@ class RaceControl:
         if in_pit:
             with _lock:
                 self._pit_seen[car_id] = time.time() if now is None else now
+                # Keep the return command through parking: pit-lane entry is not
+                # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
                     if not self.pace_car_pitted:
                         log.info("pace car %s reported the pit lane after to go", car_id)

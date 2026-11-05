@@ -78,3 +78,4 @@ incidente y ventana. El kill switch bloquea el despliegue y los pasos automátic
 de relanzamiento de este SC (también al cambiar mode fuera de live); el director
 conserva el control manual. Las pruebas usan dobles, no validan conducción real
 dentro de Assetto Corsa.
+Un verde con el pace car fuera y sin «to go» mantiene `pacecar.mode=in` al entrar en boxes y después de aparcar, para que el hub complete el retorno y conserve el freno. Un nuevo yellow, `set_pace_car`, cambio de sesión/nueva carrera o reset de estado cancela este retorno independiente, sin activar el relanzamiento NASCAR.

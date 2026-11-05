@@ -606,6 +606,75 @@ def test_kill_switch_stops_automatic_sc_restart(monkeypatch):
     assert rc.flag == "yellow" and not rc.pace_car_in
     rc.set_flag("green")
     assert rc.flag == "green" and rc.caution is None
+    assert rc.pace_car_state()["mode"] == "in" and not rc.pace_car_in
+
+
+@pytest.mark.parametrize("nascar", [False, True])
+@pytest.mark.parametrize("via", ["yellow", "vsc", "fcy"])
+def test_manual_green_returns_pace_car_without_restart(nascar, via):
+    rc = RaceControl({"session_type": 3})
+    if nascar:
+        rc.configure_nascar(70)
+    rc.set_pace_car(4)
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 1: .4, 4: .6}
+    rc.set_flag("yellow", field=field)
+    if via != "yellow":
+        rc.set_flag(via, 80, field=field)
+    laps = rc.caution_laps
+    rc.set_flag("green", field=field)
+    assert rc.pace_car_state() == {"car": 4, "kmh": 120, "mode": "in"}
+    assert not rc.pace_car_in and not rc.pace_car_pitted and not rc.pace_out
+    assert rc.caution is None and rc.caution_laps == laps
+    rc.set_flag("green")  # repeated green must not abandon the returning car
+    rc.report_pit(0, True)
+    rc.report_pit(4, False)
+    assert rc.pace_car_state()["mode"] == "in"
+    rc.report_pit(4, True)
+    assert rc.pace_car_state()["mode"] == "in"
+    assert not rc.pace_car_in and not rc.pace_car_pitted
+
+
+@pytest.mark.parametrize("reset", ["yellow", "set_pace_car"])
+def test_manual_green_return_is_cancelled_by_new_deployment(reset):
+    rc = RaceControl()
+    rc.set_pace_car(4)
+    rc.set_flag("yellow")
+    rc.set_flag("green")
+    assert rc.pace_car_state()["mode"] == "in"
+    if reset == "yellow":
+        rc.set_flag("yellow")
+        assert rc.pace_car_state()["mode"] == "lead"
+    else:
+        rc.set_pace_car(5)
+        assert rc.pace_car_state()["mode"] == "wait"
+
+
+def test_manual_green_keeps_pace_car_returning_after_pit_reports(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("app.live.racecontrol.time.time", lambda: clock[0])
+    rc = RaceControl()
+    rc.set_pace_car(4)
+    rc.set_flag("yellow")
+    assert rc.pace_out
+    rc.set_flag("green")
+    assert rc.pace_car_state()["mode"] == "in"
+    rc.report_pit(4, True)
+    assert rc.pace_car_state()["mode"] == "in"
+    clock[0] += 120
+    assert rc.pace_car_state()["mode"] == "in"
+    rc.report_pit(4, True)
+    assert rc.pace_car_state()["mode"] == "in"
+    assert not rc.pace_car_in and not rc.pace_car_pitted
+    rc.set_flag("yellow")
+    assert rc.pace_car_state()["mode"] == "lead"
+
+
+def test_manual_green_without_pace_car():
+    rc = RaceControl()
+    rc.set_flag("yellow")
+    rc.set_flag("green")
+    assert rc.pace_car_state() is None
 
 
 def test_automatic_sc_uses_existing_to_go_and_green(monkeypatch):
@@ -624,6 +693,7 @@ def test_automatic_sc_uses_existing_to_go_and_green(monkeypatch):
     rc.report_pit(4, True, now=1105)
     assert rc.green_if_due(leader) == []
     assert rc.flag == "green" and rc.caution is None
+    assert rc.pace_car_state()["mode"] == "in" and rc.pace_car_in
 
 
 @pytest.mark.parametrize("flag", ["vsc", "fcy"])
