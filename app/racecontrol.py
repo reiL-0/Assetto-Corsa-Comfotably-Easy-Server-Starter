@@ -246,6 +246,21 @@ def autoflags_tick(now: float) -> None:
         rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
+        for d in rc.pass_tick(samples, speeds, mono, now):
+            if not d["applied"]:
+                continue   # (the director's kill switch: only logged)
+            who = _name(inst, d["car"])
+            if d["kind"] == "pass_open":
+                names = ", ".join(_name(inst, c) for c in d["passed"])
+                _say(rc, f"{who}: adelantó bajo {d['flag'].upper()} · devuelve la posición a {names}", "flag")
+                _say(rc, f"ADELANTASTE BAJO {d['flag'].upper()}: devuelve la posición a {names} · {d['seconds']} s", "flag", d["car"])
+            elif d["kind"] == "pass_cleared":
+                _say(rc, f"{who}: devolvió la posición", "info")
+            else:
+                pen = d["pen"]
+                _say(rc, f"{who}: no devolvió la posición bajo {d['flag'].upper()}" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
+                if pen["kind"] == "pits":
+                    _say(rc, f"PENALIZACIÓN: adelantar bajo {d['flag'].upper()} · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
         for d in rc.pace_tick(samples, speeds, mono, now, models):
             if d["applied"]:   # (what the judge did, as it was when it did it: not re-read after the lock)
                 pen = d["pen"]
@@ -302,7 +317,7 @@ def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> d
 
 
 class AutoOffIn(BaseModel):
-    kind: Literal["blue", "danger", "pace"]
+    kind: Literal["blue", "danger", "pace", "pass"]
     off: bool
 
 
