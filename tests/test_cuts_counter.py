@@ -42,7 +42,7 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     assert league.cut_rule(sid) is None, "no event running"
     _league_event(sid, RULE)
     league._CUT_RULES.clear()
-    assert league.cut_rule(sid) == {"max": 0, "per": 1, "step": 5, "cap": 15}, "the older field has no free cuts"
+    assert league.cut_rule(sid) == {"max": 0, "per": 1, "step": 5, "cap": 10}, "the older field has no free cuts"
     with Session(engine) as s:   # a rulebook's own rule: 5 cuts are free
         for c in s.exec(__import__("sqlmodel").select(Championship)).all():
             if c.auto_rules == RULE:
@@ -50,7 +50,7 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
                 s.add(c)
         s.commit()
     league._CUT_RULES.clear()
-    assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 15}
+    assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 10}
     sid2 = api.post(f"{V}/servers", json={"name": "cuts-no-rule"}).json()["id"]
     _league_event(sid2, None)
     league._CUT_RULES.clear()
@@ -58,7 +58,7 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     league._CUT_RULES[sid] = (time.time(), {"max": 9, "per": 2, "step": 3, "cap": 9})
     assert league.cut_rule(sid) == {"max": 9, "per": 2, "step": 3, "cap": 9}, "read at most every CUT_RULE_TTL s"
     league._CUT_RULES[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"max": 9, "per": 2, "step": 3, "cap": 9})
-    assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 15}, "and read again after it"
+    assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 10}, "and read again after it"
 
 
 def test_the_counter_counts_a_race_only_shows_the_larger_count_and_starts_again_with_each_session(live, monkeypatch):
@@ -120,5 +120,5 @@ def test_stale_rules_are_read_once_by_concurrent_requests_and_the_snapshot_never
     ts = [threading.Thread(target=lambda: out.append(league.cut_rule(sid))) for _ in range(8)]
     [t.start() for t in ts]
     [t.join() for t in ts]
-    assert len(reads) == 1 and all(r == {"max": 0, "per": 1, "step": 5, "cap": 15} for r in out), "eight requests with a stale cache: one read, the same answer"
-    assert live_rc.cut_rule_peek(sid) == {"max": 0, "per": 1, "step": 5, "cap": 15} and len(reads) == 1, "the snapshot sees it from the cache"
+    assert len(reads) == 1 and all(r == {"max": 0, "per": 1, "step": 5, "cap": 10} for r in out), "eight requests with a stale cache: one read, the same answer"
+    assert live_rc.cut_rule_peek(sid) == {"max": 0, "per": 1, "step": 5, "cap": 10} and len(reads) == 1, "the snapshot sees it from the cache"

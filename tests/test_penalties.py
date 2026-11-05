@@ -3,6 +3,7 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from conftest import ADMIN
 from fastapi.testclient import TestClient
 from sqlmodel import Session
@@ -223,7 +224,7 @@ def test_cut_notices_are_warnings_the_director_confirms_dismisses_or_closes():
     f = _result(sid, "cuts.json")
     data = json.loads(f.read_text())
     for lap in data["Laps"]:
-        lap["Cuts"] = {"A": 3, "B": 1, "D": 1}.get(lap["DriverName"], 0)   # A: 5 laps x 3 = 15 cuts (capped 12 s), B: 5 cuts = 5 s, D: 4 laps x 1 = 4 (nothing), C: none
+        lap["Cuts"] = {"A": 3, "B": 1, "D": 1}.get(lap["DriverName"], 0)   # A: 5 laps x 3 = 15 cuts (cuts cap 12 s, automatic cap 10 s), B: 5 cuts = 5 s, D: 4 laps x 1 = 4 (nothing), C: none
     data["Laps"].append({"DriverName": "C", "DriverGuid": C, "CarId": 2, "LapTime": 0, "Cuts": 50})   # an unfinished lap does not count
     f.write_text(json.dumps(data))
     parsed = parse_result_file(f)
@@ -240,10 +241,10 @@ def test_cut_notices_are_warnings_the_director_confirms_dismisses_or_closes():
     assert steward.get(url).json() == []   # a warning is not a penalty: the result is untouched
     got = steward.get(f"{url}/notices").json()
     by = {n["driver_guid"]: n for n in got["notices"]}
-    assert got["closed"] is False and by[A]["value"] == 12 and by[A]["penalty_kind"] == "time" and by[B]["value"] == 5 and by[A]["reason"] == "Cortes de pista: 15"
+    assert got["closed"] is False and by[A]["value"] == 10 and by[A]["penalty_kind"] == "time" and by[B]["value"] == 5 and by[A]["reason"] == "Cortes de pista: 15 (recortada de 12 a 10 s)"
     # confirm A: it becomes a penalty under the steward's name and the warning is gone; a second click finds nothing
     r = steward.post(f"{url}/notices/{by[A]['id']}/confirm")
-    assert r.status_code == 201 and r.json()["kind"] == "time" and r.json()["value"] == 12 and "confirmado" in r.json()["reason"]
+    assert r.status_code == 201 and r.json()["kind"] == "time" and r.json()["value"] == 10 and "confirmado" in r.json()["reason"]
     assert steward.post(f"{url}/notices/{by[A]['id']}/confirm").status_code == 404
     assert [p["driver_guid"] for p in steward.get(url).json()] == [A]
     # below steward cannot decide
@@ -296,3 +297,89 @@ def test_archiving_a_league_removes_its_notices_and_closing_marks():
     assert api.post(f"{V}/championships/{cid}/archive", json={"confirm": "Limpia"}).status_code == 200
     with Session(engine) as s:
         assert s.query(Notice).filter_by(server_id=sid).count() == 0 and s.query(ResultClose).filter_by(server_id=sid).count() == 0
+
+
+@pytest.mark.parametrize("cap", [10, 17, 60])
+def test_auto_time_cap_uses_applied_snapshot_and_preserves_manual_sanctions(cap):
+    from sqlmodel import select
+
+    from app.models import Championship, GiveBackDue, Notice, Server
+    from app.stewards.auto import cut_notices, give_back_penalties
+    sid, filename = _sid_and_file(f"cap-{cap}.json")
+    parsed = parse_result_file(_result(sid, filename))
+    for lap in parsed["laps"]:
+        lap["cuts"] = 30 if lap["driver_guid"] == A else 0
+    with Session(engine) as sess:
+        server = sess.get(Server, sid)
+        server.session = {**(server.session or {}), "rulebook_snapshot": {
+            "neutralization": {"max_auto_time_penalty_s": cap},
+            "detectors": {"cuts": {"cuts_per_step": 1, "step_seconds": 30, "max_seconds": 30}}}}
+        sess.add(server)
+        league = Championship(name="Edited since application", rulebook={
+            "neutralization": {"max_auto_time_penalty_s": 1},
+            "detectors": {"give_back": {"enabled": False}}})
+        sess.add(league)
+        sess.flush()
+        server.session = {**server.session, "rulebook_league_id": league.id}
+        sess.add(server)
+        sess.add(GiveBackDue(server_id=sid, driver_guid=A, seconds=30, ts=100, created_by="auto"))
+        sess.add(GiveBackDue(server_id=sid, driver_guid=B, seconds=30, ts=100, created_by="director"))
+        sess.commit()
+        assert give_back_penalties(sess, league, sid, filename, parsed, 200, 0) == 2
+        assert cut_notices(sess, league, sid, filename, parsed) == 1
+        sess.commit()
+        penalties = {p.driver_guid: p for p in sess.exec(select(Penalty).where(Penalty.server_id == sid)).all()}
+        assert penalties[A].value == min(30, cap) * 1000
+        assert penalties[B].value == 30000 and penalties[B].created_by == "director"
+        assert "recortada" not in penalties[B].reason
+        notice = sess.exec(select(Notice).where(Notice.server_id == sid)).one()
+        assert notice.value == min(30, cap) * 1000
+        if cap < 30:
+            assert f"recortada de 30 a {cap} s" in penalties[A].reason
+            assert f"recortada de 30 a {cap} s" in notice.reason
+        else:
+            assert "recortada" not in penalties[A].reason
+        assert give_back_penalties(sess, league, sid, filename, parsed, 200, 0) == 0
+        assert cut_notices(sess, league, sid, filename, parsed) == 0
+    # Explicit director time sanction is always 30, even with an applied cap of 10.
+    url = f"{V}/servers/{sid}/results/{filename}/penalties"
+    response = api.post(url, json={"driver_guid": C, "kind": "time", "value": 30, "reason": "Director"})
+    assert response.status_code == 201 and response.json()["value"] == 30
+    notices = api.get(f"{url}/notices").json()["notices"]
+    confirmed = api.post(f"{url}/notices/{notices[0]['id']}/confirm")
+    assert confirmed.status_code == 201 and confirmed.json()["value"] == min(30, cap)
+    if cap < 30:
+        assert f"recortada de 30 a {cap} s" in confirmed.json()["reason"]
+
+
+@pytest.mark.parametrize("same_league", [False, True])
+def test_result_rules_belong_to_its_league(same_league):
+    from sqlmodel import select
+
+    from app.models import Championship, GiveBackDue, Notice, Server
+    from app.stewards.auto import cut_notices, give_back_penalties
+    sid, filename = _sid_and_file("league-snapshot.json")
+    parsed = parse_result_file(_result(sid, filename))
+    for lap in parsed["laps"]:
+        lap["cuts"] = 30 if lap["driver_guid"] == A else 0
+    with Session(engine) as sess:
+        league = Championship(name="Result X", rulebook={
+            "neutralization": {"max_auto_time_penalty_s": 7},
+            "detectors": {"cuts": {"cuts_per_step": 1, "step_seconds": 30, "max_seconds": 30}}})
+        other = Championship(name="Current Y")
+        sess.add(league)
+        sess.add(other)
+        sess.commit()
+        server = sess.get(Server, sid)
+        server.session = {"rulebook_league_id": league.id if same_league else other.id,
+            "rulebook_snapshot": {"neutralization": {"max_auto_time_penalty_s": 2},
+                "detectors": {"give_back": {"enabled": False}}}}
+        sess.add(server)
+        sess.add(GiveBackDue(server_id=sid, driver_guid=A, seconds=30, ts=100, created_by="auto"))
+        sess.commit()
+        assert give_back_penalties(sess, league, sid, filename, parsed, 200, 0) == (0 if same_league else 1)
+        assert cut_notices(sess, league, sid, filename, parsed) == (0 if same_league else 1)
+        if not same_league:
+            sess.flush()
+            assert sess.exec(select(Notice).where(Notice.server_id == sid)).one().value == 7000
+            assert sess.exec(select(Penalty).where(Penalty.server_id == sid)).one().value == 7000

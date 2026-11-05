@@ -28,10 +28,13 @@ class Sample(NamedTuple):
     stamp: float       # time.monotonic() of its last update
     since: float       # time.monotonic() since which its progress has been continuous (the last re-anchoring)
 
+    completed_laps: int | None = None  # authoritative lap_completed leaderboard counter
+
 
 class Field:
     def __init__(self) -> None:
         self.progress: dict[int, float] = {}
+        self.completed_laps: dict[int, int] = {}
         self._spline: dict[int, float] = {}
         self.epoch: dict[int, int] = {}
         self.generation: dict[int, int] = {}   # survives drop(): that is what it counts
@@ -67,9 +70,10 @@ class Field:
 
     def samples(self) -> dict[int, Sample]:
         """Every car with its progress and how far it can be trusted. A copy; read it on the event loop that feeds the field (the monitor does), so that the cars are one coherent picture."""
-        return {c: Sample(p, self.epoch.get(c, 0), self.generation.get(c, 0), self.stamp.get(c, 0.0), self.since.get(c, 0.0)) for c, p in self.progress.items()}
+        return {c: Sample(p, self.epoch.get(c, 0), self.generation.get(c, 0), self.stamp.get(c, 0.0), self.since.get(c, 0.0), self.completed_laps.get(c)) for c, p in self.progress.items()}
 
     def drop(self, car_id: int) -> None:
+        self.completed_laps.pop(car_id, None)
         self.progress.pop(car_id, None)
         self._spline.pop(car_id, None)
         self.epoch.pop(car_id, None)
@@ -78,6 +82,7 @@ class Field:
         self.generation[car_id] = self.generation.get(car_id, 0) + 1   # (the slot may be a new driver)
 
     def clear(self) -> None:
+        self.completed_laps.clear()
         self.progress.clear()
         self._spline.clear()
         self.epoch.clear()

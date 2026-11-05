@@ -387,4 +387,7 @@ def dry_run(championship_id: int, body: DryRunIn, sess: SessionDep) -> dict:
     rb = body.rulebook or effective(c)
     parsed = parse_result_file(path)
     racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, body.server_id, body.filename)
-    return {"type": parsed["type"], "cuts_rule": rb.detectors.cuts, "notices": cut_drafts(parsed, rb.detectors.cuts, racing) if rb.detectors.cuts else [], "not_evaluated": NOT_EVALUATED}
+    cut = rb.detectors.cuts
+    if cut:
+        cut = cut.model_copy(update={"max_seconds": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)})
+    return {"type": parsed["type"], "cuts_rule": cut, "notices": cut_drafts(parsed, cut, racing) if cut else [], "not_evaluated": NOT_EVALUATED}

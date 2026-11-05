@@ -107,6 +107,7 @@ class Neutralization(_Strict):
     mode: Literal["off", "shadow", "live"] = "off"
     default_mode: Literal["VSC", "FCY"] = "VSC"
     mode_by_category: dict[Annotated[str, StringConstraints(max_length=64)], Literal["VSC", "FCY"]] = Field(default_factory=dict, max_length=100)
+    max_auto_time_penalty_s: int = Field(default=10, ge=1, le=60)
     green_after_laps: int = Field(default=3, ge=1, le=10)
     green_clear_s: float = Field(default=15, ge=1, le=300)
     green_max_extra_laps: int = Field(default=3, ge=0, le=10)

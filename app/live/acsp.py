@@ -424,6 +424,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
         elif t == "lap_completed":
+            for row in event["leaderboard"]:
+                cid, laps = row["car_id"], row["laps"]
+                self.field.completed_laps[cid] = max(laps, self.field.completed_laps.get(cid, laps))
             if (self.session or {}).get("session_type") == 1 and not self.keep_off:   # the practice is kept across an idle stop (app/practicekeep.py)
                 from app import practicekeep
                 practicekeep.save(self.server_id, self.board, event.get("grip_level"))
@@ -440,7 +443,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             if not (rc and rc.nascar):
                 from app.racecontrol import plain_winner
                 plain_winner(self, event)   # (any other race: the first car to finish is the winner too)
-            if rc and rc.pace_car_in:
+            if rc and (rc.pace_car_in or rc.flag in ("vsc", "fcy")):
                 from app.racecontrol import auto_green
                 auto_green(self.server_id, rc, event["car_id"])
             if rc and (rc.caution or rc.formation):

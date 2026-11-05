@@ -290,3 +290,218 @@ def test_additional_car_does_not_repeat_overlapping_pileup_within_window():
         if decision:
             decisions.append(decision)
     assert len(decisions) == 1 and decisions[0]["kind"] == "pileup"
+
+
+@pytest.fixture
+def green_race(monkeypatch):
+    from app.live.field import Sample
+    clock = [0.0]
+    monkeypatch.setattr("app.live.racecontrol.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("app.live.racecontrol.time.time", lambda: 1000 + clock[0])
+    rc = RaceControl({"session_type": 3})
+    rc.neutralization_rule = Neutralization(mode="live", green_after_laps=2,
+        green_clear_s=2, green_max_extra_laps=1).model_dump()
+    field = Mock()
+    rc.set_flag("vsc", 80, now=1000)
+
+    def feed(t, lap=5, speed=80, crossing=False, stale=False, car=1, epoch=1):
+        clock[0] = t
+        samples = {1: Sample(lap + .01, epoch, 0, t - (10 if stale else 0), 0, lap),
+                   2: Sample(lap - .1, 1, 0, t, 0, lap - 1)}
+        field.samples.return_value = samples
+        field.snapshot.return_value = {c: s.progress for c, s in samples.items()}
+        rc.incident_step({1: 80, 2: speed}, field, 1000 + t)
+        return rc.green_if_due(car, field) if crossing else None
+
+    return rc, field, feed
+
+
+@pytest.mark.parametrize("flag", ["vsc", "fcy"])
+def test_green_after_full_leader_laps_and_continuous_clear_track(green_race, flag):
+    rc, _field, feed = green_race
+    rc.set_flag(flag, 80)
+    feed(0, crossing=True)  # partial first lap
+    feed(1)
+    assert feed(2, lap=6, crossing=True) is None
+    feed(3, lap=6)
+    assert feed(4, lap=7, crossing=True) == []
+    assert rc.flag == "green" and not rc.penalties
+
+
+def test_dirty_track_extends_then_warns_once_without_forcing_and_can_recover(green_race):
+    rc, _field, feed = green_race
+    for t in range(9):
+        feed(t, lap=5 + t // 2, speed=0, crossing=t % 2 == 0)
+    assert rc.flag == "vsc"
+    assert len(rc.notices) == 1 and "máximo" in rc.notices[0]["text"]
+    feed(9, lap=9)
+    feed(10, lap=10, crossing=True)  # only one clear second
+    feed(11, lap=10)
+    assert feed(12, lap=11, crossing=True) == []
+    assert rc.flag == "green"
+
+
+@pytest.mark.parametrize("mode,killed", [("off", False), ("shadow", False), ("live", True)])
+def test_green_shadow_off_and_kill_switch_emit_no_green(green_race, mode, killed):
+    rc, _field, feed = green_race
+    rc.neutralization_rule["mode"] = mode
+    if killed:
+        rc.auto_off.add("neutralization")
+    setter = Mock(wraps=rc.set_flag)
+    rc.set_flag = setter
+    for t in range(9):
+        feed(t, lap=5 + t // 2, crossing=t % 2 == 0)
+    setter.assert_not_called()
+    assert rc.flag == "vsc" and not rc.notices and not rc.penalties
+    decisions = [d for d in rc.autoflags.log if d.get("op") == "green"]
+    assert len(decisions) == (1 if mode == "shadow" else 0)
+    if decisions:
+        assert decisions[0]["lap"] == 7 and "vuelta 7" in decisions[0]["text"]
+
+
+def test_manual_green_cancels_and_new_neutralization_resets(green_race):
+    rc, field, feed = green_race
+    feed(0, crossing=True)
+    feed(1)
+    feed(2, lap=6, crossing=True)
+    rc.set_flag("green", field=field)
+    assert feed(3, lap=7, crossing=True) is None
+    assert rc.flag == "green"
+    rc.set_flag("fcy", 80, field=field)
+    for t in range(4, 8):
+        assert feed(t, lap=7 + (t - 4) // 2, crossing=t % 2 == 0) is None
+    assert rc.flag == "fcy"
+    assert feed(8, lap=9, crossing=True) == []
+
+
+def test_new_flag_while_active_restarts_lap_and_clear_counters(green_race):
+    rc, field, feed = green_race
+    feed(0, crossing=True)
+    feed(1)
+    feed(2, lap=6, crossing=True)
+    rc.set_flag("fcy", 80, field=field)
+    feed(3, lap=6, crossing=True)
+    feed(4, lap=6)
+    assert feed(5, lap=7, crossing=True) is None
+    feed(6, lap=7)
+    assert feed(7, lap=8, crossing=True) == []
+
+
+@pytest.mark.parametrize("bad", ["stale", "pit", "prestart", "no_leader", "follower", "epoch"])
+def test_invalid_leader_does_not_advance_green_count(green_race, bad):
+    rc, field, feed = green_race
+    for t in range(7):
+        if bad == "pit":
+            rc.report_pit(1, True, 1000 + t)
+        feed(t, lap=0 if bad == "prestart" else 5 + t,
+             stale=bad == "stale", car=2 if bad == "follower" else 1,
+             epoch=t if bad == "epoch" else 1, crossing=bad != "no_leader")
+        if bad == "no_leader":
+            field.samples.return_value = {}
+            assert rc.green_if_due(1, field) is None
+    assert rc.flag == "vsc"
+
+
+def test_stale_telemetry_interrupts_clear_interval(green_race):
+    rc, _field, feed = green_race
+    feed(0, crossing=True)
+    feed(1)
+    feed(2, lap=6, crossing=True, stale=True)
+    feed(3, lap=6)
+    assert feed(4, lap=7, crossing=True) is None
+    assert rc.flag == "vsc"
+
+
+@pytest.mark.parametrize("flag", ["vsc", "fcy"])
+@pytest.mark.parametrize("order", ["pace_first", "pass_first"])
+def test_new_incident_neutralization_judges_share_one_penalty(monkeypatch, flag, order):
+    from app.live.field import Sample
+    rc, feed = scenario(monkeypatch, "live")
+    rc.neutralization_rule["default_mode"] = flag.upper()
+    for t in range(1, 8):
+        feed(t, 0)
+    assert rc.flag == flag
+    sample = {1: Sample(5.1, 1, 0, 10, 0)}
+    monkeypatch.setattr(rc.pacejudge, "step", lambda *args: [{"car": 1, "generation": 0, "speed_kmh": 150, "over_s": 2}])
+    monkeypatch.setattr(rc.passjudge, "step", lambda *args: [("due", 1, 0)])
+    judges = (rc.pace_tick, rc.pass_tick) if order == "pace_first" else (rc.pass_tick, rc.pace_tick)
+    for judge in judges:
+        judge(sample, {1: 150}, 10, rc.grace_end + 1)
+    assert len(rc.penalties) == 1
+    assert len(rc.violations) == 1
+
+
+def test_auto_green_adapter_uses_current_telemetry_and_announces_existing_green(green_race, monkeypatch):
+    from types import SimpleNamespace
+
+    from app import racecontrol as adapter
+    rc, field, feed = green_race
+    cars = {1: {"velocity": [0, 0, 80 / 3.6]}, 2: {"velocity": [0, 0, 80 / 3.6]}}
+    inst = SimpleNamespace(acsp=SimpleNamespace(field=field, cars=cars))
+    monkeypatch.setattr(adapter, "_live", lambda sid: inst)
+    say, actions = Mock(), Mock()
+    monkeypatch.setattr(adapter, "_say", say)
+    monkeypatch.setattr(adapter, "nascar_actions", actions)
+    for t in range(5):
+        feed(t, lap=5 + t // 2)
+        if t % 2 == 0:
+            adapter.auto_green(42, rc, 1)
+    assert rc.flag == "green"
+    say.assert_called_once_with(rc, adapter.SAY["green"], "flag")
+    actions.assert_called_once_with(42, rc, [])
+
+
+def test_lap_packet_dispatches_existing_auto_green_for_virtual_neutralization(monkeypatch):
+    from app import racecontrol as adapter
+    from app.live import acsp
+    from app.live import racecontrol as live
+    client = acsp.ACSPClient(4242)
+    client.session = {"session_type": 3}
+    rc = RaceControl(client.session)
+    rc.set_flag("fcy", 80)
+    monkeypatch.setattr(live, "state_of", lambda *args, **kw: rc)
+    monkeypatch.setattr(live, "on_lap", lambda *args: (rc, []))
+    monkeypatch.setattr(live, "on_cuts", lambda *args: None)
+    monkeypatch.setattr(adapter, "plain_winner", lambda *args: None)
+    def check_counter(*args):
+        assert client.field.completed_laps[1] == 5
+    auto_green = Mock(side_effect=check_counter)
+    monkeypatch.setattr(adapter, "auto_green", auto_green)
+    client._apply({"type": "lap_completed", "car_id": 1, "laptime_ms": 90000,
+                   "cuts": 0, "leaderboard": [{"car_id": 1, "laps": 5}]})
+    auto_green.assert_called_once_with(4242, rc, 1)
+
+
+def test_virtual_green_still_applies_when_nascar_is_armed(green_race):
+    from app.live.nascar import Nascar
+    rc, _field, feed = green_race
+    rc.nascar = Nascar(100)
+    for t in range(5):
+        feed(t, lap=5 + t // 2, crossing=t % 2 == 0)
+    assert rc.flag == "green"
+
+
+def test_physical_sc_exit_is_not_taken_over_by_virtual_green(green_race):
+    rc, _field, feed = green_race
+    rc.pace_out = True
+    for t in range(9):
+        feed(t, lap=5 + t // 2, crossing=t % 2 == 0)
+    assert rc.flag == "vsc" and not rc.notices
+
+
+@pytest.mark.parametrize("progress, counters, expected", [
+    ([3.1, 4.999, 5.001], [4, 5, 5], 1),
+    ([4.1, 4.2, 4.3], [4, 5, 6], 2),
+    ([4.1, 5.1, 6.1], [None, None, None], -1),
+    ([4.1, 5.1, 6.1, 7.1], [4, 5, 4, 5], 1),
+])
+def test_green_counts_only_strictly_increasing_completed_laps(green_race, progress, counters, expected):
+    from types import SimpleNamespace
+    rc, field, feed = green_race
+    rc.neutralization_rule["green_clear_s"] = 100
+    for t, (p, completed) in enumerate(zip(progress, counters)):
+        feed(t)
+        field.samples.return_value = {1: SimpleNamespace(progress=p, epoch=1,
+            generation=0, stamp=t, completed_laps=completed)}
+        rc.green_if_due(1, field)
+    assert rc._green_laps == expected

@@ -236,7 +236,7 @@ def cut_rule(server_id: int) -> dict | None:
             rb = _applied_rulebook(s, server_id, c)
             cut = rb.detectors.cuts if rb else None
             if cut:
-                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": cut.max_seconds}
+                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)}
         if len(_CUT_RULES) > 64:
             _CUT_RULES.clear()
         _CUT_RULES[server_id] = (time.time(), rule)

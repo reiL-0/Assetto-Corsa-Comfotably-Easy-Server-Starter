@@ -123,6 +123,10 @@ def test_the_dry_run_says_what_a_rulebook_would_warn_about_and_writes_nothing():
     assert "contactos y de quién es la culpa" in r["not_evaluated"]
     lax = {**PRESETS["vrl-base"].model_dump(), "detectors": {"cuts": {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 30}}}
     assert {n["driver_guid"]: n["seconds"] for n in api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": lax}).json()["notices"]} == {A: 10, B: 5}
+    high = {"detectors": {"cuts": {"cuts_per_step": 1, "step_seconds": 30, "max_seconds": 30}}}
+    capped = api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": high}).json()
+    assert capped["cuts_rule"]["max_seconds"] == 10
+    assert {n["seconds"] for n in capped["notices"]} == {10}
     assert api.post(url, json={"server_id": sid, "filename": "nope.json"}).status_code == 404
     with Session(engine) as s:
         assert (len(s.exec(select(Notice)).all()), len(s.exec(select(Penalty)).all())) == before
@@ -174,6 +178,7 @@ def test_old_rulebooks_receive_disabled_neutralization_defaults():
     n = rb.neutralization
     assert rb.schema_version == 1 and n.mode == "off" and n.default_mode == "VSC"
     assert n.mode_by_category == {}
+    assert n.max_auto_time_penalty_s == 10
     assert (n.green_after_laps, n.green_clear_s, n.green_max_extra_laps) == (3, 15, 3)
     assert (n.slow_car.pace_ratio, n.slow_car.sustained_s, n.spin.stopped_s) == (0.6, 8, 5)
     assert (n.pileup.cars, n.pileup.window_s, n.pileup.escalate_to) == (3, 10, "FCY")
@@ -181,6 +186,7 @@ def test_old_rulebooks_receive_disabled_neutralization_defaults():
 
 
 @pytest.mark.parametrize("bad", [
+    {"max_auto_time_penalty_s": 0}, {"max_auto_time_penalty_s": 61},
     {"green_after_laps": 0}, {"green_after_laps": 11}, {"green_after_laps": 1.5},
     {"green_clear_s": 0}, {"green_clear_s": 301},
     {"green_max_extra_laps": -1}, {"green_max_extra_laps": 11},
