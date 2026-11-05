@@ -29,6 +29,7 @@ from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
 from app.live.giveback import GiveBack
 from app.live.incidents import Watch
+from app.live.pacejudge import PaceJudge
 from app.live.nascar import BREAK, CAUTION, Nascar, STAGES_DEFAULT
 
 log = logging.getLogger("acmanager.nascar")
@@ -75,6 +76,7 @@ class RaceControl:
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
+        self.pacejudge = PaceJudge()            # the continuous judge of a VSC / FCY's pace (app/live/pacejudge.py), SHADOW only for now: it writes down who it WOULD penalise; `evaluate` below still decides
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
         self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
@@ -573,9 +575,17 @@ class RaceControl:
         with _lock:
             return sorted(k for k, v in self.flag_modes.items() if v == "live" and k not in self.auto_off and (fresh_modes is None or fresh_modes.get(k) == "live"))
 
+    def pace_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float) -> list[dict]:
+        """One look at the pace of a VSC / FCY whose grace is over (shadow: the breaches are logged and returned, nothing is penalised). `mono`: the clock of the field's samples; `now`: the wall clock."""
+        with _lock:
+            active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
+            in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
+            pc = self.pace_car
+            return self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit)
+
     def autoflags_view(self) -> dict:
         with _lock:
-            return self.autoflags.view()
+            return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:]}
 
     def give_back_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
         """One look at the advantage gained off the track. -> the events of app/live/giveback.py (open / cleared / due); [] and nothing kept when this is not a race with the rule on."""

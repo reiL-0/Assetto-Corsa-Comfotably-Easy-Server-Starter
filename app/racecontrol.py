@@ -244,6 +244,7 @@ def autoflags_tick(now: float) -> None:
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
         rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
+        rc.pace_tick(samples, speeds, mono, now)
 
 
 def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
