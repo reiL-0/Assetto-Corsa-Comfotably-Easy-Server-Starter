@@ -42,7 +42,7 @@ from app.models import GiveBackDue, LeagueMember, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -128,6 +128,11 @@ MAX_UNSAVED_DUES = 1000
 def give_back_stale_servers() -> list[int]:
     """Servers in a race whose cached rule has to be read again (done by the monitor in a worker thread: never on the event loop)."""
     return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and give_back_rule_stale(i.server_id)]
+
+
+def flag_modes_stale_servers() -> list[int]:
+    """Servers in a race whose cached modes of the automatic flags have to be read again (in a worker thread, like the give-back rule)."""
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and flag_modes_stale(i.server_id)]
 
 
 def give_back_tick(now: float) -> list[dict]:
@@ -237,6 +242,7 @@ def autoflags_tick(now: float) -> None:
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
+        rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
 
 
@@ -268,6 +274,36 @@ def autoflags_view(server_id: int, sess: SessionDep) -> dict:
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     return rc.autoflags_view() if rc else {"blue": [], "danger": [], "unknown_length": False, "log": []}
+
+
+@state_router.get("/race-state/auto")
+def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> dict:
+    """The automatic flags (blue, danger) of ONE driver's screen: `{auto: {...} | null}`. The hub asks with its slot and its name (409 when that car is not that driver, like /pit); a driver sees only
+    his own. Null unless the league set the type to `live`, the director has not switched it off and the look is fresh."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    car = inst.acsp.cars.get(slot) if inst else None
+    if not car or (car.get("driver_name") or "").strip().lower() != name.strip().lower():
+        raise HTTPException(409, "that car is not that driver")
+    generation = inst.acsp.field.generation.get(slot, 0)   # (taken WITH the name check: if the slot changes hands during the database read below, the new driver's flags do not go to this request)
+    modes = flag_modes_of(server_id) or {}   # (refreshes the cached modes here, in a request thread; a failed reading shows nothing live)
+    rc = state_of(server_id, True, inst.acsp.session)
+    return {"auto": rc.auto_for(slot, generation, time.monotonic(), modes) if rc else None}
+
+
+class AutoOffIn(BaseModel):
+    kind: Literal["blue", "danger"]
+    off: bool
+
+
+@control_router.post("/autoflags")
+def autoflags_off(server_id: int, body: AutoOffIn, sess: SessionDep) -> dict:
+    """The director's kill switch for one automatic flag: `off` forces it off at once (the screens lose it with the next question); it outlives the session."""
+    inst, _ = _control(server_id, sess)
+    with _lock:   # (the state is looked up INSIDE the lock: a session change in between would copy the switch to a new state and leave this one, which is dropped, changed)
+        rc = state_of(server_id, True, inst.acsp.session, create=True)
+        (rc.auto_off.add if body.off else rc.auto_off.discard)(body.kind)
+        return {"auto_off": sorted(rc.auto_off)}
 
 
 @state_router.post("/race-control/pit", status_code=204)
@@ -803,6 +839,8 @@ async def monitor_forever() -> None:
             live = [(i.server_id, i.acsp.cars) for i in supervisor.live()]
             finish_nascar(now)
             caution_tick(now)
+            for sid in flag_modes_stale_servers():
+                await asyncio.to_thread(flag_modes_of, sid)
             for sid in give_back_stale_servers():
                 await asyncio.to_thread(give_back_rule_of, sid)   # (the league's rule, from the database, off the event loop)
             _unsaved_dues.extend(give_back_tick(now))

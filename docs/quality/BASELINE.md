@@ -85,6 +85,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/servers/{server_id}/race-control` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/auto-yellow` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/race-control/autoflags` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/autoflags` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/flag-notice` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/give-back/{ob_id}/forgive` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/give-back/{ob_id}/sanction` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
@@ -98,6 +99,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/servers/{server_id}/race-control/restart` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/winner-test` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/race-state` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| GET | `/api/v1/servers/{server_id}/race-state/auto` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/restart_session` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/results` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/results/{filename}` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

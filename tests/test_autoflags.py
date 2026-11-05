@@ -110,3 +110,45 @@ def test_a_slot_that_changes_hands_between_two_looks_forgets_its_last_driver():
     af.step(101.0, new, {1: 0.0, 2: 150.0}, set(), L, True)
     af.step(102.0, {1: Sample(1000.0 / L, 1, 1, 102.0, 0.0), 2: smp(700.0, 102.0)}, {1: 0.0, 2: 150.0}, set(), L, True)
     assert af.danger == {}, "the new driver never moved: he is not a stopped racer"
+
+
+def _live_rc(**modes):
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    rc.flag_modes = {"blue": "shadow", "danger": "shadow", **modes}
+    cars = {1: smp(4000.0, 100.0), 2: smp(6880.0, 100.0)}
+    rc.autoflags_tick(cars, {1: 150.0, 2: 150.0}, L, 100.0, 1000.0)
+    return rc
+
+
+def test_a_screen_gets_only_live_types_from_a_fresh_look_for_its_own_slot():
+    assert _live_rc().auto_for(1, 0, 100.5) is None, "shadow: nothing reaches the screen"
+    rc = _live_rc(blue="live")
+    assert rc.auto_for(1, 0, 100.5) == {"blue": {"by": 2, "m": 120}, "danger": None, "age_ms": 500, "session": rc.autoflags.uid}
+    assert rc.auto_for(2, 0, 100.5) is None, "the faster car has no flag"
+    assert rc.auto_for(1, 1, 100.5) is None, "the slot changed hands since the look"
+    assert rc.auto_for(1, 0, 104.0) is None, "a look older than 3 s is not served"
+    rc.auto_off.add("blue")
+    rc.autoflags_tick({1: smp(4000.0, 101.0), 2: smp(6880.0, 101.0)}, {1: 150.0, 2: 150.0}, L, 101.0, 1001.0)
+    assert rc.auto_for(1, 0, 101.2) is None and rc.autoflags.blue == {}, "the kill switch: not served and not even decided"
+    rc.auto_off.clear()
+    rc.flag = "yellow"
+    assert rc.auto_for(1, 0, 101.2) is None, "not under green"
+
+
+def test_the_rulebook_defaults_to_shadow_and_a_new_session_keeps_the_directors_switch():
+    from app.rulebook import Rulebook
+
+    assert Rulebook().detectors.flags.model_dump() == {"blue": "shadow", "danger": "shadow"}
+    assert Rulebook.model_validate({"detectors": {"flags": {"blue": "live"}}}).detectors.flags.danger == "shadow"
+    import pytest
+    with pytest.raises(Exception):
+        Rulebook.model_validate({"detectors": {"flags": {"blue": "maybe"}}})
+
+
+def test_a_failed_or_changed_reading_of_the_league_takes_a_live_flag_away():
+    rc = _live_rc(blue="live")
+    assert rc.auto_for(1, 0, 100.5, {"blue": "live", "danger": "shadow"})
+    assert rc.auto_for(1, 0, 100.5, {}) is None, "the reading failed"
+    assert rc.auto_for(1, 0, 100.5, {"blue": "shadow", "danger": "shadow"}) is None, "the league changed it to shadow"

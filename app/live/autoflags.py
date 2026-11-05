@@ -11,6 +11,7 @@ Cars whose progress is not trustworthy (just re-anchored, stale, in the pit lane
 
 from __future__ import annotations
 
+import itertools
 from collections import deque
 
 from app.live.field import Sample, ring
@@ -21,6 +22,7 @@ STOP_KMH, STOP_S = 5.0, 3.0           # a car under 5 km/h for 3 s that was raci
 MOVING_KMH = 30.0
 TRUST_S, FRESH_S = 2.0, 1.5           # progress continuous for 2 s and updated within 1.5 s
 LOG_MAX = 200
+_uid = itertools.count(1)
 
 
 class AutoFlags:
@@ -32,6 +34,10 @@ class AutoFlags:
         self._gen: dict[int, int] = {}                   # car -> the generation of its slot when last seen (a slot that changed hands starts from nothing)
         self.log: deque[dict] = deque(maxlen=LOG_MAX)    # {t, kind, op: open|update|close, car, ref, m}
         self.unknown_length = False
+        self.uid = next(_uid)                            # which session's engine this is: a driver's screen drops what it holds when this changes
+        self.modes = {"blue": "shadow", "danger": "shadow"}   # `off` types are not decided at all
+        self.last: float | None = None                   # monotonic time of the last look (the age of what is served)
+        self.gen: dict[int, int] = {}                    # slot -> generation of the slot at the last look
 
     def reset(self) -> None:
         self.blue.clear(); self.danger.clear(); self._moved.clear(); self._still.clear(); self._gen.clear(); self.unknown_length = False
@@ -51,6 +57,8 @@ class AutoFlags:
             self._still.clear()
             return
         self.unknown_length = False
+        self.last = now
+        self.gen = {c: s.generation for c, s in samples.items()}
         for c, s in samples.items():   # a slot that changed hands between two looks: whatever we knew of its last driver is not the new one's
             if self._gen.get(c, s.generation) != s.generation:
                 self._moved.discard(c); self._still.pop(c, None)
@@ -93,8 +101,8 @@ class AutoFlags:
                 m = ring(ok[s].progress - sd.progress) * length   # metres S is ahead of D (negative: behind)
                 if 0.0 <= m <= DANGER_M:
                     danger[(d, s)] = int(round(m / ROUND_M) * ROUND_M)
-        self._diff("blue", self.blue, blue, now)
-        self._diff("danger", self.danger, danger, now)
+        self._diff("blue", self.blue, blue if self.modes["blue"] != "off" else {}, now)
+        self._diff("danger", self.danger, danger if self.modes["danger"] != "off" else {}, now)
 
     def _diff(self, kind: str, old: dict, new: dict, now: float) -> None:
         for k, m in new.items():
@@ -105,6 +113,18 @@ class AutoFlags:
         for k in old.keys() - new.keys():
             self._note(now, kind, "close", k[0], k[1], None)
         old.clear(); old.update(new)
+
+    def for_slot(self, slot: int, generation: int, now: float, live: set[str]) -> dict | None:
+        """What this driver's screen may show: the NEAREST car about to lap it (blue) and the NEAREST stopped car ahead (danger), only the types in `live`. None when there is nothing, when the engine has not
+        looked yet or when the slot has changed hands since the last look."""
+        if self.last is None or self.gen.get(slot) != generation:
+            return None
+        blue = min(((m, a) for (c, a), m in self.blue.items() if c == slot), default=None) if "blue" in live else None
+        danger = min(((m, s) for (d, s), m in self.danger.items() if d == slot), default=None) if "danger" in live else None
+        if blue is None and danger is None:
+            return None
+        return {"blue": {"by": blue[1], "m": round(blue[0])} if blue else None, "danger": {"stopped": danger[1], "m": danger[0]} if danger else None,
+                "age_ms": int((now - self.last) * 1000), "session": self.uid}
 
     def view(self) -> dict:
         """What the director's panel may show of the shadow: who WOULD have a flag now, and the last decisions."""

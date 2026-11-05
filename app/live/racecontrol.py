@@ -55,6 +55,7 @@ HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart 
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
+AUTO_MAX_AGE_S = 3.0              # the automatic flags of a screen are not served from a look older than this
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
@@ -75,6 +76,8 @@ class RaceControl:
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
+        self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
+        self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
@@ -553,7 +556,17 @@ class RaceControl:
             racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
+            self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
             self.autoflags.step(mono, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit, length, racing)
+
+    def auto_for(self, slot: int, generation: int, mono: float, fresh_modes: dict | None = None) -> dict | None:
+        """The automatic flags this driver's screen may show now (blue / danger), or None: only the types set to `live` (in the monitor's reading AND in `fresh_modes`, the one the request has just made: a failed or changed reading takes it away) and not killed by the director, only under green or white, and only what a look of the last
+        MAX_AGE_S made (a stalled monitor must not leave a flag on a screen)."""
+        with _lock:
+            live = {k for k, v in self.flag_modes.items() if v == "live" and k not in self.auto_off and (fresh_modes is None or fresh_modes.get(k) == "live")}
+            if not live or self.flag not in ("green", "white") or self.autoflags.last is None or mono - self.autoflags.last > AUTO_MAX_AGE_S:
+                return None
+            return self.autoflags.for_slot(slot, generation, mono, live)
 
     def autoflags_view(self) -> dict:
         with _lock:
@@ -670,6 +683,33 @@ def cut_rule_of(server_id: int) -> dict | None:
         return None
 
 
+def flag_modes_peek(server_id: int) -> dict | None:
+    """The league's modes of the automatic flags as last read (no database, no waiting): None when missing or old."""
+    try:
+        from app.league import flag_modes_cached
+        return flag_modes_cached(server_id)
+    except Exception:   # noqa: BLE001 - never let this break the monitor
+        return None
+
+
+def flag_modes_stale(server_id: int) -> bool:
+    try:
+        from app.league import flag_modes_stale as stale
+        return stale(server_id)
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def flag_modes_of(server_id: int) -> dict | None:
+    """The same modes, read from the database when the cache is stale: only from a request thread."""
+    try:
+        from app.league import flag_modes
+        return flag_modes(server_id)
+    except Exception:   # noqa: BLE001
+        log.warning("automatic-flag modes of server %s could not be read", server_id, exc_info=True)
+        return None
+
+
 def give_back_rule_peek(server_id: int) -> dict | None:
     """The rule of the advantage gained off the track as it was last read (no database, no waiting): what the monitor uses on the event loop."""
     try:
@@ -730,7 +770,8 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 fresh.server_id = server_id
                 fresh.rev = 1
                 old = _old
-                fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid   # (the director's choices outlive the session)
+                fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid
+                fresh.auto_off = set(old.auto_off)   # (the director's choices outlive the session)
                 _states[server_id] = fresh
                 return fresh
         if rc is None and create and running:

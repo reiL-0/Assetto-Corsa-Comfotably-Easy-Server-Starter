@@ -68,8 +68,16 @@ class GiveBackRule(_Strict):
     window_s: int = Field(default=30, ge=10, le=120)
 
 
+class FlagsRule(_Strict):
+    """The flags that need no director (app/live/autoflags.py). `shadow` (the default) decides and writes down, shows nothing; `live` shows it to the driver; `off` does not even decide."""
+
+    blue: Literal["off", "shadow", "live"] = "shadow"
+    danger: Literal["off", "shadow", "live"] = "shadow"
+
+
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
+    flags: FlagsRule = Field(default_factory=FlagsRule)
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 
 

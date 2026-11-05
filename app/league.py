@@ -190,6 +190,7 @@ def qualy_banned(server_id: int, guid: str) -> bool:
 
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
+_FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
 
@@ -242,6 +243,40 @@ def give_back_rule(server_id: int) -> dict | None:
             _GIVE_BACK_RULES.clear()
         _GIVE_BACK_RULES[server_id] = (time.time(), rule)
         return rule
+
+
+def flag_modes(server_id: int) -> dict:
+    """{blue, danger}: off | shadow | live, from the rulebook of the league event running on this server; both `shadow` when no league event runs. Cached like `give_back_rule`: from a request thread, never from the event loop."""
+    hit = _FLAG_MODES.get(server_id)
+    if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    from app.rulebook import effective
+    with _cut_rule_lock:
+        hit = _FLAG_MODES.get(server_id)
+        if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        modes = {"blue": "shadow", "danger": "shadow"}
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            if c:
+                modes = effective(c).detectors.flags.model_dump()
+        if len(_FLAG_MODES) > 64:
+            _FLAG_MODES.clear()
+        _FLAG_MODES[server_id] = (time.monotonic(), modes)
+        return modes
+
+
+def flag_modes_cached(server_id: int) -> dict | None:
+    """What `flag_modes` read last (no database, no waiting) or None when it is missing or old (3 x the TTL): the monitor then does NOT show anything live."""
+    hit = _FLAG_MODES.get(server_id)
+    return hit[1] if hit and time.monotonic() - hit[0] < 3 * CUT_RULE_TTL else None
+
+
+def flag_modes_stale(server_id: int) -> bool:
+    hit = _FLAG_MODES.get(server_id)
+    return not hit or time.monotonic() - hit[0] >= CUT_RULE_TTL
 
 
 def give_back_rule_cached(server_id: int) -> dict | None:
