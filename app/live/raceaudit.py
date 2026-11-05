@@ -4,15 +4,16 @@ One bounded FIFO and one lazy daemon writer preserve enqueue order. Queue overfl
 and persistence failures are observable; accepted does not mean persisted.
 """
 import json
-import math
-from itertools import islice
 import logging
+import math
 import os
 import queue
+import re
 import threading
 import time
 from collections import deque
 from datetime import UTC, datetime
+from itertools import islice
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -28,6 +29,61 @@ _STOP = object()
 _counts = {"queued": 0, "written": 0, "errors": 0, "dropped": 0}
 MAX_BYTES = 10 * 1024 * 1024
 BACKUPS = 10
+
+FIELD_TOTAL_BYTES = 200 * 1024 * 1024
+FIELD_FILE_BYTES = 20 * 1024 * 1024
+
+
+class _FieldWriter:
+    """Writer-thread owned files; one active session per server, closed-only eviction."""
+    def __init__(self):
+        self.active = {}
+        self.directory = Path(settings.data_dir) / "race-audit" / "field"
+
+    def close(self):
+        for _, _, handler in self.active.values():
+            handler.close()
+        self.active.clear()
+
+    def retain(self, incoming=0):
+        files = list(self.directory.glob("*.jsonl*"))
+        total = sum(p.stat().st_size for p in files)
+        opened = {Path(h.baseFilename) for _, _, h in self.active.values()}
+        for path in sorted(files, key=lambda p: (p.stat().st_mtime_ns, p.name)):
+            if total + incoming <= FIELD_TOTAL_BYTES:
+                break
+            if path.resolve() not in opened:
+                size = path.stat().st_size
+                path.unlink()
+                total -= size
+        if total + incoming > FIELD_TOTAL_BYTES:
+            raise OSError("field retention full of active files")
+
+    def write(self, event):
+        sid, session = event.get("server_id", 0), event.get("session", "unknown")
+        line = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        size = len((line + "\n").encode("utf-8"))
+        if size > FIELD_FILE_BYTES:
+            raise ValueError("field event exceeds file cap")
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.directory.chmod(0o700)
+        previous = self.active.get(sid)
+        if previous and (previous[0] != session or Path(previous[2].baseFilename).stat().st_size + size > FIELD_FILE_BYTES):
+            previous[2].close()
+            del self.active[sid]
+        if sid not in self.active:
+            safe = lambda v: re.sub(r"[^a-zA-Z0-9_-]", "_", str(v))[:80]
+            # Timestamp is the start of this recorded session; UUID disambiguates restarts.
+            stem = f"server-{safe(sid)}-session-{safe(session)}"
+            part = 0
+            while (self.directory / f"{stem}-{part:06d}.jsonl").exists():
+                part += 1
+            path = self.directory / f"{stem}-{part:06d}.jsonl"
+            handler = _Handler(path, maxBytes=0, backupCount=0)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            self.active[sid] = (session, event.get("ts"), handler)
+        self.retain(size)
+        self.active[sid][2].handle(logging.LogRecord(log.name, logging.INFO, "", 0, line, (), None))
 
 
 class _Handler(RotatingFileHandler):
@@ -58,12 +114,15 @@ def stats():
 
 def _write_loop():
     handler = None
+    field_handler = None
     while True:
         event = _pending.get()
         if event is _STOP:
             try:
                 if handler is not None:
                     handler.close()
+                if field_handler is not None:
+                    field_handler.close()
             except Exception:  # noqa: BLE001 - still terminate if closing storage fails
                 with _lock:
                     _counts["errors"] += 1
@@ -71,6 +130,13 @@ def _write_loop():
                 _pending.task_done()
             return
         try:
+            if event.get("format") == "acm-field-v1":
+                if field_handler is None:
+                    field_handler = _FieldWriter()
+                field_handler.write(event)
+                with _lock:
+                    _counts["written"] += 1
+                continue
             log.info("race audit server=%s kind=%s", event["server_id"], event["kind"])
             if handler is None:
                 path = _path()
@@ -85,6 +151,13 @@ def _write_loop():
         except Exception:  # noqa: BLE001 - audit persistence must never stop race control
             with _lock:
                 _counts["errors"] += 1
+            if field_handler:
+                try:
+                    field_handler.close()
+                except Exception:  # noqa: BLE001 - failed storage cleanup is observable
+                    with _lock:
+                        _counts["errors"] += 1
+                field_handler = None
             if handler:
                 try:
                     handler.close()
@@ -148,7 +221,6 @@ def _snapshot(value, budget=None, depth=0):
 
 def record(server_id, kind, **fields):
     """Enqueue one JSON event, never raise. Only pass already-calculated evidence."""
-    global _worker
     try:
         with _lock:
             if _closed or _pending.full():
@@ -158,21 +230,33 @@ def record(server_id, kind, **fields):
         event.update(ts=datetime.now(UTC).isoformat(), monotonic=time.monotonic(),
                      server_id=_snapshot(server_id), kind=_snapshot(kind))
         event.setdefault("session", None)
-        with _lock:
-            if _closed:
-                _counts["dropped"] += 1
-                return
-            if _worker is None or not _worker.is_alive():
-                _worker = threading.Thread(target=_write_loop, name="race-audit", daemon=True)
-                _worker.start()
-            try:
-                _pending.put_nowait(event)
-                _counts["queued"] += 1
-            except queue.Full:
-                _counts["dropped"] += 1
+        enqueue(event)
     except Exception:  # noqa: BLE001 - malformed evidence must not affect race control
         with _lock:
             _counts["errors"] += 1
+
+
+def enqueue(event):
+    """Admit an owned, already bounded snapshot; shared by audit and field tape."""
+    global _worker
+    try:
+        with _lock:
+            if _closed or _pending.full():
+                _counts["dropped"] += 1
+                return False
+            if _worker is None or not _worker.is_alive():
+                _worker = threading.Thread(target=_write_loop, name="race-audit", daemon=True)
+                _worker.start()
+            _pending.put_nowait(event)
+            _counts["queued"] += 1
+            return True
+    except queue.Full:
+        with _lock:
+            _counts["dropped"] += 1
+    except Exception:  # noqa: BLE001 - admission must never affect telemetry
+        with _lock:
+            _counts["errors"] += 1
+    return False
 
 
 def flush(timeout=8):

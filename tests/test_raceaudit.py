@@ -219,3 +219,52 @@ def test_close_drains_stops_and_rejects_records(monkeypatch, tmp_path):
     audit.record(1, "after_close", invalid=object())
     assert audit.stats() == {**before, "dropped": before["dropped"] + 1}
     assert audit.close(timeout=0.1)
+
+
+def test_field_files_isolate_servers_and_retain_oldest_closed(tmp_path, monkeypatch):
+    import importlib.util
+    import os
+    from types import SimpleNamespace
+    spec = importlib.util.spec_from_file_location('isolated_field_retention', raceaudit.__file__)
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    monkeypatch.setattr(audit, 'settings', SimpleNamespace(data_dir=tmp_path))
+    directory = tmp_path / 'race-audit' / 'field'
+    directory.mkdir(parents=True)
+    old = directory / 'server-9-session-old-000000.jsonl'
+    newer = directory / 'server-8-session-newer-000000.jsonl'
+    old.write_text('x' * 100)
+    newer.write_text('y' * 100)
+    os.utime(old, (1, 1))
+    os.utime(newer, (2, 2))
+    monkeypatch.setattr(audit, 'FIELD_TOTAL_BYTES', 300, raising=False)
+    for sid in (1, 2):
+        assert audit.enqueue({'format': 'acm-field-v1', 'server_id': sid, 'session': 'start', 'ts': 1000, 'seq': 1})
+    assert audit.flush()
+    assert not old.exists()
+    assert newer.exists()
+    files = list(directory.glob('*start*.jsonl'))
+    assert len(files) == 2
+    assert {json.loads(p.read_text())['server_id'] for p in files} == {1, 2}
+    assert audit.close(2)
+
+
+def test_field_file_cap_preserves_active_other_server(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(raceaudit, 'settings', SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(raceaudit, 'FIELD_FILE_BYTES', 180)
+    monkeypatch.setattr(raceaudit, 'FIELD_TOTAL_BYTES', 350)
+    writer = raceaudit._FieldWriter()
+    event = {'format': 'acm-field-v1', 'server_id': 1, 'session': '1000-a', 'seq': 1}
+    try:
+        writer.write(event)
+        other = next(writer.directory.glob('server-1-*'))
+        writer.write({**event, 'server_id': 2})
+        for seq in range(2, 8):
+            writer.write({**event, 'server_id': 2, 'seq': seq})
+        assert other.exists()
+        assert json.loads(other.read_text())['server_id'] == 1
+        assert all(p.stat().st_size <= 180 for p in writer.directory.iterdir())
+        assert sum(p.stat().st_size for p in writer.directory.iterdir()) <= 350
+    finally:
+        writer.close()

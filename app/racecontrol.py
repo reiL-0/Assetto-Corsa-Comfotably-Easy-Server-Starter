@@ -41,7 +41,7 @@ from app.config import settings
 from app.db import SessionDep, engine
 from app.models import GiveBackDue, LeagueMember, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
-from app.live import acsp, raceaudit
+from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
@@ -224,7 +224,7 @@ def incident_tick(now: float) -> None:
 
     for inst in supervisor.live():
         rule = neutralization_rule_cached(inst.server_id) or {"mode": "off"}
-        rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off")
+        rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off" or fieldrec.enabled(inst.server_id))
         if not rc:
             continue
         if rc.neutralization_rule != rule:

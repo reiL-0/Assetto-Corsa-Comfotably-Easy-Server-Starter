@@ -29,6 +29,7 @@ from copy import deepcopy
 from app.live import (
     autoflags as flag_rules,
     caution as caution_rules,
+    fieldrec,
     giveback as giveback_rules,
     incidents as incident_rules,
     nopass as pass_rules,
@@ -84,7 +85,8 @@ STANDING = 5.0                   # km/h under which a car is standing (a spun or
 
 
 class RaceControl:
-    def __init__(self, session_ref: object = None) -> None:
+    def __init__(self, session_ref: object = None, clock=None) -> None:
+        self.clock = clock or time
         self._audit_state = None
         self._audit_last_status = -1e9
         self._audit_gate = None
@@ -93,7 +95,7 @@ class RaceControl:
         self.flag, self.pace_kmh = "green", None
         self.penalties: list[dict] = []
         self.notices: list[dict] = []   # on-screen messages for the hub ({id, kind, text, to, until}); `to` = a car id, -1 = everybody
-        self.rev, self.ts = 0, time.time()
+        self.rev, self.ts = 0, self.clock.time()
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
@@ -173,13 +175,14 @@ class RaceControl:
             self.audit("state_change", previous=self._audit_state, state=state, executed=True)
             self._audit_state = deepcopy(state)
         self.rev += 1
-        self.ts = time.time()
+        self.ts = self.clock.time()
 
+    @fieldrec.capture(_lock)
     def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None, mode: str = "fixed") -> list[tuple]:
         """Return NASCAR actions for the caller to execute after releasing the lock."""
         if flag not in FLAGS:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
-        now = time.time() if now is None else now
+        now = self.clock.time() if now is None else now
         pen = {"kind": "none", "laps": 0}
         if flag in SLOWING:   # validate BEFORE touching the state: a refused VSC leaves everything as it was
             if pace_kmh is None or not PACE_MIN <= pace_kmh <= PACE_MAX:
@@ -199,7 +202,7 @@ class RaceControl:
                 self._end_formation()
                 self.flag = "green"
             if self._neutralization_sc and flag not in CAUTION:
-                self._sc_cooldown_until = time.monotonic() + SC_INCIDENT_COOLDOWN_S
+                self._sc_cooldown_until = self.clock.monotonic() + SC_INCIDENT_COOLDOWN_S
                 self._neutralization_sc = False
             self._neutralization_flag = source == "incident" and flag in SLOWING
             was_caution = self.flag in CAUTION
@@ -245,6 +248,7 @@ class RaceControl:
         self.formation = False
         self.lap_base = self.leader_laps_seen   # (the laps of the formation are not race laps)
 
+    @fieldrec.capture(_lock)
     def start_formation(self) -> bool:
         """The race begins: a rolling start behind the pace car. Only with NASCAR armed, a pace car and nothing run yet; otherwise the standing start goes on as always."""
         with _lock:
@@ -255,6 +259,7 @@ class RaceControl:
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
             return True
 
+    @fieldrec.capture(_lock)
     def formation_lap(self, car: int) -> bool:
         """The pace car crossed the line in the formation: the first crossing (from the grid) brings the 'one to go' -> True: the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing."""
         with _lock:
@@ -268,6 +273,7 @@ class RaceControl:
             self._bump()
             return True
 
+    @fieldrec.capture(_lock)
     def formation_green(self, car: int, alone: bool) -> bool:
         """After the 'one to go' of the formation: the green when the pace car is in the pit lane and a competitor crosses the line (alone on the track: when the pace car arrives)."""
         with _lock:
@@ -283,6 +289,7 @@ class RaceControl:
             self.set_flag("green", source="formation")
             return True
 
+    @fieldrec.capture(_lock)
     def green_if_due(self, car: int, field=None) -> list[tuple] | None:
         """"To go" was called under our caution: the green comes out by itself (None = not due) once the pace car is in the pit lane (its hub said so) and the car that takes the restart crosses the line
         (the first of the restart order; with nobody to restart, the pace car reporting from the pits). Without a pace car, the restart leader crossing is enough. Checked and set under one lock:
@@ -312,6 +319,7 @@ class RaceControl:
                 return None
             return self.set_flag("green", field=field)
 
+    @fieldrec.capture(_lock)
     def neutralization_clear_tick(self, samples, speeds, mono, now):
         """Monitor-owned freshness/clear interval; no I/O, shared with the lap callback under _lock.
 
@@ -371,7 +379,7 @@ class RaceControl:
         if (mode == "off" or "neutralization" in self.auto_off or field is None
                 or self.formation or (self.session_ref or {}).get("session_type") != RACE_TYPE):
             return None
-        mono, now = time.monotonic(), time.time()
+        mono, now = self.clock.monotonic(), self.clock.time()
         samples = {c: s for c, s in field.samples().items()
                    if c != self.pace_car and c not in self.neutralization_excluded}
         if not samples:
@@ -433,6 +441,7 @@ class RaceControl:
                                           "timestamp": now, "laps": laps, "text": text})
         return None
 
+    @fieldrec.capture(_lock)
     def caution_lap(self, car: int, speeds: dict[int, float], now: float, connected: set[int] | None = None) -> str | None:
         """A car crossed the line under our caution. Only the pace car's laps count (the leader's when there is no pace car); the first crossing is a part of a lap. -> 'pits' (the first full lap is done: the pit lane opens), 'go' (at least CAUTION_MIN_LAPS
         done and the track is clear: the automatic 'to go', announced as 'two' a lap before: 'two' = "two to go"), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
@@ -496,6 +505,7 @@ class RaceControl:
             two, one = at + CAUTION_MIN_LAPS - 1, max(at + CAUTION_MIN_LAPS, nxt)   # (the track not clear yet: the "to go" waits for the next clear crossing)
             return {"pits": pits, "two": two if two >= nxt else None, "one": one, "green": one + 1, "green_max": at + CAUTION_MAX_LAPS + 1}
 
+    @fieldrec.capture(_lock)
     def stage_break(self, pending_crossing: bool) -> int | None:
         """A stage break began under our caution: the pit lane opens (the stops are what the break is for) and the lap on which the green will come is returned (None without a caution of ours; 0 behind a
         pace car: its laps are not the leader's, the green depends on when it is in the pits). The automatic "to go" comes at the crossing that makes CAUTION_MIN_LAPS laps counted, the green at the next one
@@ -518,6 +528,7 @@ class RaceControl:
                 return True
             return False
 
+    @fieldrec.capture(_lock)
     def set_pace_car(self, car: int | None, kmh: int = PACE_CAR_KMH, guid: str = "") -> None:
         if (car is not None or guid) and not PACE_MIN <= kmh <= PACE_MAX:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
@@ -534,6 +545,7 @@ class RaceControl:
             self._bump()
             self.audit("pace_car_config", car=car, guid=guid, kmh=kmh, source="set_pace_car", executed=True)
 
+    @fieldrec.capture(_lock)
     def follow_pace_driver(self, car: int | None) -> None:
         """The pace car is a DRIVER (`pace_guid`, the SteamID); its slot changes when it connects or reconnects. `car` is where that driver sits now (None: not on the server): the driver stays named."""
         with _lock:
@@ -541,6 +553,7 @@ class RaceControl:
                 return
             self.set_pace_car(car, self.pace_car_kmh, self.pace_guid)
 
+    @fieldrec.capture(_lock)
     def contact(self, now: float, car: int, other: int | None, speed: float) -> None:
         with _lock:
             if self.pace_car is not None and self.pace_car in (car, other):
@@ -595,7 +608,7 @@ class RaceControl:
     def notify(self, text: str, kind: str = "info", to: int = -1, ttl: int = NOTICE_TTL, now: float | None = None, hold: str | None = None) -> dict:
         """A message for the hub's banner (it replaces the chat line). The text is kept free of quotes and backslashes: the hub reads the JSON with patterns.
         `hold` = a tag: the message stays (kind "hold", the hub draws it every frame from the state) until the caution ends or another notice takes the same tag."""
-        now = time.time() if now is None else now
+        now = self.clock.time() if now is None else now
         with _lock:
             if hold:
                 kind, ttl = "hold", HOLD_TTL
@@ -631,11 +644,12 @@ class RaceControl:
             return len(self.penalties) != n
 
     # ---- the VSC monitor ------------------------------------------------------------------------------------------------------------------------------------------------
+    @fieldrec.capture(_lock)
     def report_pit(self, car_id: int, in_pit: bool, now: float | None = None) -> None:
         """The hub of that car says whether it is in the pit lane. Only a yes is kept (a no never cancels one), and it expires: see the module docstring."""
         if in_pit:
             with _lock:
-                self._pit_seen[car_id] = time.time() if now is None else now
+                self._pit_seen[car_id] = self.clock.time() if now is None else now
                 # Keep the return command through parking: pit-lane entry is not
                 # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
@@ -647,11 +661,12 @@ class RaceControl:
                     if car_id != self.pace_car:
                         self.caution.pit_enter(car_id)
 
+    @fieldrec.capture(_lock)
     def incident_step(self, speeds: dict[int, float], field, now: float) -> tuple[dict | None, list[tuple]]:
         """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
         with _lock:
             rule = self.neutralization_rule
-            mono = time.monotonic()
+            mono = self.clock.monotonic()
             samples = field.samples()
             self.neutralization_clear_tick(samples, speeds, mono, now)
             if self.flag in CAUTION and mono - self._audit_last_status >= 5:
@@ -662,7 +677,7 @@ class RaceControl:
                 self._audit_last_status = mono
             if not self.nascar:
                 mode = "off" if "neutralization" in self.auto_off else rule.get("mode", "off")
-                mono = time.monotonic()
+                mono = self.clock.monotonic()
                 samples = {c: s for c, s in field.samples().items() if c != self.pace_car and c not in self.neutralization_excluded}
                 in_pit = {c for c, t in self._pit_seen.items() if now - t < PIT_RECENT}
                 racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and (self.flag in ("green", "white") or (self.flag in SLOWING and self._neutralization_flag and not self.pace_out)) and not self.formation
@@ -723,6 +738,7 @@ class RaceControl:
                 self._bump()
             return prop, actions
 
+    @fieldrec.capture(_lock)
     def restart_plan(self, progress: dict[int, float], to_go: int = 1) -> tuple[list[int], list[int], set[int]] | None:
         """The director calls 'to go': see Caution.call_restart. None when no caution of ours is being run."""
         with _lock:
@@ -739,6 +755,7 @@ class RaceControl:
             log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)
             return plan
 
+    @fieldrec.capture(_lock)
     def caution_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
         """One step of the caution being run: the free pass lost to the pits, the cars that passed. Returns actions for the adapter; a violator already has its drive-through listed."""
         with _lock:
@@ -768,6 +785,7 @@ class RaceControl:
                 self._bump()
             return out
 
+    @fieldrec.capture(_lock)
     def pit_exception(self, car: int, allowed: bool) -> bool:
         """The director lets a car into the closed pit lane (or not any more). False when no caution of ours is being run."""
         with _lock:
@@ -781,6 +799,7 @@ class RaceControl:
             self._bump()
             return True
 
+    @fieldrec.capture(_lock)
     def sample(self, speeds: dict[int, float], now: float) -> None:
         """Speeds (km/h) of the cars now. Only the last seconds of the grace are kept."""
         with _lock:
@@ -794,12 +813,13 @@ class RaceControl:
         with _lock:
             if self.flag not in SLOWING:
                 return 0
-            return max(0, math.ceil(self.grace_end - (time.time() if now is None else now)))
+            return max(0, math.ceil(self.grace_end - (self.clock.time() if now is None else now)))
 
     def due(self, now: float) -> bool:
         with _lock:
             return self.flag in SLOWING and not self.evaluated and now >= self.grace_end
 
+    @fieldrec.capture(_lock)
     def evaluate(self, now: float) -> list[dict]:
         """When the grace is over: who was still over the pace (see the module docstring). Marks the VSC judged (once); returns [{car_id, speed_kmh}], the penalty is already listed."""
         with _lock:
@@ -827,8 +847,9 @@ class RaceControl:
             self._bump()
             return out
 
+    @fieldrec.capture(_lock)
     def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
-        """One look for the blue flag and the danger warning (shadow). `mono`: time.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
+        """One look for the blue flag and the danger warning (shadow). `mono`: self.clock.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
         with _lock:
             racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
@@ -872,6 +893,7 @@ class RaceControl:
         the switch is on (the judge only logs). Switching it on or off in the middle of a flag never makes the two judges punish the same car."""
         return not self.legacy and "pace" not in self.auto_off
 
+    @fieldrec.capture(_lock)
     def pace_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float, models: dict[int, str] | None = None) -> list[dict]:
         """One look at the pace of a VSC / FCY. Two judges share it: the DELTA judge (app/live/sectors.py) for the cars of a delta VSC whose model has a reference lap, the FIXED-pace judge
         (app/live/pacejudge.py) for every other car. The sector clock and the reference laps are also fed here, in green. A breach is listed as a violation and gets the flag's penalty, once; with
@@ -924,6 +946,7 @@ class RaceControl:
                 self.audit("pace_judge", decision=decision, limit=(self.pace_kmh or 0) + self.tolerance_kmh, executed=decision["applied"])
             return found
 
+    @fieldrec.capture(_lock)
     def pass_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float) -> list[dict]:
         """One look at the overtaking of a VSC / FCY whose grace is over (app/live/nopass.py). -> [{kind: pass_open | pass_cleared | pass_due, car, applied, flag, ...}] for the caller to announce; `applied` is False
         with the director's kill switch `pass` (the judge only logs). A `pass_due` lists the violation and gives the flag's penalty (the drive-through), once per car and flag."""
@@ -962,6 +985,7 @@ class RaceControl:
             prof = self.vsc_profiles.get(model) if (self.flag == "vsc" and self.vsc_mode == "delta") else None
             return None if prof is None else {"mode": "delta", "min_ms": list(prof), "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
 
+    @fieldrec.capture(_lock)
     def set_pace_config(self, tolerance_kmh: int | None = None, penalty: dict | None = None) -> None:
         """The director changes the tolerance and / or the penalty of the VSC / FCY being run, from now on (whoever was judged already keeps what he got)."""
         with _lock:
@@ -982,6 +1006,7 @@ class RaceControl:
             return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:], "delta": list(self.deltajudge.log)[-30:], "auto_off": sorted(self.auto_off),
                     "vsc_mode": self.vsc_mode, "vsc_fallback": self.vsc_fallback, "ref_models": sorted(self.reflaps.best)}
 
+    @fieldrec.capture(_lock)
     def give_back_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
         """One look at the advantage gained off the track. -> the events of app/live/giveback.py (open / cleared / due); [] and nothing kept when this is not a race with the rule on."""
         with _lock:
@@ -1002,6 +1027,7 @@ class RaceControl:
                 self._bump()
             return events
 
+    @fieldrec.capture(_lock)
     def give_back_forgive(self, ob_id: int) -> bool:
         with _lock:
             ok = bool(self.giveback and self.giveback.forgive(ob_id))
@@ -1017,6 +1043,7 @@ class RaceControl:
             ob = next((o for o in (self.giveback._open.values() if self.giveback else ()) if o["id"] == ob_id), None)
             return {"id": ob["id"], "car": ob["car"], "creditors": sorted(ob["creditors"])} if ob else None
 
+    @fieldrec.capture(_lock)
     def give_back_due_now(self, ob_id: int) -> dict | None:
         """The director sanctions an open obligation: closed and returned (None when it was not open); `give_back_restore` puts it back if its penalty cannot be written."""
         with _lock:
@@ -1026,6 +1053,7 @@ class RaceControl:
                 self.audit("give_back_due_manual", obligation=ob, executed=True)
             return ob
 
+    @fieldrec.capture(_lock)
     def give_back_restore(self, ob: dict) -> None:
         with _lock:
             if self.giveback:
@@ -1033,6 +1061,7 @@ class RaceControl:
                 self.audit("give_back_restored", obligation=ob, executed=True)
                 self._bump()
 
+    @fieldrec.capture(_lock)
     def give_back_report(self, car: int, now: float, ms: int, lap: int, spline: float) -> None:
         """An excursion off the track that the driver's own game reported (stewards/report)."""
         with _lock:
@@ -1069,14 +1098,14 @@ class RaceControl:
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
         rule = cut_rule_peek(self.server_id) if self.server_id else None   # (the cache only: this is also taken from the event loop and under the caller's lock, so no database; race-state refreshes it first)
         with _lock:
-            at = time.time() if now is None else now
+            at = self.clock.time() if now is None else now
             notices = [{"id": n["id"], "kind": n["kind"], "left_s": math.ceil(n["until"] - at), "text": n["text"], "to": n["to"]} for n in self.notices if n["until"] > at]
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule), **self.give_back_view(time.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:

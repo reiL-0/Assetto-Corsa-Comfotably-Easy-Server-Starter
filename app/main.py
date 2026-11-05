@@ -13,7 +13,7 @@ from app import racecontrol as race_control
 from app.api.v1 import api_router
 from app.config import settings
 from app.db import engine, init_db
-from app.live import raceaudit
+from app.live import fieldrec, raceaudit
 from app.stewards import engine as steward_incidents
 from app.web import mount_spa
 
@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
         await retention
         if not await asyncio.to_thread(metrics.flush, 8):
             log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
-        if not await asyncio.to_thread(raceaudit.close, 8):
+        if not await asyncio.to_thread(fieldrec.close, 8):
             log.warning("race audit shutdown: %s", raceaudit.stats())
         steward_incidents.accept(False)   # the UDP sockets live on until the process ends: nothing may be admitted after this last flush
         if not await asyncio.to_thread(steward_incidents.flush, 8):
