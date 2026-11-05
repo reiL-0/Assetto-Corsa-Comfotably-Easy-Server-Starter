@@ -12,6 +12,7 @@ The database session is the caller's (`sess`): the service commits what it chang
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from dataclasses import dataclass
@@ -212,6 +213,14 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         raise ServerError(400, "a Steam ID appears in more than one entry")
     if body.locked and not guids:
         raise ServerError(400, "a locked entry list needs at least one entry with a Steam ID (nobody could join)")
+    inst = supervisor.get(s.id)
+    old_snapshot = (s.session or {}).get("rulebook_snapshot")
+    new_snapshot = body.rulebook_snapshot.model_dump() if body.rulebook_snapshot else None
+    if (inst and inst.running and inst.acsp
+            and (inst.acsp.session or {}).get("session_type") == 3
+            and (old_snapshot != new_snapshot or
+                 (s.session or {}).get("rulebook_league_id") != body.rulebook_league_id)):
+        raise ServerError(409, "race in progress: the applied rulebook is frozen")
     cfg = {name: dict(kv) for name, kv in s.config.items()}
     srv = cfg.setdefault("SERVER", {})
     slots = len(body.entries) or body.max_clients
@@ -244,6 +253,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     s.welcome = body.welcome.strip()
     old_pace = (s.session or {}).get("pace_steam_id")
     s.session = {**body.model_dump(exclude={"admin_password", "restart"}), "race_est_min": est}
+    s.session["rulebook_revision"] = (hashlib.sha256(body.rulebook_snapshot.model_dump_json().encode()).hexdigest()
+                                      if body.rulebook_snapshot else None)
     if body.entries:
         s.entry_list = [
             {"MODEL": e.model, "SKIN": e.skin or _skin_for(skins, e.model, body.random_skins), "SPECTATOR_MODE": int(e.spectator),
@@ -263,6 +274,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     sess.add(s)
     sess.commit()
     sess.refresh(s)
+    from app.league import invalidate_rule_cache  # late: league imports the session schemas
+    invalidate_rule_cache(server_id)
     inst = supervisor.get(server_id)
     practicekeep.clear(server_id)   # a new set-up: the practice kept from the old one is not this one's
     if inst and inst.acsp:

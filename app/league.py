@@ -16,6 +16,7 @@ server and track. Laps logged before `cuts` was recorded have none and do not co
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 
@@ -36,7 +37,7 @@ from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
 from app.stewards.auto import cut_notices, give_back_penalties
-from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule
+from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn, _folder_name, _setup_name
 
@@ -170,7 +171,10 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
         model = m.car if m.car in cars else cars[0]
         setup = m.fixed_setup or (c.car_setups or {}).get(model) or s.car_setups.get(model, "")
         entries.append(EntryIn(model=model, driver_name=m.name, team=m.team, guid=m.guid, skin=m.skin if model == m.car else "", fixed_setup=setup, spectator=m.non_racing and m.in_pits))   # a skin belongs to the driver's own car
-    return s.model_copy(update={"entries": entries, "locked": True, "pickup": False, "cars": cars})
+    from app.rulebook import effective
+    snapshot = effective(c).model_copy(deep=True)
+    revision = hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()
+    return s.model_copy(update={"rulebook_revision": revision, "rulebook_league_id": c.id, "rulebook_snapshot": snapshot, "entries": entries, "locked": True, "pickup": False, "cars": cars})
 
 
 def active_suspensions(sess: Session, championship_id: int, kinds: tuple[str, ...], at: float, guid: str | None = None) -> list[LeagueSuspension]:
@@ -188,11 +192,29 @@ def qualy_banned(server_id: int, guid: str) -> bool:
         return bool(ev and ev.league_id and active_suspensions(s, ev.league_id, ("qualy",), time.time(), guid))
 
 
+def _applied_rulebook(sess: Session, server_id: int, c: Championship | None):
+    from app.rulebook import Rulebook, effective
+    if c is None:   # no league event running: no league rules, whatever snapshot the last session left on the server
+        return None
+    server = sess.get(Server, server_id)
+    snapshot = (server.session or {}).get("rulebook_snapshot") if server else None
+    if snapshot:
+        return Rulebook.model_validate(snapshot)
+    return effective(c) if c else None
+
+
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
+
+
+def invalidate_rule_cache(server_id: int) -> None:
+    """An applied session has a new snapshot; discard the previous session's rules."""
+    with _cut_rule_lock:
+        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES):
+            cache.pop(server_id, None)
 
 
 def cut_rule(server_id: int) -> dict | None:
@@ -201,7 +223,6 @@ def cut_rule(server_id: int) -> dict | None:
     hit = _CUT_RULES.get(server_id)
     if hit and time.time() - hit[0] < CUT_RULE_TTL:
         return hit[1]
-    from app.rulebook import effective   # (late: the rulebook module imports the championship ones)
     with _cut_rule_lock:   # (one read at a time: requests that find the cache stale together do not all go to the database, and an older read never replaces a newer one)
         hit = _CUT_RULES.get(server_id)
         if hit and time.time() - hit[0] < CUT_RULE_TTL:
@@ -211,7 +232,8 @@ def cut_rule(server_id: int) -> dict | None:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            cut = effective(c).detectors.cuts if c else None
+            rb = _applied_rulebook(s, server_id, c)
+            cut = rb.detectors.cuts if rb else None
             if cut:
                 rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": cut.max_seconds}
         if len(_CUT_RULES) > 64:
@@ -226,7 +248,6 @@ def give_back_rule(server_id: int) -> dict | None:
     hit = _GIVE_BACK_RULES.get(server_id)
     if hit and time.time() - hit[0] < CUT_RULE_TTL:
         return hit[1]
-    from app.rulebook import effective
     with _cut_rule_lock:
         hit = _GIVE_BACK_RULES.get(server_id)
         if hit and time.time() - hit[0] < CUT_RULE_TTL:
@@ -236,7 +257,8 @@ def give_back_rule(server_id: int) -> dict | None:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            gb = effective(c).detectors.give_back if c else None
+            rb = _applied_rulebook(s, server_id, c)
+            gb = rb.detectors.give_back if rb else None
             if gb and gb.enabled:
                 rule = {"seconds": gb.seconds, "window_s": gb.window_s}
         if len(_GIVE_BACK_RULES) > 64:
@@ -250,7 +272,6 @@ def flag_modes(server_id: int) -> dict:
     hit = _FLAG_MODES.get(server_id)
     if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
         return hit[1]
-    from app.rulebook import effective
     with _cut_rule_lock:
         hit = _FLAG_MODES.get(server_id)
         if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
@@ -260,8 +281,9 @@ def flag_modes(server_id: int) -> dict:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            if c:
-                modes = effective(c).detectors.flags.model_dump()
+            rb = _applied_rulebook(s, server_id, c)
+            if rb:
+                modes = rb.detectors.flags.model_dump()
         if len(_FLAG_MODES) > 64:
             _FLAG_MODES.clear()
         _FLAG_MODES[server_id] = (time.monotonic(), modes)

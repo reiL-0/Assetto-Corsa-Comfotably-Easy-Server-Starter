@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.live.nascar import MAX_SHARE, MAX_SHARES, MAX_TOTAL
+from app.rulebook import Rulebook
 
 Scalar = str | int | float | bool
 
@@ -162,6 +163,9 @@ class SessionIn(BaseModel):
     restrictor: int = Field(default=0, ge=0, le=100)   # % for every slot whose own restrictor is 0, same rule
     random_skins: bool = False   # each open slot (and each entry with no skin) gets a random skin of its car instead of the pack's first
     car_setups: dict[str, str] = {}   # model -> uploaded setup name, locked on that model's open slots (the league's roster slots get it too)
+    rulebook_revision: str | None = None  # SHA-256 of the applied document
+    rulebook_league_id: int | None = None
+    rulebook_snapshot: Rulebook | None = None  # versioned copy saved with the applied session
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all

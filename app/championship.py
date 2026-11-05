@@ -13,7 +13,7 @@ from sqlmodel import select
 from app import content, requirements
 from app.db import SessionDep
 from app.leaguelock import serialized
-from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Schedule
+from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Schedule, Server
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
 from app.schemas.servers import _folder_name, _setup_name
@@ -109,11 +109,29 @@ def get(championship_id: int, sess: SessionDep) -> Championship:
     return _get(sess, championship_id)
 
 
+def _refuse_racing_rule_edit(sess: SessionDep, championship_id: int) -> None:
+    # ponytail: check-then-write, not atomic with a race starting in the same instant; and a session applied before snapshots existed whose schedule is already "done" is not seen. Lock per server if that ever bites.
+    from app import supervisor
+    servers = {server.id for server in sess.exec(select(Server))
+               if (server.session or {}).get("rulebook_league_id") == championship_id}
+    for schedule in sess.exec(select(Schedule).where(Schedule.state == "running")):
+        event = sess.get(Event, schedule.event_id)
+        if event and event.league_id == championship_id:
+            servers.add(schedule.server_id)
+    for server_id in servers:
+        inst = supervisor.get(server_id)
+        if (inst and inst.running and inst.acsp
+                and (inst.acsp.session or {}).get("session_type") == 3):
+            raise HTTPException(409, "race in progress: rulebook is frozen; retry for the next session")
+
+
 @router.patch("/{championship_id}", response_model=Championship)
 @serialized
 def update(championship_id: int, body: ChampionshipIn, sess: SessionDep) -> Championship:
     c = get_open(sess, championship_id)
     sent = body.model_dump(exclude_unset=True)
+    if {"points_system", "penalties", "auto_rules"} & sent.keys():
+        _refuse_racing_rule_edit(sess, championship_id)
     if c.rulebook and {"points_system", "penalties", "auto_rules"} & sent.keys():
         raise HTTPException(409, "this league has a rulebook: its points, catalogue and detectors are edited there (PUT /championships/{id}/rulebook)")
     missing = sorted({n for n in (sent.get("car_setups") or {}).values() if not (content.setups_dir() / f"{n}.ini").is_file()})
@@ -342,6 +360,7 @@ def get_rulebook(championship_id: int, sess: SessionDep) -> dict:
 @serialized
 def put_rulebook(championship_id: int, body: Rulebook, sess: SessionDep) -> Rulebook:
     c = get_open(sess, championship_id)
+    _refuse_racing_rule_edit(sess, championship_id)
     c.rulebook = body.model_dump()
     sess.add(c)
     sess.commit()

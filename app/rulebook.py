@@ -11,9 +11,9 @@ show is a detector: contacts, "advantage" and "avoidable" are the stewards' judg
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.models import DEFAULT_POINTS_SYSTEM, Championship
 
@@ -81,8 +81,45 @@ class Detectors(_Strict):
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 
 
+class SlowCarRule(_Strict):
+    pace_ratio: float = Field(default=0.6, gt=0, lt=1, allow_inf_nan=False)
+    sustained_s: float = Field(default=8, ge=1, le=120)
+
+
+class SpinRule(_Strict):
+    stopped_s: float = Field(default=5, ge=1, le=120)
+
+
+class PileupRule(_Strict):
+    cars: int = Field(default=3, ge=2, le=50)
+    window_s: float = Field(default=10, ge=1, le=120)
+    escalate_to: Literal["FCY"] = "FCY"
+
+
+class SevereRule(_Strict):
+    cars: int = Field(default=5, ge=2, le=50)
+    escalate_to: Literal["SC"] = "SC"  # stored only; no SC implementation
+
+
+class Neutralization(_Strict):
+    """Configuration only. Missing categories use VSC; off never enables automation."""
+
+    mode: Literal["off", "shadow", "live"] = "off"
+    default_mode: Literal["VSC", "FCY"] = "VSC"
+    mode_by_category: dict[Annotated[str, StringConstraints(max_length=64)], Literal["VSC", "FCY"]] = Field(default_factory=dict, max_length=100)
+    green_after_laps: int = Field(default=3, ge=1, le=10)
+    green_clear_s: float = Field(default=15, ge=1, le=300)
+    green_max_extra_laps: int = Field(default=3, ge=0, le=10)
+    slow_car: SlowCarRule = Field(default_factory=SlowCarRule)
+    spin: SpinRule = Field(default_factory=SpinRule)
+    pileup: PileupRule = Field(default_factory=PileupRule)
+    severe: SevereRule = Field(default_factory=SevereRule)
+    stale_telemetry_s: float = Field(default=1.5, gt=0, le=10)
+
+
 class Rulebook(_Strict):
     schema_version: Literal[1] = SCHEMA_VERSION
+    neutralization: Neutralization = Field(default_factory=Neutralization)
     preset: str | None = None   # the template it was copied from, for the record
     scoring: Scoring = Field(default_factory=Scoring)
     catalogue: list[CatalogueItem] = Field(default_factory=list, max_length=50)

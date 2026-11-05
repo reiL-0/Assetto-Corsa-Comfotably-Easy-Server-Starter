@@ -167,3 +167,85 @@ def test_the_nascar_cup_preset_and_a_rulebook_saved_before_stage_points_existed(
     assert nc.stage_points == [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
     old = Rulebook.model_validate({"schema_version": 1, "scoring": {"table": [25, 18]}})   # a rulebook stored before `stage_points`
     assert old.scoring.stage_points == []
+
+
+def test_old_rulebooks_receive_disabled_neutralization_defaults():
+    rb = Rulebook.model_validate({"schema_version": 1})
+    n = rb.neutralization
+    assert rb.schema_version == 1 and n.mode == "off" and n.default_mode == "VSC"
+    assert n.mode_by_category == {}
+    assert (n.green_after_laps, n.green_clear_s, n.green_max_extra_laps) == (3, 15, 3)
+    assert (n.slow_car.pace_ratio, n.slow_car.sustained_s, n.spin.stopped_s) == (0.6, 8, 5)
+    assert (n.pileup.cars, n.pileup.window_s, n.pileup.escalate_to) == (3, 10, "FCY")
+    assert (n.severe.cars, n.severe.escalate_to, n.stale_telemetry_s) == (5, "SC", 1.5)
+
+
+@pytest.mark.parametrize("bad", [
+    {"green_after_laps": 0}, {"green_after_laps": 11}, {"green_after_laps": 1.5},
+    {"green_clear_s": 0}, {"green_clear_s": 301},
+    {"green_max_extra_laps": -1}, {"green_max_extra_laps": 11},
+    {"slow_car": {"pace_ratio": 0}}, {"slow_car": {"pace_ratio": 1}},
+    {"slow_car": {"sustained_s": 0}}, {"slow_car": {"sustained_s": 121}},
+    {"spin": {"stopped_s": 0}}, {"spin": {"stopped_s": 121}},
+    {"pileup": {"cars": 1}}, {"pileup": {"cars": 51}},
+    {"pileup": {"window_s": 0}}, {"pileup": {"window_s": 121}},
+    {"pileup": {"escalate_to": "SC"}}, {"severe": {"cars": 1}},
+    {"severe": {"cars": 51}}, {"severe": {"escalate_to": "FCY"}},
+    {"stale_telemetry_s": 0}, {"stale_telemetry_s": 11},
+    {"stale_telemetry_s": float("nan")},
+    {"mode_by_category": {"GT3": "SC"}}, {"mode": "auto"},
+])
+def test_neutralization_rejects_invalid_values(bad):
+    with pytest.raises(ValueError):
+        Rulebook.model_validate({"neutralization": bad})
+
+
+def test_neutralization_and_flags_survive_storage():
+    cid = _league("Neutralization")
+    rb = Rulebook.model_validate({
+        "neutralization": {"mode": "shadow", "mode_by_category": {"GT3": "FCY"},
+                           "green_after_laps": 4, "slow_car": {"pace_ratio": 0.7}},
+        "detectors": {"flags": {"blue": "off", "danger": "live"}},
+    }).model_dump()
+    assert api.put(f"{V}/championships/{cid}/rulebook", json=rb).status_code == 200
+    assert api.get(f"{V}/championships/{cid}/rulebook").json()["rulebook"] == rb
+    with Session(engine) as s:
+        assert Rulebook.model_validate(s.get(Championship, cid).rulebook).model_dump() == rb
+
+
+def test_applied_session_keeps_a_versioned_copy_until_the_next_application():
+    from app.league import _applied_rulebook, session_for
+    from app.models import Event, LeagueMember, Server
+    from app.schemas.servers import SessionIn
+    cid = _league("Snapshot")
+    sid = api.post(f"{V}/servers", json={"name": "Snapshot"}).json()["id"]
+    with Session(engine) as s:
+        s.add(LeagueMember(championship_id=cid, guid=A, name="A"))
+        ev = Event(title="Snapshot", league_id=cid,
+                   data={"name": "Snapshot", "track": "spa", "cars": ["bmw"]})
+        s.add(ev)
+        s.commit()
+        applied = session_for(s, ev, 0)
+        assert applied.rulebook_snapshot.schema_version == 1
+        assert len(applied.rulebook_revision) == 64
+        server = s.get(Server, sid)
+        server.session = applied.model_dump()
+        s.add(server)
+        s.commit()
+        c = s.get(Championship, cid)
+        c.rulebook = Rulebook(neutralization={"green_after_laps": 7},
+                              detectors={"flags": {"blue": "live"}}).model_dump()
+        s.add(c)
+        s.commit()
+        s.expire_all()
+        restored = SessionIn.model_validate(s.get(Server, sid).session)
+        assert restored.rulebook_snapshot.neutralization.green_after_laps == 3
+        assert _applied_rulebook(s, sid, c).detectors.flags.blue == "shadow"
+        next_session = session_for(s, ev, 1)
+        assert next_session.rulebook_revision != restored.rulebook_revision
+        assert next_session.rulebook_snapshot.neutralization.green_after_laps == 7
+        assert next_session.rulebook_snapshot.detectors.flags.blue == "live"
+        assert _applied_rulebook(s, sid, None) is None   # no league event running: the old snapshot must not keep penalising
+    import pytest
+    with pytest.raises(ValueError):   # a category key is bounded, like the rest of the document
+        Rulebook.model_validate({"neutralization": {"mode_by_category": {"x" * 65: "VSC"}}})

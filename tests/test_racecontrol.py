@@ -373,3 +373,59 @@ def test_every_server_gets_the_trainer_by_default_and_the_selector_can_stop_one(
     assert "opr_trainer" not in csp.extra_for(3, "") and "opr_trainer" in csp.extra_for(4, "") and csp.extra_for(3, "").count("opr_hub.lua") == 1
     monkeypatch.setattr(settings, "csp_hub", False)                  # the hub's own kill switch also stops the trainer: it rides on the hub's section
     assert csp.extra_for(4, "") == ""
+
+
+def test_rulebook_edits_are_refused_in_a_race_and_allowed_between_races(live):
+    from app.models import Championship, Event, Schedule
+    sid, client, _ = live
+    cid = api.post(f"{V}/championships", json={"name": "Frozen rules"}).json()["id"]
+    with Session(engine) as s:
+        ev = Event(title="Frozen", league_id=cid)
+        s.add(ev)
+        s.commit()
+        sc = Schedule(server_id=sid, event_id=ev.id, start_at=0, state="running")
+        s.add(sc)
+        s.commit()
+        schedule_id = sc.id
+    url = f"{V}/championships/{cid}/rulebook"
+    assert api.put(url, json={"neutralization": {"green_after_laps": 4}}).status_code == 409
+    assert api.patch(f"{V}/championships/{cid}", json={"name": "Frozen rules", "auto_rules": {"cuts_per_step": 1, "step_seconds": 5, "max_seconds": 5}}).status_code == 409
+    with Session(engine) as s:
+        assert s.get(Championship, cid).rulebook is None
+    client.session = {"session_type": 1}
+    assert api.put(url, json={"neutralization": {"green_after_laps": 4}}).status_code == 200
+    with Session(engine) as s:
+        sc = s.get(Schedule, schedule_id)
+        sc.state = "done"
+        s.add(sc)
+        s.commit()
+
+
+def test_applied_rulebook_cannot_be_replaced_during_a_race(live, monkeypatch):
+    import asyncio
+    from app.models import Server
+    from app.rulebook import Rulebook
+    from app.schemas.servers import SessionIn
+    from app.services import server_service
+    sid, client, _ = live
+    monkeypatch.setattr(server_service, "check_content", lambda *args: {"bmw": [""]})
+    with Session(engine) as s:
+        server = s.get(Server, sid)
+        server.session = {"rulebook_snapshot": Rulebook().model_dump(), "rulebook_league_id": 123}
+        s.add(server)
+        s.commit()
+        body = SessionIn(name="Changed", track="spa", cars=["bmw"], race_laps=5,
+                         rulebook_league_id=123,
+                         rulebook_snapshot=Rulebook(neutralization={"green_after_laps": 6}))
+        with pytest.raises(server_service.ServerError) as caught:
+            asyncio.run(server_service.apply(s, server, body))
+        assert caught.value.status == 409
+        s.refresh(server)
+        assert server.session["rulebook_snapshot"]["neutralization"]["green_after_laps"] == 3
+        client.session = {"session_type": 1}
+        body.restart = False
+        from app import league
+        monkeypatch.setitem(league._FLAG_MODES, sid, (0, {"blue": "live", "danger": "live"}))
+        asyncio.run(server_service.apply(s, server, body))
+        assert sid not in league._FLAG_MODES
+        assert server.session["rulebook_snapshot"]["neutralization"]["green_after_laps"] == 6

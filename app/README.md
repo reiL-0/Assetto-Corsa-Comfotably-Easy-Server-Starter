@@ -65,3 +65,23 @@ La sesión de un preset admite `nascar: {"total": int de 2 a 1000, "shares": [de
 2. `server_service.start` → `integrity.gate` → `wake.before_start` (libera puertos) → `timeline.resume` (lee la posición) → `supervisor.start`.
 3. `supervisor` crea el proceso, el cliente ACSP se conecta y `timeline` coloca la sesión donde toca.
 4. Los resultados llegan a `results/` y se leen con `results.parse_result_file` + `penalties`.
+
+### Neutralización: configuración de backend
+
+`Rulebook.neutralization` es opcional y mantiene `schema_version: 1`. No activa detectores,
+escalada ni verde automático: `mode` admite off/shadow/live y su default es off.
+`default_mode` es VSC; `mode_by_category` admite hasta 100 categorías con VSC/FCY.
+Los valores por defecto son: green_after_laps=3 (1..10), green_clear_s=15 (1..300),
+green_max_extra_laps=3 (0..10), slow_car.pace_ratio=0.6 (0 < ratio < 1),
+slow_car.sustained_s=8 (1..120), spin.stopped_s=5 (1..120), pileup.cars=3 (2..50),
+pileup.window_s=10 (1..120), pileup.escalate_to=FCY, severe.cars=5 (2..50),
+severe.escalate_to=SC y stale_telemetry_s=1.5 (0 < segundos <= 10).
+SC y los umbrales solo se guardan en esta fase.
+
+`session_for` copia el reglamento al aplicar un evento de liga. El JSON existente de
+`Server.session` conserva `rulebook_snapshot` (incluido schema_version), `rulebook_revision`
+(SHA-256 del documento) y `rulebook_league_id`; cortes, devolución y flags leen esa copia.
+Las sesiones antiguas sin copia conservan la lectura anterior. PUT del reglamento,
+PATCH de reglas legacy y reemplazo de la copia aplicada devuelven 409 durante Race
+(ACSP session_type=3). No se encola el cuerpo rechazado: hay que repetirlo entre carreras
+y aplicar el evento para la siguiente sesión; editar la liga no modifica la copia anterior.
