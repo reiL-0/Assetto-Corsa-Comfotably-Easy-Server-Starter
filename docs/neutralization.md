@@ -1,4 +1,4 @@
-# Neutralización automática: fases 3–5
+# Neutralización automática: fases 3–6
 
 Las reglas se leen de `Server.session.rulebook_snapshot`, aplicado al arrancar la
 sesión del evento. Editar el reglamento de la liga no modifica esa sesión.
@@ -52,3 +52,29 @@ opcional del reglamento; las formas HTTP permanecen iguales, pero `cuts_rule.cap
 y el máximo de cuts en la calibración reflejan el menor de ambos topes.
 
 Para resultados, el snapshot solo se utiliza si `rulebook_league_id` coincide con la liga del resultado; de lo contrario se usa `effective(c)`. No se persiste el momento de aplicación, por lo que no se distinguen eventos antiguos de la misma liga (límite `ponytail:` en `app/stewards/auto.py`).
+
+
+## Safety car por accidente muy grave (fase 6)
+
+Sin motor NASCAR armado, `severe.cars` del snapshot aplicado selecciona SC.
+En `shadow` solo queda la decisión en el log, sin comandos ni avisos visibles.
+En `live`, con pace car configurado y telemetría reciente en esta sesión, se
+reutiliza `RaceControl.set_flag("yellow", field=...)`: es la misma ruta del
+panel de bandera amarilla sin NASCAR. El hub existente lee `pacecar.mode=lead`.
+No se modifican Lua/CSP ni la IA. Sin pace car disponible se mantiene la bandera
+y se avisa «SC recomendado, sácalo a mano».
+
+Solo se actúa en carrera, fuera de formación, después de observar movimiento
+y parada sostenida con datos recientes. Puede escalar una VSC/FCY iniciada por
+este automatismo; respeta las banderas del director y no repite un SC activo.
+El procedimiento existente cuenta las vueltas del pace car: automático de 3–6
+vueltas, aviso si la pista sigue ocupada, `to go`, entrada a boxes y verde al
+cruzar el líder de relanzamiento. NASCAR conserva su detector y procedimiento.
+
+No se añaden temporizadores. El verde manual descarta la caution existente y
+cancela su relanzamiento. `SC_INCIDENT_COOLDOWN_S` (120 s desde el final del SC)
+impide encadenar despliegues; el detector conserva además su deduplicación por
+incidente y ventana. El kill switch bloquea el despliegue y los pasos automáticos
+de relanzamiento de este SC (también al cambiar mode fuera de live); el director
+conserva el control manual. Las pruebas usan dobles, no validan conducción real
+dentro de Assetto Corsa.

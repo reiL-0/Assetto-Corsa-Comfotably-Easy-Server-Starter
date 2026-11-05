@@ -189,7 +189,8 @@ class NeutralizationWatch:
         if pileup:
             if (self.last_pileup is not None
                     and now - self.last_pileup[0] <= rule["pileup"]["window_s"]
-                    and self.last_pileup[1].intersection(cars)):
+                    and self.last_pileup[1].intersection(cars)
+                    and not (len(self.last_pileup[1]) < rule["severe"]["cars"] <= len(cars))):
                 return None
             self.last_pileup = (now, set(cars))
         return {"kind": "pileup" if pileup else self.events[new[0]][1], "cars": cars if pileup else new,

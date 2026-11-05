@@ -64,6 +64,7 @@ AUTO_MAX_AGE_S = 3.0              # the automatic flags of a screen are not serv
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
 PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
+SC_INCIDENT_COOLDOWN_S = 120.0     # minimum interval after an automatic SC ends before another can deploy
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 RACE_TYPE = 3                     # ACSP session_type of a race
@@ -87,6 +88,9 @@ class RaceControl:
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
         self.neutralization_watch = NeutralizationWatch()
+        self._neutralization_flag = False
+        self._neutralization_sc = False
+        self._sc_cooldown_until = 0.0
         self.neutralization_excluded: set[int] = set()
         self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
         self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
@@ -162,12 +166,17 @@ class RaceControl:
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
                 self.flag = "green"
+            if self._neutralization_sc and flag not in CAUTION:
+                self._sc_cooldown_until = time.monotonic() + SC_INCIDENT_COOLDOWN_S
+                self._neutralization_sc = False
+            self._neutralization_flag = source == "incident" and flag in SLOWING
             was_caution = self.flag in CAUTION
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
             self.pace_out = flag == "yellow" or (self.pace_out and flag in SLOWING)
             if flag not in CAUTION:
+                self.caution = None
                 self.notices = [x for x in self.notices if not x.get("hold") or x.get("hold") == "winner"]   # (the caution is over: what was held on the screen goes with it, but the winner stays until the session restarts)
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
@@ -240,6 +249,8 @@ class RaceControl:
         (the first of the restart order; with nobody to restart, the pace car reporting from the pits). Without a pace car, the restart leader crossing is enough. Checked and set under one lock:
         a director's checkered or a new pace car cannot slip in between."""
         with _lock:
+            if self._neutralization_sc and ("neutralization" in self.auto_off or self.neutralization_rule.get("mode") != "live"):
+                return None
             if self.flag in SLOWING and not self.pace_out:
                 return self._neutralization_green(car, field)
             if not (self.pace_car_in and self.flag in CAUTION and self.caution):
@@ -371,6 +382,8 @@ class RaceControl:
         done and the track is clear: the automatic 'to go', announced as 'two' a lap before: 'two' = "two to go"), 'warn' (CAUTION_MAX_LAPS done and still not clear: said once, from then on the 'to go' is the director's), or None."""
         with _lock:
             c = self.caution
+            if self._neutralization_sc and ("neutralization" in self.auto_off or self.neutralization_rule.get("mode") != "live"):
+                return None
             if not (c and self.flag in CAUTION and not self.pace_car_in and (self.one_more or not self.caution_notified)):   # (after the six-lap warning only a pending "two to go" still counts)
                 return None
             if self.pace_car is not None:
@@ -579,9 +592,9 @@ class RaceControl:
             if not self.nascar:
                 mode = "off" if "neutralization" in self.auto_off else rule.get("mode", "off")
                 mono = time.monotonic()
-                samples = {c: s for c, s in field.samples().items() if c != self.pace_car}
+                samples = {c: s for c, s in field.samples().items() if c != self.pace_car and c not in self.neutralization_excluded}
                 in_pit = {c for c, t in self._pit_seen.items() if now - t < PIT_RECENT}
-                racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white") and not self.formation
+                racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and (self.flag in ("green", "white") or (self.flag in SLOWING and self._neutralization_flag and not self.pace_out)) and not self.formation
                 decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode})
                 if decision:
                     category = rule.get("category", "")
@@ -591,9 +604,23 @@ class RaceControl:
                     if len(decision["events"]) >= rule["severe"]["cars"]:
                         target = "SC"
                         decision["cars"] = sorted(decision["events"])
-                    self.autoflags.log.append({**decision, "op": "open", "decision": target, "mode": "shadow" if target == "SC" else mode,
+                    self.autoflags.log.append({**decision, "op": "open", "decision": target, "mode": mode,
                                               "state": self.flag, "timestamp": now, "category": category})
-                    if mode == "live" and target in ("VSC", "FCY"):
+                    if mode == "live" and target == "SC":
+                        if mono < self._sc_cooldown_until:
+                            return None, []
+                        pace = field.samples().get(self.pace_car)
+                        if pace is None or not 0 <= mono - pace.stamp <= rule["stale_telemetry_s"]:
+                            self.notify("SC recomendado, sácalo a mano: pace car no disponible en la sesión", "flag")
+                            return None, []
+                        if self.flag in SLOWING:
+                            # End the virtual caution through the existing cleanup before starting a fresh SC.
+                            self.set_flag("green", now=now, source="incident", field=field)
+                        actions = self.set_flag("yellow", now=now, source="incident", field=field)
+                        self._neutralization_sc = True
+                        self.notify("SAFETY CAR AUTOMÁTICO: accidente muy grave", "flag")
+                        return None, actions
+                    if mode == "live" and target in ("VSC", "FCY") and self.flag in ("green", "white"):
                         return None, self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field)
                 return None, []
             racing = bool(self.nascar and self.nascar.phase in ("racing", "ot_run") and self.nascar.laps >= 1 and self.flag in ("green", "white"))

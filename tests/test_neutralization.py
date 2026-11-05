@@ -58,13 +58,13 @@ def test_off_stale_and_director_kill_do_nothing(monkeypatch, mode, stale, killed
     assert rc.flag == "green" and not rc.autoflags.log and not rc.penalties
 
 
-def test_severe_is_shadow_even_when_live(monkeypatch):
+def test_severe_live_without_pace_car_warns(monkeypatch):
     rc, feed = scenario(monkeypatch, "live", count=5)
     for t in range(1, 8):
         feed(t, 0)
-    assert rc.flag == "green" and not rc.notices
+    assert rc.flag == "green" and "SC recomendado" in rc.notices[-1]["text"]
     assert rc.autoflags.log[-1]["decision"] == "SC"
-    assert rc.autoflags.log[-1]["mode"] == "shadow"
+    assert rc.autoflags.log[-1]["mode"] == "live"
 
 
 def test_stale_gap_cannot_complete_sustained_stop(monkeypatch):
@@ -242,11 +242,12 @@ def test_severe_threshold_below_pileup_records_sc_without_execution(monkeypatch,
     for t in range(1, 8):
         assert feed(t, 0) == (None, [])
     setter.assert_not_called()
-    assert rc.flag == "green" and not rc.notices and not rc.penalties
+    assert rc.flag == "green" and not rc.penalties
+    assert bool(rc.notices) == (mode == "live")
     assert len(rc.autoflags.log) == 1
     decision = rc.autoflags.log[-1]
     assert decision["decision"] == "SC"
-    assert decision["mode"] == "shadow"
+    assert decision["mode"] == mode
     assert decision["cars"] == [0, 1]
 
 
@@ -505,3 +506,161 @@ def test_green_counts_only_strictly_increasing_completed_laps(green_race, progre
             generation=0, stamp=t, completed_laps=completed)}
         rc.green_if_due(1, field)
     assert rc._green_laps == expected
+
+
+@pytest.mark.parametrize("mode", ["shadow", "live"])
+def test_severe_reuses_real_pace_car_route(monkeypatch, mode):
+    rc, feed = scenario(monkeypatch, mode, count=5)
+    # The pace car is connected and has recent session telemetry.
+    rc.set_pace_car(4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    setter = Mock(wraps=rc.set_flag)
+    monkeypatch.setattr(rc, "set_flag", setter)
+    for t in range(1, 8):
+        feed(t, 0)
+    if mode == "shadow":
+        setter.assert_not_called()
+        assert not rc.notices and rc.pace_car_state()["mode"] == "wait"
+    else:
+        setter.assert_called_once()
+        assert setter.call_args.args == ("yellow",)
+        assert setter.call_args.kwargs["source"] == "incident"
+        assert rc.caution.pace_only and rc.pace_car_state()["mode"] == "lead"
+        for t in range(8, 20):
+            feed(t, 0)
+        assert setter.call_count == 1
+
+
+@pytest.mark.parametrize("flag", ["vsc", "fcy"])
+def test_severe_escalates_only_automatic_virtual_flags(monkeypatch, flag):
+    for source in ("director", "incident"):
+        rc, feed = scenario(monkeypatch, "live", count=5)
+        rc.set_pace_car(4)
+        rc.neutralization_rule["severe"]["cars"] = 4
+        rc.set_flag(flag, 80, source=source)
+        for t in range(1, 8):
+            feed(t, 0)
+        assert rc.flag == ("yellow" if source == "incident" else flag)
+
+
+@pytest.mark.parametrize("blocked", ["kill", "formation", "practice", "stale_pace"])
+def test_severe_deployment_guards(monkeypatch, blocked):
+    rc, feed = scenario(monkeypatch, "live", count=5)
+    rc.set_pace_car(9 if blocked == "stale_pace" else 4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    if blocked == "kill":
+        rc.auto_off.add("neutralization")
+    elif blocked == "formation":
+        rc.formation = True
+    elif blocked == "practice":
+        rc.session_ref["session_type"] = 1
+    setter = Mock(wraps=rc.set_flag)
+    rc.set_flag = setter
+    for t in range(1, 8):
+        feed(t, 0)
+    setter.assert_not_called()
+    assert rc.flag == "green"
+
+
+def test_manual_green_cancels_sc_and_cooldown_prevents_chain(monkeypatch):
+    rc, feed = scenario(monkeypatch, "live", count=5)
+    rc.set_pace_car(4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    for t in range(1, 8):
+        feed(t, 0)
+    assert rc.flag == "yellow"
+    rc.set_flag("green")
+    assert rc.caution is None and rc.caution_lap(4, {}, 1008) is None
+    for t in range(8, 23):
+        feed(t, 180 if t < 11 else 0)
+    assert rc.flag == "green"
+
+
+
+def test_additional_cars_escalate_same_incident_to_severe(monkeypatch):
+    from app.live.field import Sample
+    rc = RaceControl({"session_type": 3})
+    rc.neutralization_rule = Neutralization(mode="live", spin={"stopped_s": 1}).model_dump()
+    rc.set_pace_car(9)
+    field = Mock()
+    for t in range(6):
+        monkeypatch.setattr("app.live.racecontrol.time.monotonic", lambda: t)
+        speeds = {c: 0 if t >= (3 if c >= 3 else 1) else 180 for c in range(5)}
+        field.samples.return_value = {c: Sample(.1, 1, 0, t, 0) for c in [0, 1, 2, 3, 4, 9]}
+        field.snapshot.return_value = {c: .1 for c in speeds}
+        rc.incident_step(speeds, field, 1000 + t)
+        if t == 2:
+            assert rc.flag == "vsc"
+    assert rc.flag == "yellow" and rc.pace_car_state()["mode"] == "lead"
+
+
+def test_kill_switch_stops_automatic_sc_restart(monkeypatch):
+    rc, feed = scenario(monkeypatch, "live", count=5)
+    rc.set_pace_car(4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    for t in range(1, 8):
+        feed(t, 0)
+    rc.auto_off.add("neutralization")
+    for _ in range(10):
+        assert rc.caution_lap(4, {}, 1100) is None
+    assert rc.flag == "yellow" and not rc.pace_car_in
+    rc.set_flag("green")
+    assert rc.flag == "green" and rc.caution is None
+
+
+def test_automatic_sc_uses_existing_to_go_and_green(monkeypatch):
+    rc, feed = scenario(monkeypatch, "live", count=5)
+    rc.set_pace_car(4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    for t in range(1, 8):
+        feed(t, 0)
+    assert rc.caution.pace_only
+    assert [rc.caution_lap(4, {}, 1100 + i) for i in range(3)] == [None, None, "two"]
+    rc.restart_plan({0: .5, 1: .4, 2: .3, 3: .2, 4: .6}, 2)
+    assert rc.caution_lap(4, {}, 1104) == "one"
+    leader = rc.caution.restart[0]
+    rc.go_armed = True
+    assert rc.green_if_due(leader) is None  # waits for the physical pace car
+    rc.report_pit(4, True, now=1105)
+    assert rc.green_if_due(leader) == []
+    assert rc.flag == "green" and rc.caution is None
+
+
+@pytest.mark.parametrize("flag", ["vsc", "fcy"])
+@pytest.mark.parametrize("previous", ["counted", "two", "one"])
+def test_escalated_sc_starts_own_caution_and_ignores_virtual_green(monkeypatch, flag, previous):
+    rc, feed = scenario(monkeypatch, "live", count=5)
+    rc.set_pace_car(4)
+    rc.neutralization_rule["severe"]["cars"] = 4
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 1: .4, 2: .3, 3: .2, 4: .6}
+    rc.set_flag(flag, 80, source="incident", field=field)
+    old_caution = rc.caution
+    for i in range(5):
+        rc.caution_lap(4, {}, 1000 + i)
+    if previous != "counted":
+        rc.restart_plan(field.snapshot(), 2 if previous == "two" else 1)
+    # Virtual green counters have also progressed before the escalation.
+    rc._green_laps = rc.neutralization_rule["green_after_laps"]
+    rc._green_clear_since = rc._green_last_look = 0
+    for t in range(1, 8):
+        feed(t, 0)
+    assert rc.flag == "yellow" and rc._neutralization_sc
+    assert rc.caution is not old_caution
+    assert rc.caution_laps == -1
+    assert not rc.one_more and not rc.pace_car_in and not rc.caution_notified
+    assert rc.pace_car_state()["mode"] == "lead"
+    assert rc.vsc_id == 0 and rc._green_laps == -1
+    for t in range(8, 20):
+        feed(t, 80)
+        assert rc.green_if_due(0, field) is None
+    assert rc.flag == "yellow"
+    if previous == "counted":
+        # A blocked track reaches the warning only after six of the SC's own full laps.
+        assert [rc.caution_lap(4, {0: 0}, 1100 + i) for i in range(7)] == [None] * 6 + ["warn"]
+        assert rc.caution_laps == 6 and not rc.pace_car_in
+        return
+    # Partial crossing, then two full laps: only now may 'two to go' be called.
+    assert [rc.caution_lap(4, {}, 1100 + i) for i in range(3)] == [None, None, "two"]
+    rc.restart_plan(field.snapshot(), 2)
+    assert rc.caution_lap(4, {}, 1103) == "one"
