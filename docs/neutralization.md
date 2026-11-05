@@ -79,3 +79,71 @@ de relanzamiento de este SC (también al cambiar mode fuera de live); el directo
 conserva el control manual. Las pruebas usan dobles, no validan conducción real
 dentro de Assetto Corsa.
 Un verde con el pace car fuera y sin «to go» mantiene `pacecar.mode=in` al entrar en boxes y después de aparcar, para que el hub complete el retorno y conserve el freno. Un nuevo yellow, `set_pace_car`, cambio de sesión/nueva carrera o reset de estado cancela este retorno independiente, sin activar el relanzamiento NASCAR.
+
+## Auditoría de control de carrera
+
+El gestor escribe `<ACM_DATA_DIR>/race-audit/events.jsonl` (por defecto
+`data/race-audit/events.jsonl`). Un único archivo incluye todos los servidores;
+rota a los 10 MiB, con diez copias `.1`…`.10` (unos 110 MiB retenidos).
+Directorio 0700 y archivos 0600. El servicio instalado en `ops/install.sh` usa
+`ACM_DATA_DIR` y la unidad `acm`; el journal se consulta con
+`journalctl -u acm --since today | rg 'race audit'`. Staging tiene su propio
+directorio, definido en `ops/staging_setup.sh`.
+
+Cada línea es un objeto JSON con `ts` UTC ISO 8601, `monotonic` (reloj local del
+proceso), `server_id`, `session` (tipo/nombre cuando se conocen), `kind` y evidencia.
+Los eventos de RaceControl incluyen `rulebook_revision`, `mode`, slots y su mapa
+`guids`, sin credenciales. Los resultados usan el guid y el nombre del archivo.
+`session` o la revisión pueden ser nulos si todavía no se conoce el snapshot.
+No hay muestras continuas de telemetría: las velocidades aparecen al decidir y
+aproximadamente cada cinco segundos durante una neutralización.
+
+`neutralization_decision` describe la evaluación (`executed=false`);
+`neutralization_applied` confirma la actuación live (`executed=true`).
+`neutralization_gate` registra cambios de modo, kill switch y coches con datos
+viejos; no simula una decisión contrafactual con datos descartados.
+`neutralization_discard` explica cooldown o pace car ausente. `flag` conserva
+`source` (director, incident, neutralization, NASCAR, formación), parámetros y
+acciones. `state_change` permite reconstruir bandera, pace car, `pace_park`,
+procedimiento caution y sanciones en memoria. Los jueces guardan la decisión y
+si se aplicó; las banderas automáticas guardan el modo efectivo. `executed` en
+una bandera automática live indica habilitación para servirla al hub, no prueba
+que el cliente la haya mostrado.
+
+El verde registra vueltas contadas, pista limpia, estado periódico, decisión y
+extensión/aviso al director. Los eventos give_back y cuts conservan obligaciones,
+ventanas y contadores. Las propuestas de sanciones de resultados terminan en
+`_staged`, con `persistence=pending_commit` y valor original/final/tope; al contar
+resultados, el commit exitoso produce `_created`, `persistence=committed`.
+Las sanciones explícitas, los perdones y descartes también se registran.
+El JSONL no es una transacción conjunta con la base de datos.
+
+La escritura usa un hilo único y una FIFO de 4096 eventos; el productor no accede
+al disco ni a la red. La cola saturada se descarta con contador antes de copiar o serializar. La evidencia
+se copia con límites de 256 nodos, 8192 caracteres totales, 512 por cadena,
+32 elementos por contenedor y profundidad 6; los recortes llevan `[truncated]`.
+El escritor serializa esa copia acotada. Si un paso supera las 200 decisiones
+retenidas por el historial de banderas, se escribe `audit_gap` con `lost`. `raceaudit.stats()` y la respuesta HTTP exponen `queued` (admitidos),
+`written`, `errors`, `dropped` y `pending`. Un error de escritura no llega al
+control de carrera; el siguiente evento reintenta abrir el archivo. El apagado
+normal espera hasta ocho segundos; una terminación abrupta o disco bloqueado
+pueden perder eventos pendientes. Un proceso gestor por directorio, como el resto
+del control de carrera; no coordina rotación entre varios procesos.
+
+Lectura con los mismos permisos de race-control (steward/admin):
+`GET /api/v1/servers/{id}/race-control/audit?since=2026-11-05T00:00:00Z&limit=100`.
+Si falla la lectura, devuelve `read_error` y conserva los contadores.
+Devuelve `{events, stats}`, últimos eventos en orden de escritura; `since` es
+inclusivo y `limit` admite 1–1000. La lectura no espera a la cola y puede omitir
+los eventos aún pendientes. Recorre archivos retenidos desde el más reciente.
+
+```sh
+# Seguir un servidor en vivo
+tail -F "$ACM_DATA_DIR/race-audit/events.jsonl" | jq -c 'select(.server_id == 2)'
+# Decisiones, evidencia y ejecución; incluir las copias rotadas si hace falta
+jq -c 'select(.server_id == 2 and (.kind | startswith("neutralization_")))' \
+   "$ACM_DATA_DIR/race-audit/events.jsonl"
+# Sanciones y topes aplicados
+jq -c 'select(has("original_seconds")) | {ts,kind,driver_guid,original_seconds,final_seconds,cap,persistence}' \
+   "$ACM_DATA_DIR/race-audit/events.jsonl"
+```

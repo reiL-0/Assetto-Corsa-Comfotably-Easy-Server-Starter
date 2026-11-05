@@ -26,10 +26,11 @@ import os
 import re
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
@@ -40,7 +41,7 @@ from app.config import settings
 from app.db import SessionDep, engine
 from app.models import GiveBackDue, LeagueMember, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
-from app.live import acsp
+from app.live import acsp, raceaudit
 from app.live.nascar import DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
@@ -181,6 +182,8 @@ def save_dues(rows: list[dict]) -> None:
         for r in rows:
             s.add(GiveBackDue(**r))
         s.commit()
+    for row in rows:
+        raceaudit.record(row["server_id"], "give_back_due_saved", due=row, executed=True)
 
 
 def slot_of(cars: dict, steam_id: str) -> int | None:
@@ -224,7 +227,10 @@ def incident_tick(now: float) -> None:
         rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off")
         if not rc:
             continue
+        if rc.neutralization_rule != rule:
+            rc.audit("mode_change", previous=rc.neutralization_rule, rule=rule, executed=True)
         rc.neutralization_rule = rule
+        rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}
         out = _non_racing_guids(now)   # (the director and the caster are not racing: their stops are no incident)
         speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out}
         rc.neutralization_excluded = {i for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") in out}
@@ -248,7 +254,10 @@ def autoflags_tick(now: float) -> None:
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
-        rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
+        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}
+        if rc.flag_modes != modes:
+            rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
+        rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
         for d in rc.pass_tick(samples, speeds, mono, now):
@@ -351,6 +360,7 @@ def autoflags_off(server_id: int, body: AutoOffIn, sess: SessionDep) -> dict:
     with _lock:   # (the state is looked up INSIDE the lock: a session change in between would copy the switch to a new state and leave this one, which is dropped, changed)
         rc = state_of(server_id, True, inst.acsp.session, create=True)
         (rc.auto_off.add if body.off else rc.auto_off.discard)(body.kind)
+        rc.audit("kill_switch", switch=body.kind, off=body.off, executed=True)
         return {"auto_off": sorted(rc.auto_off)}
 
 
@@ -370,11 +380,14 @@ def report_pit(server_id: int, body: PitIn, sess: SessionDep) -> None:
 
 
 def _control(server_id: int, sess: SessionDep):
-    _get(sess, server_id)
+    server = _get(sess, server_id)
     inst = _live(server_id)
     if not inst:
         raise HTTPException(409, "server not running or ACSP plugin not connected")
-    return inst, state_of(server_id, True, inst.acsp.session, create=True)
+    rc = state_of(server_id, True, inst.acsp.session, create=True)
+    rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}
+    rc.audit_revision = (server.session or {}).get("rulebook_revision")
+    return inst, rc
 
 
 @control_router.post("")
@@ -918,3 +931,10 @@ async def monitor_forever() -> None:
         except Exception:   # a bug here must not stop the loop: the next tick tries again
             log.exception("race control monitor")
         await asyncio.sleep(MONITOR_EVERY)
+
+
+@control_router.get("/audit")
+def audit_view(server_id: int, sess: SessionDep, since: datetime | None = None, limit: int = Query(default=100, ge=1, le=1000)) -> dict:
+    _get(sess, server_id)
+    stamp = (since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)).isoformat() if since else None
+    return raceaudit.read(server_id, stamp, limit)

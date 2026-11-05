@@ -37,6 +37,7 @@ from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
 from app.stewards.auto import cut_notices, give_back_penalties
+from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
 from app.schemas.servers import EntryIn, SessionIn, _folder_name, _setup_name
@@ -321,6 +322,7 @@ def neutralization_rule(server_id: int) -> dict:
                 modes = rb.neutralization.model_dump()
                 server = s.get(Server, server_id)
                 modes["category"] = (server.session or {}).get("category", "") if server else ""
+                modes["rulebook_revision"] = (server.session or {}).get("rulebook_revision") if server else None
         if len(_NEUTRALIZATION_RULES) > 64:
             _NEUTRALIZATION_RULES.clear()
         _NEUTRALIZATION_RULES[server_id] = (time.monotonic(), modes)
@@ -401,6 +403,7 @@ def count_results(sess: Session, sc: Schedule, ev: Event, until: float) -> int:
 
 
 def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, until: float) -> int:
+    sess.info["race_audit_proposals"] = []
     d, added = Path(settings.data_dir) / "instances" / str(sc.server_id) / "results", 0
     last_end = sc.start_at   # where the race being counted began, for what fell due in it: the end of the one counted before (or the schedule's start)
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
@@ -426,6 +429,8 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)
     sess.commit()
+    for server_id, kind, fields in sess.info.pop("race_audit_proposals", []):
+        record(server_id, kind, **fields, executed=True, persistence="committed")
     return added
 
 

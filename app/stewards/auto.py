@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
+from app.live.raceaudit import record
 from app.models import Championship, GiveBackDue, Notice, Penalty, ResultClose, Server
 from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
@@ -27,6 +28,16 @@ def _applied_rules(sess: Session, c: Championship, server_id: int) -> Rulebook:
     return (Rulebook.model_validate(snapshot)
             if snapshot and c.id is not None and applied.get("rulebook_league_id") == c.id
             else effective(c))
+
+
+def _audit_proposal(sess, server_id, kind, rb, **fields):
+    server = sess.get(Server, server_id)
+    applied = (server.session or {}) if server else {}
+    fields.update(session={k: applied.get(k) for k in ("session_type", "name")},
+                  rulebook_revision=applied.get("rulebook_revision"), mode=rb.neutralization.mode)
+    record(server_id, kind + "_staged", **fields, executed=False, persistence="pending_commit")
+    if "race_audit_proposals" in sess.info:
+        sess.info["race_audit_proposals"].append((server_id, kind + "_created", fields))
 
 
 def capped_auto_time(seconds: int, cap: int, reason: str) -> tuple[int, str]:
@@ -75,6 +86,9 @@ def give_back_penalties(sess: Session, c: Championship, server_id: int, filename
                 seconds, reason = capped_auto_time(seconds, rb.neutralization.max_auto_time_penalty_s, reason)
             sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="time", value=seconds * 1000,
                              created_by=due.created_by, auto_key=key, reason=reason))
+            _audit_proposal(sess, server_id, "give_back_penalty", rb, driver_guid=due.driver_guid, filename=filename,
+                   original_seconds=due.seconds, final_seconds=seconds, cap=rb.neutralization.max_auto_time_penalty_s,
+                   source=due.created_by)
             made += 1
         due.state = "applied"
         sess.add(due)
@@ -94,5 +108,8 @@ def cut_notices(sess: Session, c: Championship, server_id: int, filename: str, p
             continue
         seconds, reason = capped_auto_time(d["seconds"], rb.neutralization.max_auto_time_penalty_s, f"Cortes de pista: {d['cuts']}")
         sess.add(Notice(server_id=server_id, filename=filename, driver_guid=d["driver_guid"], kind="cuts", penalty_kind="time", value=seconds * 1000, reason=reason))
+        _audit_proposal(sess, server_id, "cuts_notice", rb, driver_guid=d["driver_guid"], filename=filename,
+               cuts=d["cuts"], original_seconds=d["seconds"], final_seconds=seconds,
+               cap=rb.neutralization.max_auto_time_penalty_s)
         made += 1
     return made

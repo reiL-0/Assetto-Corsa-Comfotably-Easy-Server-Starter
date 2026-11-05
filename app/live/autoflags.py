@@ -33,6 +33,7 @@ class AutoFlags:
         self._still: dict[int, float] = {}
         self._gen: dict[int, int] = {}                   # car -> the generation of its slot when last seen (a slot that changed hands starts from nothing)
         self.log: deque[dict] = deque(maxlen=LOG_MAX)    # {t, kind, op: open|update|close, car, ref, m}
+        self.sequence = 0  # monotonic count, independent of bounded display history
         self.unknown_length = False
         self.uid = next(_uid)                            # which session's engine this is: a driver's screen drops what it holds when this changes
         self.modes = {"blue": "shadow", "danger": "shadow"}   # `off` types are not decided at all
@@ -43,6 +44,7 @@ class AutoFlags:
         self.blue.clear(); self.danger.clear(); self._moved.clear(); self._still.clear(); self._gen.clear(); self.unknown_length = False
 
     def _note(self, now: float, kind: str, op: str, car: int, ref: int, m: float | None) -> None:
+        self.sequence += 1
         self.log.append({"t": now, "kind": kind, "op": op, "car": car, "ref": ref, "m": m})
 
     def step(self, now: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int], length: float | None, racing: bool) -> None:

@@ -11,6 +11,7 @@ from sqlalchemy import delete
 from sqlmodel import select
 
 from app import discord
+from app.live.raceaudit import record
 from app.auth import CurrentUser, require
 from app.db import SessionDep
 from app.models import Championship, ChampionshipEvent, Notice, Penalty, ResultClose, _now
@@ -84,6 +85,7 @@ def _new_penalty(sess: SessionDep, server_id: int, filename: str, parsed: dict, 
     sess.add(p)
     sess.commit()
     sess.refresh(p)
+    record(server_id, "penalty_created", filename=filename, driver_guid=guid, penalty_kind=kind, value=value, source=who, reason=reason, executed=True)
     out = _out(p)
     discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, guid), out.kind, out.value, out.reason))
     return out
@@ -141,6 +143,7 @@ def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: Session
         _open(sess, server_id, filename)
         sess.delete(p)
         sess.commit()
+    record(server_id, "penalty_forgiven", filename=filename, penalty_id=penalty_id, driver_guid=p.driver_guid, executed=True)
     discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))
 
 
@@ -196,6 +199,7 @@ def dismiss_notice(server_id: int, filename: str, notice_id: int, sess: SessionD
     n = _notice(sess, server_id, filename, notice_id)
     sess.delete(n)
     sess.commit()
+    record(server_id, "notice_dismissed", filename=filename, notice_id=notice_id, driver_guid=n.driver_guid, executed=True)
 
 
 @router.post("/close", status_code=204)
@@ -207,3 +211,4 @@ def close_result(server_id: int, filename: str, sess: SessionDep, user: CurrentU
         if not sess.get(ResultClose, (server_id, filename)):
             sess.add(ResultClose(server_id=server_id, filename=filename, closed_by=user.username))
         sess.commit()
+    record(server_id, "result_closed", filename=filename, source=user.username, executed=True)

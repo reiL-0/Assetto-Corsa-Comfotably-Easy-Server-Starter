@@ -24,7 +24,18 @@ import statistics
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 
+from app.live import (
+    autoflags as flag_rules,
+    caution as caution_rules,
+    giveback as giveback_rules,
+    incidents as incident_rules,
+    nopass as pass_rules,
+    pacejudge as pace_rules,
+    raceaudit,
+    sectors as delta_rules,
+)
 from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
 from app.live.giveback import GiveBack
@@ -74,6 +85,11 @@ STANDING = 5.0                   # km/h under which a car is standing (a spun or
 
 class RaceControl:
     def __init__(self, session_ref: object = None) -> None:
+        self._audit_state = None
+        self._audit_last_status = -1e9
+        self._audit_gate = None
+        self.audit_guids = {}
+        self.audit_revision = None
         self.flag, self.pace_kmh = "green", None
         self.penalties: list[dict] = []
         self.notices: list[dict] = []   # on-screen messages for the hub ({id, kind, text, to, until}); `to` = a car id, -1 = everybody
@@ -140,7 +156,22 @@ class RaceControl:
         self._samples: dict[int, deque] = {}   # car id -> (time, km/h) of the last few seconds
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
 
+    def audit(self, kind, **fields):
+        session = self.session_ref if isinstance(self.session_ref, dict) else {}
+        raceaudit.record(self.server_id, kind, session={k: session.get(k) for k in ("session_type", "name")},
+                         rulebook_revision=self.neutralization_rule.get("rulebook_revision") or self.audit_revision or session.get("rulebook_revision"),
+                         mode=self.neutralization_rule.get("mode", "off"), guids=self.audit_guids, **fields)
+
     def _bump(self) -> None:
+        state = {"flag": self.flag, "pacecar": self.pace_car_state(), "pace_park": self.pace_park,
+                 "caution": self.caution.snapshot() if self.caution else None,
+                 "caution_laps": self.caution_laps, "auto_off": sorted(self.auto_off),
+                 "penalties": list(self.penalties), "formation": self.formation, "one_more": self.one_more,
+                 "auto_yellow": self.auto_yellow, "flag_modes": dict(self.flag_modes),
+                 "green_laps": self._green_laps, "green_clear_since": self._green_clear_since}
+        if state != self._audit_state:
+            self.audit("state_change", previous=self._audit_state, state=state, executed=True)
+            self._audit_state = deepcopy(state)
         self.rev += 1
         self.ts = time.time()
 
@@ -194,6 +225,8 @@ class RaceControl:
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
             self._bump()
+            self.audit("flag", flag=flag, source=source, pace_kmh=pace_kmh, grace_s=grace_s, tolerance_kmh=tolerance_kmh, penalty=pen, actions=actions,
+                       thresholds=raceaudit.thresholds(pace_rules, delta_rules, pass_rules, caution_rules), executed=True)
             log.info("flag %s source=%s was_caution=%s actions=%s", flag, source, was_caution, actions)
             return actions
 
@@ -228,6 +261,7 @@ class RaceControl:
             if not self.formation or self.pace_car_in or car != self.pace_car:
                 return False
             self.caution_laps += 1
+            self.audit("formation_lap", car=car, laps=self.caution_laps, executed=True)
             if self.caution_laps < FORMATION_LAPS:
                 return False
             self.pace_car_in, self.pace_car_pitted = True, False
@@ -265,12 +299,15 @@ class RaceControl:
             if not self.go_armed:
                 self.go_early += 1
                 if self.go_early == 1:   # (a second crossing is a whole lap later: the progress never showed the car mid-lap, so the green goes ahead)
+                    self.audit("green_held", car=car, reason="partial_lap", executed=False)
                     log.info("green held: car %s crossed before a whole lap since the \"to go\"", car)
                     return None
+                self.audit("green_crossing_fallback", car=car, crossings=self.go_early, executed=False)
                 log.info("green: car %s crossed twice since the \"to go\" without being seen mid-lap", car)
             if self.pace_car is not None and not self.pace_car_pitted:
                 if self.caution.restart:
                     self.blocked_crossings += 1
+                self.audit("green_held", car=car, pace_car=self.pace_car, reason="pace_not_pitted", blocked=self.blocked_crossings, executed=False)
                 log.info("green held: restart leader %s crossed but the pace car %s has not reported the pit lane (blocked=%s)", car, self.pace_car, self.blocked_crossings)
                 return None
             return self.set_flag("green", field=field)
@@ -298,6 +335,7 @@ class RaceControl:
                 self._green_anchor = None
             track = set(cars) - pits
             clear = bool(track)
+            stopped, slow = [], []
             for c in track:
                 s, v = cars[c], speeds.get(c)
                 if (not 0 <= mono - s.stamp <= age or v is None or not math.isfinite(v)):
@@ -307,11 +345,20 @@ class RaceControl:
                           and math.isfinite(speeds[k]) and speeds[k] >= MOVING_KMH]
                 pace = statistics.median(others) if others else 0
                 if v <= STOP_KMH or (pace and v < pace * rule["slow_car"]["pace_ratio"]):
+                    (stopped if v <= STOP_KMH else slow).append(c)
                     clear = False
+            previous_clear = self._green_clear_since
             if self._green_last_look is None or mono - self._green_last_look > age:
                 self._green_clear_since = None
             self._green_last_look = mono
+            if self.flag in SLOWING and mono - self._audit_last_status >= 5:
+                self.audit("auto_green_status", flag=self.flag, pacecar=self.pace_car_state(), leader=leader, laps=self._green_laps, clear=clear,
+                           clear_since=self._green_clear_since, speeds=speeds, stopped=stopped, slow=slow, rule=rule, executed=False)
+                self._audit_last_status = mono
             self._green_clear_since = (mono if self._green_clear_since is None else self._green_clear_since) if clear else None
+            if previous_clear != self._green_clear_since:
+                self.audit("auto_green_timer", previous=previous_clear, clear_since=self._green_clear_since,
+                           clear=clear, speeds=speeds, rule=rule, executed=False)
 
     def _neutralization_green(self, car, field):
         """VSC/FCY branch of green_if_due. Only actual, fresh leader crossings count.
@@ -354,6 +401,7 @@ class RaceControl:
             self._green_laps = max(self._green_laps, 0)
             return None
         self._green_laps += 1
+        self.audit("auto_green_lap", car=car, laps=self._green_laps, clear_since=self._green_clear_since, rule=rule, executed=False)
         laps = self._green_laps
         if laps < rule["green_after_laps"]:
             return None
@@ -364,6 +412,8 @@ class RaceControl:
                  and 0 <= mono - self._green_last_look <= rule["stale_telemetry_s"]
                  and mono - self._green_clear_since >= rule["green_clear_s"])
         if clear:
+            if not self._green_logged:
+                self.audit("auto_green_decision", laps=laps, clear=clear, executed=mode == "live")
             if mode == "shadow":
                 if not self._green_logged:
                     self.autoflags.log.append({"op": "green", "decision": "green", "mode": mode,
@@ -374,6 +424,7 @@ class RaceControl:
             return self.set_flag("green", source="neutralization", field=field)
         if laps >= rule["green_after_laps"] + rule["green_max_extra_laps"] and not self._green_warned:
             self._green_warned = True
+            self.audit("auto_green_extension", laps=laps, clear=clear, director_notified=mode == "live", executed=mode == "live")
             text = "La pista no está limpia tras el máximo de vueltas extra: se mantiene la neutralización"
             if mode == "live":
                 self.notify(text, "flag")
@@ -403,6 +454,7 @@ class RaceControl:
                 log.info("two to go became one to go at the crossing of car %s", car)
                 return "one"
             self.caution_laps += 1
+            self.audit("caution_lap", car=car, laps=self.caution_laps, speeds=speeds, executed=True)
             if self.caution_laps == PITS_OPEN_LAP and not c.pits_open:
                 c.open_pits()
                 self._bump()
@@ -414,6 +466,7 @@ class RaceControl:
             pits = {i for i, t in self._pit_seen.items() if now - t < PIT_CLEAR}
             stopped = [i for i, v in speeds.items() if i != self.pace_car and v < STANDING and i not in pits]
             involved = self.watch.recent_involved(now, INVOLVED_FOR)
+            self.audit("caution_clear", laps=self.caution_laps, stopped=stopped, involved=sorted(involved), min_laps=CAUTION_MIN_LAPS, max_laps=CAUTION_MAX_LAPS, executed=False)
             log.info("caution lap %s counted (car %s): stopped=%s recent_involved=%s", self.caution_laps, car, stopped, bool(involved))
             if not stopped and not involved:
                 return "two" if self.caution_laps == CAUTION_MIN_LAPS - 1 else "go"   # ("two to go" a lap before: at the next crossing it becomes the "one to go"; with the track not clear then, it waits for the "go" of a later lap)
@@ -479,6 +532,7 @@ class RaceControl:
             if car is not None and self.caution:
                 self.caution.remove(car)   # (named during a caution: it was in the frozen order)
             self._bump()
+            self.audit("pace_car_config", car=car, guid=guid, kmh=kmh, source="set_pace_car", executed=True)
 
     def follow_pace_driver(self, car: int | None) -> None:
         """The pace car is a DRIVER (`pace_guid`, the SteamID); its slot changes when it connects or reconnects. `car` is where that driver sits now (None: not on the server): the driver stays named."""
@@ -550,6 +604,7 @@ class RaceControl:
             held = [x for x in alive if x.get("hold")]   # (the held ones are not pushed out by the ephemeral ones)
             self.notices = held + [x for x in alive if not x.get("hold")][-(NOTICE_MAX - 1 - len(held)):] + [n]
             self._bump()
+            self.audit("notice", notice=n, executed=True)
             log.info("notice kind=%s to=%s: %s", kind, to, n["text"])
             return n
 
@@ -596,13 +651,28 @@ class RaceControl:
         """One look for an incident while racing under green. -> (the new proposal, actions): with `auto_yellow` the yellow is already out (actions are the NASCAR ones to carry out)."""
         with _lock:
             rule = self.neutralization_rule
-            self.neutralization_clear_tick(field.samples(), speeds, time.monotonic(), now)
+            mono = time.monotonic()
+            samples = field.samples()
+            self.neutralization_clear_tick(samples, speeds, mono, now)
+            if self.flag in CAUTION and mono - self._audit_last_status >= 5:
+                self.audit("neutralization_status", flag=self.flag, pacecar=self.pace_car_state(),
+                           leader=max((c for c in samples if c != self.pace_car), key=lambda c: samples[c].progress, default=None),
+                           laps=self.caution_laps, green_laps=self._green_laps, speeds=speeds, slow=sorted(self.watch._limp),
+                           stopped=[c for c, v in speeds.items() if c != self.pace_car and v <= STOP_KMH], executed=False)
+                self._audit_last_status = mono
             if not self.nascar:
                 mode = "off" if "neutralization" in self.auto_off else rule.get("mode", "off")
                 mono = time.monotonic()
                 samples = {c: s for c, s in field.samples().items() if c != self.pace_car and c not in self.neutralization_excluded}
                 in_pit = {c for c, t in self._pit_seen.items() if now - t < PIT_RECENT}
                 racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and (self.flag in ("green", "white") or (self.flag in SLOWING and self._neutralization_flag and not self.pace_out)) and not self.formation
+                stale = sorted(c for c, sample in samples.items() if not 0 <= mono - sample.stamp <= rule.get("stale_telemetry_s", 3))
+                gate = (mode, racing, tuple(sorted(self.auto_off)), tuple(stale))
+                if gate != self._audit_gate:
+                    self.audit("neutralization_gate", effective_mode=mode, stale_cars=stale,
+                               kill_switch="neutralization" in self.auto_off, racing=racing, rule=rule,
+                               telemetry_age_s={c: mono - samples[c].stamp for c in stale}, executed=False)
+                    self._audit_gate = gate
                 decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode})
                 if decision:
                     category = rule.get("category", "")
@@ -614,11 +684,17 @@ class RaceControl:
                         decision["cars"] = sorted(decision["events"])
                     self.autoflags.log.append({**decision, "op": "open", "decision": target, "mode": mode,
                                               "state": self.flag, "timestamp": now, "category": category})
+                    evidence = {"decision": decision, "target": target, "rule": rule,
+                                "samples": {c: {"age_s": mono - sample.stamp, "generation": sample.generation, "epoch": sample.epoch}
+                                            for c, sample in samples.items()}, "in_pit": sorted(in_pit), "thresholds": raceaudit.thresholds(incident_rules)}
+                    self.audit("neutralization_decision", **evidence, executed=False)
                     if mode == "live" and target == "SC":
                         if mono < self._sc_cooldown_until:
+                            self.audit("neutralization_discard", reason="cooldown", **evidence, executed=False)
                             return None, []
                         pace = field.samples().get(self.pace_car)
                         if pace is None or not 0 <= mono - pace.stamp <= rule["stale_telemetry_s"]:
+                            self.audit("neutralization_discard", reason="pace_unavailable", **evidence, executed=False)
                             self.notify("SC recomendado, sácalo a mano: pace car no disponible en la sesión", "flag")
                             return None, []
                         if self.flag in SLOWING:
@@ -626,16 +702,20 @@ class RaceControl:
                             self.set_flag("green", now=now, source="incident", field=field)
                         actions = self.set_flag("yellow", now=now, source="incident", field=field)
                         self._neutralization_sc = True
+                        self.audit("neutralization_applied", **evidence, executed=True)
                         self.notify("SAFETY CAR AUTOMÁTICO: accidente muy grave", "flag")
                         return None, actions
                     if mode == "live" and target in ("VSC", "FCY") and self.flag in ("green", "white"):
-                        return None, self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field)
+                        actions = self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field)
+                        self.audit("neutralization_applied", **evidence, executed=True)
+                        return None, actions
                 return None, []
             racing = bool(self.nascar and self.nascar.phase in ("racing", "ot_run") and self.nascar.laps >= 1 and self.flag in ("green", "white"))
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             prop = self.watch.step(now, {c: v for c, v in speeds.items() if c != self.pace_car}, in_pit, racing)
             if not prop:
                 return None, []
+            self.audit("nascar_incident", proposal=prop, speeds=speeds, executed=self.auto_yellow)
             actions: list[tuple] = []
             if self.auto_yellow:
                 actions = self.set_flag("yellow", now=now, source="incident", field=field)
@@ -655,6 +735,7 @@ class RaceControl:
                 self.one_more = False
                 self.pace_car_in, self.pace_car_pitted, self.blocked_crossings, self.go_armed, self.go_early = True, False, 0, False, 0   # "to go": the pace car goes into the pits and the leader controls the restart
             self._bump()
+            self.audit("restart_plan", order=plan[0], waved=plan[1], choosers=sorted(plan[2]), to_go=to_go, executed=True)
             log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)
             return plan
 
@@ -669,6 +750,7 @@ class RaceControl:
                 lead = c.restart[0] if c.restart else self.pace_car
                 if lead in progress and GO_ARM_FROM <= progress[lead] % 1.0 <= GO_ARM_TO:
                     self.go_armed = True
+                    self.audit("restart_armed", leader=lead, progress=progress[lead], executed=True)
             if c.pace_only:
                 return out   # (practice behind a pace car: nobody is judged)
             if c.free_pass is not None and c.free_pass in c.pitted:
@@ -682,6 +764,7 @@ class RaceControl:
                 self.add_penalty(car, VIOLATION_LAPS)
                 out.append(("pit_violation", car))
             if out:
+                self.audit("caution_judge", decisions=out, progress=progress, speeds=speeds, exempt=sorted(exempt), executed=True)
                 self._bump()
             return out
 
@@ -735,6 +818,7 @@ class RaceControl:
                     spared.append({"car_id": car_id, "speed_kmh": round(v)})   # the director sees who was over but said "pit lane": a liar only escapes the penalty
                     continue
                 out.append({"car_id": car_id, "speed_kmh": round(v)})
+            self.audit("legacy_pace_judge", violations=out, exempt=spared, limit=limit, window_s=JUDGE_WINDOW, executed=True)
             self.violations, self.exempt = out, spared
             for x in out:
                 if self.vsc_penalty["kind"] == "pits":
@@ -750,7 +834,18 @@ class RaceControl:
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
             self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
+            previous = self.autoflags.sequence
             self.autoflags.step(mono, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit, length, racing)
+
+            generated = self.autoflags.sequence - previous
+            retained = min(generated, len(self.autoflags.log))
+            if generated > retained:
+                self.audit("audit_gap", source="automatic_flag", lost=generated - retained, executed=False)
+            for event in list(self.autoflags.log)[-retained:] if retained else ():
+                flag_mode = self.autoflags.modes.get(event["kind"], "off")
+                self.audit("automatic_flag", event=event, flag_mode=flag_mode, speeds=speeds,
+                           length_m=length, thresholds=raceaudit.thresholds(flag_rules),
+                           executed=flag_mode == "live")
 
     def auto_for(self, slot: int, generation: int, mono: float, fresh_modes: dict | None = None, model: str | None = None) -> dict | None:
         """What this driver's screen may show now: the automatic flags (blue / danger: only the types set to `live` in the monitor's reading AND in `fresh_modes`, the one the request has just made, and not
@@ -825,6 +920,8 @@ class RaceControl:
                     if pen["kind"] == "pits":
                         self.add_penalty(d["car"], pen["laps"])
                 self._bump()
+            for decision in found:
+                self.audit("pace_judge", decision=decision, limit=(self.pace_kmh or 0) + self.tolerance_kmh, executed=decision["applied"])
             return found
 
     def pass_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float) -> list[dict]:
@@ -855,6 +952,8 @@ class RaceControl:
                             self.add_penalty(e[1], pen["laps"])
             if applied:
                 self._bump()
+            for decision in out:
+                self.audit("no_pass", decision=decision, executed=decision["applied"])
             return out
 
     def delta_block(self, model: str | None) -> dict | None:
@@ -899,6 +998,7 @@ class RaceControl:
             progress = self.without_pace_car(progress)
             events = self.giveback.step(now, progress, {c: v for c, v in speeds.items() if c in progress}, exempt, caution=self.flag in CAUTION)
             if events:
+                self.audit("give_back", events=events, rule=self.gb_rule, thresholds=raceaudit.thresholds(giveback_rules), executed=True)
                 self._bump()
             return events
 
@@ -907,6 +1007,7 @@ class RaceControl:
             ok = bool(self.giveback and self.giveback.forgive(ob_id))
             self.gb_owner.pop(ob_id, None)
             if ok:
+                self.audit("give_back_forgiven", obligation_id=ob_id, executed=True)
                 self._bump()
             return ok
 
@@ -922,12 +1023,14 @@ class RaceControl:
             ob = self.giveback.due_now(ob_id) if self.giveback else None
             if ob:
                 self._bump()
+                self.audit("give_back_due_manual", obligation=ob, executed=True)
             return ob
 
     def give_back_restore(self, ob: dict) -> None:
         with _lock:
             if self.giveback:
                 self.giveback.restore(ob)
+                self.audit("give_back_restored", obligation=ob, executed=True)
                 self._bump()
 
     def give_back_report(self, car: int, now: float, ms: int, lap: int, spline: float) -> None:
@@ -935,12 +1038,14 @@ class RaceControl:
         with _lock:
             if self.giveback and car != self.pace_car:
                 self.giveback.report(car, now, ms, lap, spline)
+                self.audit("give_back_excursion", car=car, ms=ms, lap=lap, spline=spline, executed=True)
 
     def add_cuts(self, car: int, n: int, from_client: bool) -> None:
         """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
         with _lock:
             book = self.cuts_client if from_client else self.cuts_server
             book[car] = book.get(car, 0) + n
+            self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
             self._bump()
 
     def give_back_view(self, now: float) -> dict:
@@ -1074,6 +1179,7 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
     with _lock:
         rc = _states.get(server_id)
         if rc and (not running or rc.session_ref is not session_ref):
+            rc.audit("session_end", flag=rc.flag, running=running, executed=True)
             _old = _states.pop(server_id, None)
             rc = None
             if running and session_ref is not None:   # a session change: tell the hub clients (rev moves on) that the old flag is gone
@@ -1084,10 +1190,12 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid
                 fresh.auto_off = set(old.auto_off)   # (the director's choices outlive the session)
                 _states[server_id] = fresh
+                fresh.audit("session_start", flag=fresh.flag, previous_flag=old.flag, executed=True)
                 return fresh
         if rc is None and create and running:
             rc = _states[server_id] = RaceControl(session_ref)
             rc.server_id = server_id
+            rc.audit("session_start", flag=rc.flag, executed=True)
         return rc
 
 
