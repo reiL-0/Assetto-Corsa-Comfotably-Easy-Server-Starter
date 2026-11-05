@@ -205,7 +205,7 @@ def test_a_vsc_judges_who_is_still_over_the_pace_when_the_grace_ends():
 
 def test_a_vsc_without_penalty_only_records_and_too_few_samples_are_not_judged():
     rc = RaceControl()
-    rc.set_flag("vsc", 60, grace_s=5, now=0.0)
+    rc.set_flag("vsc", 60, grace_s=5, now=0.0, penalty={"kind": "none"})
     rc.sample({1: 100}, 4.0); rc.sample({1: 100}, 4.5)   # two samples: not enough to judge a car fairly
     _speeds(rc, 5.0, {2: 100})
     out = rc.evaluate(5.0)
@@ -219,6 +219,7 @@ def test_a_vsc_without_penalty_only_records_and_too_few_samples_are_not_judged()
 def test_the_monitor_samples_and_judges_for_the_servers_it_is_given():
     from app.live.racecontrol import _states, tick
     rc = state_of(902, True, {"s": 1}, create=True)
+    rc.auto_off.add("pace")   # (the continuous judge decides by default; this single judgement is what is left when the director switches it off)
     rc.set_flag("vsc", 60, grace_s=3, penalty={"kind": "pits", "laps": 1}, now=500.0)
     cars = {1: {"velocity": [0, 0, 25.0]}, 2: {"velocity": [0, 0, 10.0]}, 3: {"driver_name": "no velocity yet"}}   # 90 km/h, 36 km/h
     done = []

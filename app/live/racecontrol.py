@@ -46,6 +46,7 @@ SLOWING = ("vsc", "fcy")   # the flags with a pace, a grace and a judgement: a V
 PACE_MIN, PACE_MAX = 30, 250     # km/h a VSC may ask for
 GRACE_MIN, GRACE_MAX, GRACE_DEFAULT = 3, 60, 20
 TOL_MAX, TOL_DEFAULT = 30, 5     # km/h over the pace that are still forgiven when the grace ends
+DEFAULT_PENALTY = {"kind": "pits", "laps": 3}   # a VSC / FCY that nobody configured: the drive-through (3 laps to serve it), never a disqualification
 LAPS_MAX = 5                     # laps a car gets to serve a drive-through (the game enforces it: pit-lane pass clears it, running out sends the car to the pits)
 JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples decide (median)
 JUDGE_MIN_SAMPLES = 3
@@ -113,6 +114,7 @@ class RaceControl:
     def _clear_vsc(self) -> None:
         self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0}
         self.evaluated, self.violations, self.exempt = True, [], []
+        self.legacy = False   # the pace is judged by the old single judgement at the end of the grace (set when a VSC / FCY starts with the kill switch `pace` on): never both judges in one flag
         self._samples: dict[int, deque] = {}   # car id -> (time, km/h) of the last few seconds
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
 
@@ -133,7 +135,7 @@ class RaceControl:
                 raise ValueError(f"the grace is between {GRACE_MIN} and {GRACE_MAX} s")
             if not 0 <= tolerance_kmh <= TOL_MAX:
                 raise ValueError(f"the tolerance is between 0 and {TOL_MAX} km/h")
-            given = penalty or pen
+            given = penalty or DEFAULT_PENALTY
             if given.get("kind") not in ("none", "pits") or (given["kind"] == "pits" and not 1 <= given.get("laps", 0) <= LAPS_MAX):
                 raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
             pen = {"kind": given["kind"], "laps": given.get("laps", 0) if given["kind"] == "pits" else 0}
@@ -151,6 +153,7 @@ class RaceControl:
             if flag in SLOWING:
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
+                self.legacy = "pace" in self.auto_off
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
@@ -575,13 +578,45 @@ class RaceControl:
         with _lock:
             return sorted(k for k, v in self.flag_modes.items() if v == "live" and k not in self.auto_off and (fresh_modes is None or fresh_modes.get(k) == "live"))
 
+    def judging_continuously(self) -> bool:
+        """Whether the continuous judge penalises now: not when this flag started with the kill switch `pace` on (then the old single judgement at the end of the grace decides, and only it), and not while
+        the switch is on (the judge only logs). Switching it on or off in the middle of a flag never makes the two judges punish the same car."""
+        return not self.legacy and "pace" not in self.auto_off
+
     def pace_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float) -> list[dict]:
-        """One look at the pace of a VSC / FCY whose grace is over (shadow: the breaches are logged and returned, nothing is penalised). `mono`: the clock of the field's samples; `now`: the wall clock."""
+        """One look at the pace of a VSC / FCY whose grace is over. A breach (see app/live/pacejudge.py) is listed as a violation and gets the flag's penalty, once; with the kill switch `pace` on, it is only logged.
+        `mono`: the clock of the field's samples; `now`: the wall clock. -> the new breaches [{car, generation, speed_kmh, over_s}] (the caller announces them)."""
         with _lock:
             active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
             pc = self.pace_car
-            return self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit)
+            found = self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit)
+            if not found:
+                return found
+            applied, pen, flag = self.judging_continuously(), dict(self.vsc_penalty), self.flag   # (taken here, under the lock: what the caller announces is what was done)
+            found = [{**d, "applied": applied, "pen": pen, "flag": flag} for d in found]
+            if applied:
+                for d in found:
+                    self.violations.append({"car_id": d["car"], "speed_kmh": d["speed_kmh"]})
+                    if pen["kind"] == "pits":
+                        self.add_penalty(d["car"], pen["laps"])
+                self._bump()
+            return found
+
+    def set_pace_config(self, tolerance_kmh: int | None = None, penalty: dict | None = None) -> None:
+        """The director changes the tolerance and / or the penalty of the VSC / FCY being run, from now on (whoever was judged already keeps what he got)."""
+        with _lock:
+            if self.flag not in SLOWING:
+                raise ValueError("there is no VSC or FCY running")
+            if tolerance_kmh is not None and not 0 <= tolerance_kmh <= TOL_MAX:
+                raise ValueError(f"the tolerance is between 0 and {TOL_MAX} km/h")
+            if penalty is not None and (penalty.get("kind") not in ("none", "pits") or (penalty["kind"] == "pits" and not 1 <= penalty.get("laps", 0) <= LAPS_MAX)):
+                raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
+            if tolerance_kmh is not None:
+                self.tolerance_kmh = tolerance_kmh
+            if penalty is not None:
+                self.vsc_penalty = {"kind": penalty["kind"], "laps": penalty.get("laps", 0) if penalty["kind"] == "pits" else 0}
+            self._bump()
 
     def autoflags_view(self) -> dict:
         with _lock:
@@ -807,7 +842,7 @@ def tick(now: float, live) -> list[tuple[int, list[dict]]]:
     for server_id, cars in live:
         with _lock:
             rc = _states.get(server_id)
-        if not rc or rc.flag not in SLOWING or rc.evaluated:
+        if not rc or rc.flag not in SLOWING or rc.evaluated or not rc.legacy:   # (the continuous judge, app/live/pacejudge.py, decides; this single judgement is only for a flag that started with the director's kill switch `pace` on)
             continue
         rc.sample({i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}, now)
         if rc.due(now):

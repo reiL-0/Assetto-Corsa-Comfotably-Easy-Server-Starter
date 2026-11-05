@@ -53,3 +53,16 @@ def test_shadow_gives_nothing_and_the_directors_switch_takes_a_live_flag_away(li
     assert r.status_code == 200 and r.json() == {"auto_off": ["blue"]}
     assert ask() is None, "off at once"
     assert _client("reporter").post(f"{V}/servers/{sid}/race-control/autoflags", json={"kind": "blue", "off": False}).status_code in (401, 403), "only a steward"
+
+
+def test_the_director_changes_the_pace_rules_of_a_running_vsc_over_http(live):
+    sid, client, _, now = _ready(live)
+    url = f"{V}/servers/{sid}/race-control"
+    assert _client("steward").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code == 409, "no VSC running"
+    r = _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60})
+    assert r.status_code == 200 and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 3}, "the default is the drive-through of 3 laps"
+    r = _client("steward").post(f"{url}/vsc-config", json={"tolerance_kmh": 8, "penalty": {"kind": "pits", "laps": 5}})
+    assert r.status_code == 200 and r.json() == {"tolerance_kmh": 8, "penalty": {"kind": "pits", "laps": 5}}
+    assert _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 9}}).status_code == 422
+    assert _client("reporter").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code in (401, 403)
+    assert _client("steward").post(f"{url}/autoflags", json={"kind": "pace", "off": True}).json() == {"auto_off": ["pace"]}, "the kill switch of the pace judge"

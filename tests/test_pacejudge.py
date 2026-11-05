@@ -66,6 +66,7 @@ def test_the_registry_judges_a_vsc_after_its_grace_only_and_shows_the_log():
 
     rc = RaceControl({"session_type": RACE_TYPE})
     rc.set_flag("vsc", 80, grace_s=10, tolerance_kmh=5, now=1000.0)
+    rc.auto_off.add("pace")   # (kill switch, in the middle of the flag: the judge only logs)
     out = []
     for i in range(30):   # 6 s at 100 km/h, 5 s after the grace ended at 1010
         t = 100.0 + i * 0.2
@@ -74,7 +75,7 @@ def test_the_registry_judges_a_vsc_after_its_grace_only_and_shows_the_log():
     for i in range(30):
         t = 110.0 + i * 0.2
         out += rc.pace_tick({3: Sample(0.2 + i * 0.001, 1, 0, t, 0.0)}, {3: 100.0}, t, 1010.5 + i * 0.2)
-    assert [d["car"] for d in out] == [3] and rc.autoflags_view()["pace"][-1]["car"] == 3 and not rc.penalties, "logged, and no penalty listed: shadow"
+    assert [d["car"] for d in out] == [3] and rc.autoflags_view()["pace"][-1]["car"] == 3 and not rc.penalties, "logged, and no penalty listed: the kill switch"
     rc.set_flag("green")
     assert rc.pace_tick({3: Sample(0.3, 1, 0, 120.0, 0.0)}, {3: 100.0}, 120.0, 1030.0) == [], "under green nobody is judged"
 
@@ -87,3 +88,66 @@ def test_garbage_speeds_restart_the_count_and_the_verdicts_do_not_pile_up():
     for flag in range(1, 40):
         feed(j, 3, [100.0] * 10, flag=flag, t0=100.0 + flag * 10)
     assert len(j._judged) == 1, "only the verdicts of the flag being judged are kept"
+
+
+def _run_vsc(rc, t_start=110.0, wall_start=1010.5, speed=100.0, n=30, car=3):
+    out = []
+    for i in range(n):
+        t = t_start + i * 0.2
+        out += rc.pace_tick({car: Sample(0.2 + i * 0.001, 1, 0, t, 0.0)}, {car: speed}, t, wall_start + i * 0.2)
+    return out
+
+
+def test_the_judge_decides_by_default_the_drive_through_is_three_laps_and_the_director_can_change_it():
+    import pytest
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    rc.set_flag("fcy", 80, grace_s=10, now=1000.0)   # no penalty given: the default
+    assert rc.vsc_penalty == {"kind": "pits", "laps": 3}
+    out = _run_vsc(rc)
+    assert [d["car"] for d in out] == [3] and [(p["car_id"], p["laps"]) for p in rc.penalties] == [(3, 3)], "a breach gets the drive-through, 3 laps"
+    assert rc.snapshot()["violations"] == [{"car_id": 3, "speed_kmh": 100}]
+    assert _run_vsc(rc) == [] and len(rc.penalties) == 1, "once per car and flag"
+    rc2 = RaceControl({"session_type": RACE_TYPE})
+    rc2.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    rc2.set_pace_config(tolerance_kmh=30, penalty={"kind": "pits", "laps": 5})
+    assert _run_vsc(rc2) == [] and rc2.vsc_penalty["laps"] == 5, "100 km/h is within 80 + 30"
+    rc2.set_pace_config(tolerance_kmh=5)
+    assert len(_run_vsc(rc2, t_start=130.0, wall_start=1030.5)) == 1 and rc2.penalties[0]["laps"] == 5
+    for bad in ({"tolerance_kmh": 99}, {"penalty": {"kind": "pits", "laps": 9}}, {"penalty": {"kind": "dsq"}}):
+        with pytest.raises(ValueError):
+            rc2.set_pace_config(**bad)
+    rc2.set_flag("green")
+    with pytest.raises(ValueError):
+        rc2.set_pace_config(tolerance_kmh=5)
+
+
+def test_with_no_penalty_chosen_the_breach_is_only_recorded():
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    rc.set_flag("vsc", 80, grace_s=10, penalty={"kind": "none"}, now=1000.0)
+    assert len(_run_vsc(rc)) == 1 and rc.penalties == [] and len(rc.violations) == 1
+
+
+def test_switching_the_judge_in_the_middle_of_a_flag_never_makes_two_judges_punish_one_car():
+    from app.live.racecontrol import RACE_TYPE, RaceControl, tick, _states
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    rc.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    assert len(_run_vsc(rc)) == 1 and len(rc.penalties) == 1
+    rc.auto_off.add("pace")
+    assert not rc.legacy and _run_vsc(rc, t_start=120.0, wall_start=1020.5, car=4)[0]["applied"] is False and len(rc.penalties) == 1, "switched off mid-flag: it only logs"
+    rc.auto_off.clear()
+    _states[907] = rc
+    try:
+        assert tick(1100.0, [(907, {3: {"velocity": [0, 0, 28.0]}})]) == [] and rc.evaluated is False and len(rc.penalties) == 1, "the old single judgement does not wake up in this flag"
+    finally:
+        _states.pop(907, None)
+    leg = RaceControl({"session_type": RACE_TYPE})
+    leg.auto_off.add("pace")
+    leg.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    assert leg.legacy and leg.judging_continuously() is False
+    leg.auto_off.clear()
+    assert _run_vsc(leg)[0]["applied"] is False and leg.penalties == [], "a flag that started with the switch on is judged by the old judgement only"

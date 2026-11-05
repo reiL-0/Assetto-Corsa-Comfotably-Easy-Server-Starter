@@ -61,7 +61,7 @@ MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
 
 
 class PenaltyCfg(BaseModel):
-    kind: Literal["none", "pits"] = "none"
+    kind: Literal["none", "pits"] = "pits"
     laps: int = Field(default=3, ge=1, le=LAPS_MAX)
 
 
@@ -244,7 +244,12 @@ def autoflags_tick(now: float) -> None:
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
         rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
-        rc.pace_tick(samples, speeds, mono, now)
+        for d in rc.pace_tick(samples, speeds, mono, now):
+            if d["applied"]:   # (what the judge did, as it was when it did it: not re-read after the lock)
+                pen = d["pen"]
+                _say(rc, f"{_name(inst, d['car'])}: no respetó el ritmo ({d['speed_kmh']} km/h)" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
+                if pen["kind"] == "pits":
+                    _say(rc, f"PENALIZACIÓN: ritmo de {d['flag'].upper()} no respetado · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
 
 
 def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
@@ -293,8 +298,26 @@ def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> d
 
 
 class AutoOffIn(BaseModel):
-    kind: Literal["blue", "danger"]
+    kind: Literal["blue", "danger", "pace"]
     off: bool
+
+
+class PaceConfigIn(BaseModel):
+    tolerance_kmh: int | None = Field(default=None, ge=0, le=TOL_MAX)
+    penalty: PenaltyCfg | None = None
+
+
+@control_router.post("/vsc-config")
+def vsc_config(server_id: int, body: PaceConfigIn, sess: SessionDep) -> dict:
+    """The director changes the tolerance and / or the penalty (drive-through laps) of the VSC / FCY being run; it counts from now on."""
+    inst, _ = _control(server_id, sess)
+    with _lock:
+        rc = state_of(server_id, True, inst.acsp.session, create=True)
+        try:
+            rc.set_pace_config(body.tolerance_kmh, body.penalty.model_dump() if body.penalty else None)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"tolerance_kmh": rc.tolerance_kmh, "penalty": dict(rc.vsc_penalty)}
 
 
 @control_router.post("/autoflags")
