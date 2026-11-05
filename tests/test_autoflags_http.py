@@ -67,3 +67,13 @@ def test_the_director_changes_the_pace_rules_of_a_running_vsc_over_http(live):
     assert _client("reporter").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code in (401, 403)
     assert _client("steward").post(f"{url}/autoflags", json={"kind": "pace", "off": True}).json() == {"auto_off": ["pace"]}, "the kill switch of the pace judge"
     assert _client("steward").get(f"{url}/autoflags").json()["auto_off"] == ["pace"], "the panel reads the switch back from the manager"
+
+
+def test_a_vsc_can_ask_for_the_delta_mode_and_without_a_reference_lap_it_runs_the_fixed_pace(live):
+    sid, client, rc, now = _ready(live)
+    url = f"{V}/servers/{sid}/race-control"
+    assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "f1"}).status_code == 422
+    assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "delta"}).status_code == 200
+    view = _client("steward").get(f"{url}/autoflags").json()
+    assert view["vsc_mode"] == "fixed" and view["vsc_fallback"] is True and view["ref_models"] == [], view
+    assert _client("steward").post(url, json={"flag": "green"}).status_code == 200

@@ -71,6 +71,7 @@ class FlagIn(BaseModel):
     grace_s: int = Field(default=GRACE_DEFAULT, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves
     tolerance_kmh: int = Field(default=TOL_DEFAULT, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends
     penalty: PenaltyCfg = PenaltyCfg()                                        # a VSC: what whoever is still over gets
+    mode: Literal["fixed", "delta"] = "fixed"                                  # a VSC: a fixed pace, or the F1 delta (a minimum time per sector; falls back to the fixed pace until a clean lap exists)
 
 
 class PenaltyIn(BaseModel):
@@ -244,12 +245,14 @@ def autoflags_tick(now: float) -> None:
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
         rc.flag_modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
-        for d in rc.pace_tick(samples, speeds, mono, now):
+        models = {c: (info.get("car_model") or "") for c, info in cars.items()}
+        for d in rc.pace_tick(samples, speeds, mono, now, models):
             if d["applied"]:   # (what the judge did, as it was when it did it: not re-read after the lock)
                 pen = d["pen"]
-                _say(rc, f"{_name(inst, d['car'])}: no respetó el ritmo ({d['speed_kmh']} km/h)" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
+                what = f"el delta ({d['delta_s']:+.2f} s)" if d["kind"] == "delta" else f"el ritmo ({d['speed_kmh']} km/h)"
+                _say(rc, f"{_name(inst, d['car'])}: no respetó {what}" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
                 if pen["kind"] == "pits":
-                    _say(rc, f"PENALIZACIÓN: ritmo de {d['flag'].upper()} no respetado · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
+                    _say(rc, f"PENALIZACIÓN: {'delta' if d['kind'] == 'delta' else 'ritmo'} de {d['flag'].upper()} no respetado · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
 
 
 def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
@@ -294,7 +297,8 @@ def race_state_auto(server_id: int, slot: int, name: str, sess: SessionDep) -> d
     generation = inst.acsp.field.generation.get(slot, 0)   # (taken WITH the name check: if the slot changes hands during the database read below, the new driver's flags do not go to this request)
     modes = flag_modes_of(server_id) or {}   # (refreshes the cached modes here, in a request thread; a failed reading shows nothing live)
     rc = state_of(server_id, True, inst.acsp.session)
-    return {"auto": rc.auto_for(slot, generation, time.monotonic(), modes) if rc else None, "live": rc.auto_live(modes) if rc else []}
+    model = car.get("car_model") or ""
+    return {"auto": rc.auto_for(slot, generation, time.monotonic(), modes, model) if rc else None, "live": rc.auto_live(modes) if rc else []}
 
 
 class AutoOffIn(BaseModel):
@@ -357,7 +361,7 @@ def _control(server_id: int, sess: SessionDep):
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
     try:
-        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field)
+        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if body.flag in ("vsc", "fcy"):
