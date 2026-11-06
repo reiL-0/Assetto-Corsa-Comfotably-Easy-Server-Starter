@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     csp_hub_required: bool | None = None
     csp_min_build: int | None = None
     csp_hub_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_hub.lua"
-    csp_hub_version: str = "20"   # 20: the capsule banners and the automatic blue flag and danger warning (/api/csp/auto); 19: 2/1 to green and the restart banners without NASCAR; 18: the banner of the place to give back; 17: the cut counter on the left; 16: the banners in English (language poll, key-based images); 15: the NASCAR banners load only with NASCAR = 1 in the hub's section (14: the closed-pits banner gets the lap it opens on written over it)
+    csp_hub_version: str = "21"   # 21: the hub reports each track-limit excursion again (modLimits was gone: no reports, no live cuts counter); 20: the capsule banners and the automatic blue flag and danger warning (/api/csp/auto); 19: 2/1 to green and the restart banners without NASCAR; 18: the banner of the place to give back; 17: the cut counter on the left; 16: the banners in English (language poll, key-based images); 15: the NASCAR banners load only with NASCAR = 1 in the hub's section (14: the closed-pits banner gets the lap it opens on written over it)
     # The three lists below take a selector (app/csp.py `server_listed`): `*` = every server, the ones made later too; `2` or `2,3` = those; empty = nobody; `!2` takes one out (`*,!2`).
     # Probe of the in-game race-control plugin (static/csp/opr_rc_probe.lua): sent as one more default script, only to the servers listed in ACM_CSP_PROBE_SERVERS (temporary: empty = nobody).
     csp_probe_url: str = "https://www.oppenpaddockracing.site/static/csp/opr_rc_probe.lua"
