@@ -54,7 +54,7 @@ def cut_seconds(cuts: int, rule: CutRule) -> int:
 
 def cut_drafts(parsed: dict, rule: CutRule, racing: set[str]) -> list[dict]:
     """[{driver_guid, driver_name, cuts, seconds}] for the drivers of this Race who reach the rule. Pure: nothing is read or written.
-    A rule with a ladder gives none here: its penalties are the live rounds (`cut_dues_from`), and `ladder_drafts` only previews them."""
+    A rule with a ladder gives none here: its penalties are the live rounds (`cut_penalties`), and `ladder_drafts` only previews them."""
     if parsed["type"] != "Race" or rule.ladder is not None:
         return []
     return [d | {"seconds": s} for d in _cuts_per_driver(parsed, racing) if (s := cut_seconds(d["cuts"], rule))]
