@@ -28,10 +28,11 @@ def snapshot(board: LiveBoard) -> list[dict]:
 
 def seed(board: LiveBoard, rows: list[dict]) -> None:
     """Put the kept drivers on a fresh board, disconnected; they take their place back when they join (same Steam ID)."""
-    board.keep_next = bool(rows)
-    for r in rows:
+    valid = [r for r in rows if 0 < r.get("best_ms", 0) < NO_TIME]
+    board.keep_next = bool(valid)
+    for r in valid:
         board.drivers.append(Driver(car_id=-1, name=r["name"], guid=r["guid"], model=r["model"], skin=r["skin"], connected=False, best_ms=r["best_ms"],
-                                    kept_ms=r["best_ms"], best_valid_ms=r["best_valid_ms"], laps=r["laps"], valid_laps=r["valid_laps"]))
+                                    kept_ms=r["best_ms"], best_valid_ms=r.get("best_valid_ms") or 0, laps=r.get("laps", 0), valid_laps=r.get("valid_laps")))
 
 
 def save(server_id: int, board: LiveBoard, grip: float | None) -> None:
