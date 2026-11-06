@@ -412,7 +412,11 @@ def incident_tick(now: float) -> None:
         rc.neutralization_rule = rule
         rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}
         out = _non_racing_guids(now)   # (the director and the caster are not racing: their stops are no incident)
-        speeds = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out}
+        mono = time.monotonic()
+        stamps = inst.acsp.field.stamp
+        speeds = {i: s for i, c in inst.acsp.cars.items()
+                  if (s := speed_kmh(c)) is not None and (c.get("driver_guid") or "") not in out
+                  and i in stamps and 0 <= mono - stamps[i] <= 3}
         rc.neutralization_excluded = {i for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") in out}
         prop, actions = rc.incident_step(speeds, inst.acsp.field, now, connected=set(inst.acsp.cars))
         if prop:
@@ -434,7 +438,9 @@ def autoflags_tick(now: float) -> None:
         rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}   # (who is in each slot NOW: a sanction needs a name, not only a number)
         out = _non_racing_guids(now)
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
-        speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
+        stamps = inst.acsp.field.stamp
+        speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None
+                  and i in stamps and 0 <= mono - stamps[i] <= 3}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
         modes = flag_modes_peek(inst.server_id) or {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
         if rc.flag_modes != modes:

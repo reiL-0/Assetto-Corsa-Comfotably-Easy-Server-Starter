@@ -631,11 +631,14 @@ class ACSPClient(asyncio.DatagramProtocol):
         return True
 
     def snapshot(self) -> dict[int, dict]:
-        """cars + their fresh app telemetry (under `telemetry`)."""
-        now = time.time()
+        """Cars, fresh app telemetry and ACSP signal age; 'stale' is not proof of disconnection."""
+        now, mono = time.time(), time.monotonic()
+        stamps = dict(self.field.stamp)
         return {
-            i: {**c, "telemetry": t} if (t := self.telemetry.get(i)) and now - t["ts"] < TELEMETRY_TTL else c
-            for i, c in self.cars.items()
+            i: {**c, **({"telemetry": t} if (t := self.telemetry.get(i)) and now - t["ts"] < TELEMETRY_TTL else {}),
+                "signal": "stale" if stamps.get(i) and mono - stamps[i] > 3 else "fresh" if i in stamps else "unknown",
+                "signal_age_s": round(max(0, mono - stamps[i]), 1) if i in stamps else None}
+            for i, c in list(self.cars.items())
         }
 
     def send(self, data: bytes) -> None:

@@ -290,6 +290,10 @@ class ChatIn(BaseModel):
     car_id: int | None = None  # None -> broadcast to everyone
 
 
+class KickIn(BaseModel):
+    driver_guid: str = Field(pattern=r"^\d{17}$")
+
+
 class SetSessionIn(BaseModel):
     index: int = Field(ge=0, le=7)
     name: str = Field(min_length=1, max_length=40)

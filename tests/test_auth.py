@@ -29,7 +29,7 @@ def test_rbac_matrix():
     assert steward.get(f"{V}/servers").status_code == 200
     assert steward.post(f"{V}/servers", json={"name": "x"}).status_code == 403
     assert driver.post(f"{V}/servers/1/kick/0").status_code == 403
-    assert steward.post(f"{V}/servers/999/kick/0").status_code == 404  # passed the role check
+    assert steward.post(f"{V}/servers/999/kick/0", json={"driver_guid": "76561190000000001"}).status_code == 404  # passed the role check
     assert driver.get(f"{V}/users").status_code == 403
 
 

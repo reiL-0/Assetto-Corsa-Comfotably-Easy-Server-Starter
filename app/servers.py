@@ -51,6 +51,7 @@ from app.schemas.servers import (  # noqa: F401 - re-exported: other modules imp
     CspScriptsIn,
     LimitsIn,
     ChatIn,
+    KickIn,
     SetSessionIn,
     AdminCommandIn,
 )
@@ -531,8 +532,8 @@ def session_info(server_id: int, sess: SessionDep) -> dict:
 
 
 @router.get("/{server_id}/cars")
-def cars(server_id: int, sess: SessionDep) -> dict[int, dict]:
-    _get(sess, server_id)
+async def cars(server_id: int, sess: SessionDep) -> dict[int, dict]:
+    await asyncio.to_thread(_get, sess, server_id)
     return _acsp(server_id).snapshot()
 
 
@@ -548,9 +549,15 @@ def send_chat(server_id: int, body: ChatIn, sess: SessionDep) -> dict:
 
 
 @steward.post("/{server_id}/kick/{car_id}")
-def kick(server_id: int, car_id: int, sess: SessionDep) -> dict:
-    _get(sess, server_id)
-    _acsp(server_id).send(acsp.encode_kick_user(car_id))
+async def kick(server_id: int, car_id: int, body: KickIn, sess: SessionDep) -> dict:
+    await asyncio.to_thread(_get, sess, server_id)
+    if not 0 <= car_id <= 255:
+        raise HTTPException(422, "car slot must be between 0 and 255")
+    client = _acsp(server_id)
+    # The UDP event handler runs on this loop too: check identity and send without an await between them.
+    if (client.cars.get(car_id) or {}).get("driver_guid") != body.driver_guid:
+        raise HTTPException(409, "driver changed or disconnected; refresh the car list")
+    client.send(acsp.encode_kick_user(car_id))
     return {"sent": True}
 
 
