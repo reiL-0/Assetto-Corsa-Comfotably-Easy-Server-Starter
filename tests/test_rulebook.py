@@ -107,7 +107,7 @@ def test_the_rulebook_catalogue_feeds_the_penalty_panel_with_stop_and_go_drive_t
 
 def test_presets_are_listed_and_the_route_is_not_taken_for_a_league_id():
     r = api.get(f"{V}/championships/rulebook/presets")
-    assert r.status_code == 200 and r.json()["vrl-base"]["detectors"]["cuts"]["tolerance"] == 5
+    assert r.status_code == 200 and r.json()["vrl-base"]["detectors"]["cuts"]["tolerance"] == 2
 
 
 def test_the_dry_run_says_what_a_rulebook_would_warn_about_and_writes_nothing():
@@ -119,7 +119,7 @@ def test_the_dry_run_says_what_a_rulebook_would_warn_about_and_writes_nothing():
         before = (len(s.exec(select(Notice)).all()), len(s.exec(select(Penalty)).all()))
     assert api.post(url, json={"server_id": sid, "filename": "dry.json"}).json()["notices"] == []   # the league has no cut rule
     r = api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": PRESETS["vrl-base"].model_dump()}).json()
-    assert [(n["driver_guid"], n["cuts"], n["seconds"]) for n in r["notices"]] == [(A, 10, 5)]   # VRL: more than 5 cuts = +5 s; B's 5 are tolerated
+    assert [(n["driver_guid"], n["cuts"], n["seconds"]) for n in r["notices"]] == [(A, 10, 20), (B, 5, 5)]   # VRL: every 3 cuts a round, +5 s, +5 s, +10 s: A (10 cuts) has 3 rounds, B (5) has 1
     assert "contactos y de quién es la culpa" in r["not_evaluated"]
     lax = {**PRESETS["vrl-base"].model_dump(), "detectors": {"cuts": {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 30}}}
     assert {n["driver_guid"]: n["seconds"] for n in api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": lax}).json()["notices"]} == {A: 10, B: 5}
@@ -137,7 +137,8 @@ def test_counting_a_race_uses_the_rulebook_cut_rule():
     f = _result(sid, "count.json", {"A": 2})
     from app.results import parse_result_file
     with Session(engine) as s:
-        c = Championship(name="RB", rulebook=PRESETS["vrl-base"].model_dump())
+        old = {**PRESETS["vrl-base"].model_dump(), "detectors": {"cuts": {"tolerance": 5, "cuts_per_step": 1, "step_seconds": 5, "max_seconds": 5}}}   # a league still on the notices (no ladder)
+        c = Championship(name="RB", rulebook=old)
         s.add(c)
         s.commit()
         assert cut_notices(s, c, sid, "count.json", parse_result_file(f)) == 1

@@ -292,3 +292,16 @@ def test_a_cut_with_newly_known_guid_adds_to_the_unidentified_counts():
     rc.add_cuts(3, 1, True, RULE, GUID)
     assert rc.cuts_view(RULE)["cuts"] == {"3": 4}
     assert [r["round"] for r in live_rc.pending_cut_dues()] == [1]
+
+
+def test_ladder_drafts_preview():
+    """The calibration preview adds the steps of the completed rounds, each limited by the cap; leftover cuts cost nothing."""
+    from app.rulebook import CutRule
+    from app.stewards.auto import cut_drafts, ladder_drafts
+    rule = CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=600, ladder=[5, 5, 10])
+    laps = lambda n: [{"driver_guid": "g", "lap_time_ms": 90000, "cuts": n}]
+    parsed = lambda n: {"type": "Race", "laps": laps(n), "classification": [{"driver_guid": "g", "driver_name": "Ana"}]}
+    sec = lambda n, cap=600: [d["seconds"] for d in ladder_drafts(parsed(n), rule, {"g"}, cap)]
+    assert sec(2) == [] and sec(3) == [5] and sec(5) == [5] and sec(6) == [10] and sec(9) == [20] and sec(12) == [30]
+    assert sec(9, cap=8) == [18], "each step is capped like the real penalty"
+    assert cut_drafts(parsed(9), rule, {"g"}) == [], "the legacy notices stay off in ladder mode"

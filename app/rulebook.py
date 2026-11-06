@@ -177,6 +177,6 @@ PRESETS: dict[str, Rulebook] = {
             CatalogueItem(key="stop-go-30", name="Stop & go 30 s", kind="stopgo", value=30, conduct_points=4),
             CatalogueItem(key="dsq", name="Descalificación", kind="dsq", conduct_points=9),
         ],
-        detectors=Detectors(cuts=CutRule(tolerance=5, cuts_per_step=1, step_seconds=5, max_seconds=5)),
+        detectors=Detectors(cuts=CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=600, ladder=[5, 5, 10])),
     ),
 }

@@ -53,15 +53,34 @@ def cut_seconds(cuts: int, rule: CutRule) -> int:
 
 
 def cut_drafts(parsed: dict, rule: CutRule, racing: set[str]) -> list[dict]:
-    """[{driver_guid, driver_name, cuts, seconds}] for the drivers of this Race who reach the rule. Pure: nothing is read or written."""
+    """[{driver_guid, driver_name, cuts, seconds}] for the drivers of this Race who reach the rule. Pure: nothing is read or written.
+    A rule with a ladder gives none here: its penalties are the live rounds (`cut_dues_from`), and `ladder_drafts` only previews them."""
     if parsed["type"] != "Race" or rule.ladder is not None:
         return []
+    return [d | {"seconds": s} for d in _cuts_per_driver(parsed, racing) if (s := cut_seconds(d["cuts"], rule))]
+
+
+def _cuts_per_driver(parsed: dict, racing: set[str]) -> list[dict]:
     cuts: dict[str, int] = {}
     for lap in parsed["laps"]:
         if lap["driver_guid"] and (lap["lap_time_ms"] or 0) > 0:   # a lap with no time is an unfinished one
             cuts[lap["driver_guid"]] = cuts.get(lap["driver_guid"], 0) + (lap["cuts"] or 0)
     names = {e["driver_guid"]: e["driver_name"] for e in parsed["classification"]}
-    return [{"driver_guid": g, "driver_name": names.get(g) or g, "cuts": n, "seconds": s} for g, n in cuts.items() if g in racing and (s := cut_seconds(n, rule))]
+    return [{"driver_guid": g, "driver_name": names.get(g) or g, "cuts": n} for g, n in cuts.items() if g in racing]
+
+
+def ladder_drafts(parsed: dict, rule: CutRule, racing: set[str], cap: int) -> list[dict]:
+    """Calibration preview of a ladder rule over a finished Race (the lap cuts only, no live reports): every `tolerance + 1` cuts is a round
+    that adds its ladder step (the last repeats), each step limited by `cap` like the real penalty. Pure."""
+    if parsed["type"] != "Race" or not rule.ladder:
+        return []
+    size = rule.tolerance + 1
+    out = []
+    for d in _cuts_per_driver(parsed, racing):
+        rounds = d["cuts"] // size
+        if rounds:
+            out.append(d | {"seconds": sum(min(rule.ladder[min(r, len(rule.ladder) - 1)], cap) for r in range(rounds))})
+    return out
 
 
 def give_back_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:

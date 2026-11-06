@@ -17,7 +17,7 @@ from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive,
 from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
 from app.schemas.servers import _folder_name, _setup_name
-from app.stewards.auto import cut_drafts
+from app.stewards.auto import cut_drafts, ladder_drafts
 from app.servers import result_path
 
 router = APIRouter(prefix="/championships", tags=["championships"])
@@ -390,4 +390,5 @@ def dry_run(championship_id: int, body: DryRunIn, sess: SessionDep) -> dict:
     cut = rb.detectors.cuts
     if cut:
         cut = cut.model_copy(update={"max_seconds": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)})
-    return {"type": parsed["type"], "cuts_rule": cut, "notices": cut_drafts(parsed, cut, racing) if cut else [], "not_evaluated": NOT_EVALUATED}
+    drafts = [] if not cut else ladder_drafts(parsed, cut, racing, rb.neutralization.max_auto_time_penalty_s) if cut.ladder else cut_drafts(parsed, cut, racing)
+    return {"type": parsed["type"], "cuts_rule": cut, "notices": drafts, "not_evaluated": NOT_EVALUATED}
