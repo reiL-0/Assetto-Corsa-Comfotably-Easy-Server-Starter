@@ -166,7 +166,7 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     if out:
         discord.alert(f"⚠️ **{c.name}** · {ev.title}: quedan fuera de la lista por no cumplir la práctica ({c.practice_laps} vueltas válidas en {c.practice_days} días): "
                       + ", ".join(f"{m.name or m.guid} ({m.laps}/{c.practice_laps})" for m in out))
-    ok.sort(key=lambda m: not m.non_racing)   # (the entry list is the grid when there is no qualifying: the pace car goes in front, not wherever its name falls; stable, so the rest keep their order)
+    ok.sort(key=lambda m: (m.non_racing and m.in_pits, not m.non_racing))   # (the entry list is the grid when there is no qualifying: the pace car goes in front, the casters at the back (they sit in the pits, no gap at the front), not wherever their name falls; stable, so the rest keep their order)
     entries = []
     for m in ok:   # the driver's own setup, else the league's rule for the car, else the event's
         model = m.car if m.car in cars else cars[0]

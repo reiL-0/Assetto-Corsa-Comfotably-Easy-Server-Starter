@@ -109,6 +109,9 @@ def test_director_and_caster_take_a_spectator_slot_not_a_grid_place():
         got = {e.guid: e.spectator for e in session_for(s, ev, time.time()).entries}
     assert _member(lid, "76561198000000098", car="bmw", non_racing=True).json()["in_pits"] is True   # a panel that does not send it keeps it
     assert got == {A: False, B: False, "76561198000000098": True, "76561198000000099": False}
+    with Session(engine) as s:
+        order = [e.guid for e in session_for(s, ev, time.time()).entries]
+    assert order[0] == "76561198000000099" and order[-1] == "76561198000000098"   # pace car in front, caster at the back (no gap on the grid)
 
 
 def test_league_setup_rule_is_validated_and_protects_the_setup_from_deletion():
