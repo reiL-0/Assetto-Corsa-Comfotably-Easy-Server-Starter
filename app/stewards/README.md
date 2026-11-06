@@ -36,7 +36,7 @@
 ## Interactions
 - **Entra:** `app/live/acsp.py` (`ACSPClient._apply`, import tardío para no hacer un ciclo) y `app/api/v1/__init__.py` (router).
 - **Usa:** `app.live.acsp` (constantes `COLLISION_WITH_*`), `app.db.engine`, `app.models`, `app.servers` (`_get`, `_out`, `ServerOut`).
-- **Avisos para el director de carrera (`auto.py`), separados del motor de incidentes:** no usan `Incident` ni aplican nada. `cut_notices(sess, liga, server_id, filename, parsed)` lo llama `league._count_results` al contar por primera vez una Race de una liga con un reglamento con `detectors.cuts` (`app/rulebook.py`; `{tolerance, cuts_per_step, step_seconds, max_seconds}`; sin regla = apagado; el campo viejo `auto_rules` se lee a través del reglamento derivado). Suma los `Cuts` de las vueltas con tiempo de cada piloto que corre y crea un `Notice` (`penalty_notices`: sanción de tiempo propuesta). Uno por (archivo, piloto, motivo) —restricción UNIQUE—, así que contar el archivo en otra liga no lo duplica. En `app/penalties.py`: `GET …/penalties/notices` (`{closed, notices}`), `POST …/notices/{id}/confirm` (el aviso se borra y pasa a `Penalty` a nombre de quien confirma, motivo «… (aviso confirmado)»), `DELETE …/notices/{id}` (descartar) y `POST …/close` («Cerrar resultado»: borra los avisos que queden y guarda un `ResultClose`; un resultado cerrado da 409 a cualquier sanción nueva o retirada). Un candado de proceso (`_write`) une «¿está cerrado?» con la escritura. Al archivar la liga se borran los avisos y las marcas de cierre de sus archivos. Solo cortes; contactos y límites siguen siendo evidencia.
+- **Avisos legados (regla sin `ladder`) para el director de carrera (`auto.py`), separados del motor de incidentes:** no usan `Incident` ni aplican nada. `cut_notices(sess, liga, server_id, filename, parsed)` lo llama `league._count_results` al contar por primera vez una Race de una liga con un reglamento con `detectors.cuts` (`app/rulebook.py`; `{tolerance, cuts_per_step, step_seconds, max_seconds}`; sin regla = apagado; el campo viejo `auto_rules` se lee a través del reglamento derivado). Suma los `Cuts` de las vueltas con tiempo de cada piloto que corre y crea un `Notice` (`penalty_notices`: sanción de tiempo propuesta). Uno por (archivo, piloto, motivo) —restricción UNIQUE—, así que contar el archivo en otra liga no lo duplica. En `app/penalties.py`: `GET …/penalties/notices` (`{closed, notices}`), `POST …/notices/{id}/confirm` (el aviso se borra y pasa a `Penalty` a nombre de quien confirma, motivo «… (aviso confirmado)»), `DELETE …/notices/{id}` (descartar) y `POST …/close` («Cerrar resultado»: borra los avisos que queden y guarda un `ResultClose`; un resultado cerrado da 409 a cualquier sanción nueva o retirada). Un candado de proceso (`_write`) une «¿está cerrado?» con la escritura. Al archivar la liga se borran los avisos y las marcas de cierre de sus archivos. Solo cortes; contactos y límites siguen siendo evidencia.
 - **No hace aún:** hablar con el piloto, cola de comisarios para contactos.
 
 ## Flow
@@ -44,3 +44,36 @@
 2. `_apply` actualiza tablero/coches y llama `engine.on_event`.
 3. `detect` decide si es muro/contacto/cortes; `on_event` deduplica y encola el `Incident`; el hilo escritor comprueba el modo del servidor y lo guarda.
 4. El comisario lo ve en `GET /servers/{id}/incidents`.
+
+### Cortes por rondas
+
+Una regla `detectors.cuts` con `ladder: [5, 5, 10]` activa sanciones automáticas.
+Con `tolerance: 3`, cada 4 cortes completa una ronda: +5 s, +5 s, +10 s y luego
++10 s por ronda. La escalera admite 1–10 enteros de 1–600 s; se conservan los
+campos legados `cuts_per_step`, `step_seconds` y `max_seconds` como obligatorios
+por compatibilidad, pero en modo escalera solo `tolerance` y `ladder` determinan
+las rondas y sus segundos. Omitir
+`ladder` (o usar `null`) conserva los avisos y cálculos anteriores.
+
+La ingesta cuenta `max(cuts_client, cuts_server)` y encola un `CutDue` por ronda,
+identificado por servidor, clave de sesión, GUID y ronda. El monitor persiste en
+un worker, fuera del lock de RaceControl; reintenta fallos y registra saturación
+de la cola (máximo 10 000 pendientes). La cola sobrevive a los cambios de sesión
+en el proceso, pero no a un reinicio del manager antes de persistir. La migración
+013 crea el registro y sus índices sin modificar reglas ni resultados previos.
+
+Al contar la carrera se incorporan también las rondas aún en cola y se convierten
+las de su ventana temporal en `Penalty(kind="time", auto_key="cuts:<id>")`, con
+el tope automático por sanción del reglamento aplicado:
+`neutralization.max_auto_time_penalty_s`, configurable en ese mismo reglamento y
+con valor predeterminado de **10 s**. Cada escalón se recorta a ese tope (por
+ejemplo, un escalón de 20 s queda en 10 s con el tope predeterminado). Los pilotos ausentes
+expiran; no se genera además un aviso por los cortes del archivo. La retirada
+usa `Penalty.dismissed`: conserva la fila y no la recrea. La auditoría distingue
+pendiente, persistido y sanción confirmada por la transacción de resultados.
+
+En el estado del hub siguen `cuts` (total) y `cuts_rule`, que conserva exactamente
+las cuatro claves `cap`, `max`, `per` y `step` para el lector CSP de forma fija;
+`ladder` solo se usa internamente en el manager. El modo escalera añade
+`cuts_round` (resto de la ronda por slot) y `cuts_rounds` (rondas completadas por
+slot). Consultar ese estado no crea rondas ni escribe en la base.

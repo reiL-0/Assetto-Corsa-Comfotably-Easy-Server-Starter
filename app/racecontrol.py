@@ -186,6 +186,20 @@ def save_dues(rows: list[dict]) -> None:
         raceaudit.record(row["server_id"], "give_back_due_saved", due=row, executed=True)
 
 
+def save_cut_dues() -> None:
+    from app.live.racecontrol import pending_cut_dues, acknowledge_cut_dues
+    from app.stewards.auto import stage_cut_dues
+    rows = pending_cut_dues()
+    if not rows:
+        return
+    with Session(engine) as s:
+        stage_cut_dues(s, rows)
+        s.commit()
+    acknowledge_cut_dues(rows)
+    for row in rows:
+        raceaudit.record(row["server_id"], "cuts_due_saved", due=row, executed=True)
+
+
 def slot_of(cars: dict, steam_id: str) -> int | None:
     """Where the driver with that SteamID sits (None: not on the server)."""
     return next((i for i, c in cars.items() if steam_id and (c.get("driver_guid") or "") == steam_id), None)
@@ -301,7 +315,8 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     if rc:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": cut_rule_of(server_id) if race else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    rule = cut_rule_of(server_id) if race else None
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -917,6 +932,24 @@ async def monitor_forever() -> None:
                 await asyncio.to_thread(flag_modes_of, sid)
             for sid in give_back_stale_servers():
                 await asyncio.to_thread(give_back_rule_of, sid)   # (the league's rule, from the database, off the event loop)
+            from app.league import cut_rule_stale
+            for inst in supervisor.live():
+                if cut_rule_stale(inst.server_id):
+                    await asyncio.to_thread(cut_rule_of, inst.server_id)
+                rc = state_of(inst.server_id, True, inst.acsp.session)
+                if rc and (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
+                    from app.live.racecontrol import cut_rule_peek
+                    rule = cut_rule_peek(inst.server_id)
+                    with _lock:
+                        cars = set(rc.cuts_client) | set(rc.cuts_server)
+                    for car in cars:
+                        guid = (inst.acsp.cars.get(car) or {}).get("driver_guid")
+                        if guid:
+                            rc.add_cuts(car, 0, False, rule, str(guid))
+            try:
+                await asyncio.to_thread(save_cut_dues)
+            except Exception:
+                log.exception("cuts: pending rounds could not be saved; retained for retry")
             _unsaved_dues.extend(give_back_tick(now))
             if len(_unsaved_dues) > MAX_UNSAVED_DUES:   # (a database that has been down for minutes: what does not fit is logged whole, never dropped silently)
                 log.error("give-back: too many penalties waiting to be saved, dropping the oldest: %s", _unsaved_dues[:-MAX_UNSAVED_DUES])

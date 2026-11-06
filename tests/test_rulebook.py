@@ -70,7 +70,7 @@ def test_a_league_without_a_rulebook_has_one_derived_from_its_older_columns():
     got = api.get(f"{V}/championships/{cid}/rulebook").json()
     assert got["source"] == "legacy" and got["rulebook"]["scoring"]["table"] == [10, 5]
     assert [(i["name"], i["kind"], i["value"]) for i in got["rulebook"]["catalogue"]] == [("Contacto", "time", 5), ("Cortar", "dsq", 0)]
-    assert got["rulebook"]["detectors"]["cuts"] == {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 12}
+    assert got["rulebook"]["detectors"]["cuts"] == {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 12, "ladder": None}
 
 
 def test_a_saved_rulebook_becomes_the_source_and_the_older_columns_are_refused():
@@ -160,7 +160,7 @@ def test_migration_006_adds_the_column_and_leaves_every_league_on_its_older_rule
     db.init_db()
     con = sqlite3.connect(path)
     assert con.execute("SELECT id, name, rulebook FROM championships").fetchall() == [(1, "Vieja", None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     db.init_db()   # rerun
 
 

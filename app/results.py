@@ -194,7 +194,7 @@ TIMED = ("time", "stopgo")   # stored in ms and added to the race time (acServer
 
 
 def penalties_for(sess: Session, server_id: int, filename: str) -> list[Penalty]:
-    return list(sess.exec(select(Penalty).where(Penalty.server_id == server_id, Penalty.filename == filename).order_by(Penalty.id)))
+    return list(sess.exec(select(Penalty).where(Penalty.server_id == server_id, Penalty.filename == filename, Penalty.dismissed == False).order_by(Penalty.id)))
 
 
 def non_racing_for(sess: Session, server_id: int, filename: str) -> frozenset[str]:
@@ -227,6 +227,8 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
     laps = Counter(lap["driver_guid"] for lap in parsed["laps"] if (lap.get("lap_time_ms") or 0) > 0)
     by_guid: dict[str, list[Penalty]] = defaultdict(list)
     for p in penalties:
+        if p.dismissed:
+            continue
         by_guid[p.driver_guid].append(p)
 
     cls = [dict(e) for e in parsed["classification"]]

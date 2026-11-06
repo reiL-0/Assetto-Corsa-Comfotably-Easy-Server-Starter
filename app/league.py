@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import cut_notices, give_back_penalties
+from app.stewards.auto import cut_notices, cut_penalties, give_back_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -238,6 +238,8 @@ def cut_rule(server_id: int) -> dict | None:
             cut = rb.detectors.cuts if rb else None
             if cut:
                 rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)}
+                if cut.ladder is not None:
+                    rule["ladder"] = list(cut.ladder)
         if len(_CUT_RULES) > 64:
             _CUT_RULES.clear()
         _CUT_RULES[server_id] = (time.time(), rule)
@@ -352,6 +354,11 @@ def give_back_rule_stale(server_id: int) -> bool:
     return not hit or time.time() - hit[0] >= CUT_RULE_TTL
 
 
+def cut_rule_stale(server_id: int) -> bool:
+    hit = _CUT_RULES.get(server_id)
+    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
+
+
 def cut_rule_cached(server_id: int) -> dict | None:
     """What `cut_rule` read last, with no database and no waiting (None before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
     hit = _CUT_RULES.get(server_id)
@@ -424,6 +431,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             added += 1
             _race_served(sess, c, f.stat().st_mtime)
             cut_notices(sess, c, sc.server_id, f.name, parsed)
+            cut_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             last_end = f.stat().st_mtime
         else:

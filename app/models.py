@@ -217,6 +217,22 @@ class Penalty(SQLModel, table=True):
     dismissed: bool = False  # a steward withdrew an automatic penalty: the row stays so it is not created again, and the result ignores it
 
 
+class CutDue(SQLModel, table=True):
+    """A completed live cut round, awaiting its race result."""
+
+    __tablename__ = "cut_dues"
+    __table_args__ = (Index("ux_cut_dues_round", "server_id", "session_key", "driver_guid", "round", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    session_key: str
+    driver_guid: str
+    round: int
+    seconds: int
+    ts: float
+    state: str = "due"
+
+
 class GiveBackDue(SQLModel, table=True):
     """A driver who gained places off the track and did not give them back (app/live/giveback.py): written when the time to give them back is up, or when a steward sanctions it at once. The result of the race is
     not there yet while it happens, so the penalty waits here: the first Race result of the server counted after `ts` turns it into a time `Penalty` (app/stewards/auto.py `give_back_penalties`)."""

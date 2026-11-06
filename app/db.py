@@ -202,6 +202,16 @@ def _m012_server_csp_off(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "servers" ADD COLUMN "csp_off" VARCHAR NOT NULL DEFAULT \'\'')
 
 
+def _m013_cut_dues(con: sqlite3.Connection) -> None:
+    """New ledger only: existing rules and results require no backfill."""
+    con.execute('CREATE TABLE IF NOT EXISTS cut_dues ('
+                'id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, session_key VARCHAR NOT NULL, '
+                'driver_guid VARCHAR NOT NULL, round INTEGER NOT NULL, seconds INTEGER NOT NULL, '
+                'ts FLOAT NOT NULL, state VARCHAR NOT NULL)')
+    _ensure_index(con, "ux_cut_dues_round", "cut_dues", ("server_id", "session_key", "driver_guid", "round"), unique=True)
+    _ensure_index(con, "ix_cut_dues_server_id", "cut_dues", ("server_id",))
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -215,6 +225,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (10, _m010_member_number),
     (11, _m011_practice_no_points),
     (12, _m012_server_csp_off),
+    (13, _m013_cut_dues),
 ]
 
 

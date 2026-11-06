@@ -23,6 +23,7 @@ import math
 import statistics
 import threading
 import time
+import uuid
 from collections import deque
 from copy import deepcopy
 from typing import NamedTuple
@@ -108,6 +109,7 @@ class RaceControl:
         self.penalties: list[dict] = []
         self.notices: list[dict] = []   # on-screen messages for the hub ({id, kind, text, to, until}); `to` = a car id, -1 = everybody
         self.rev, self.ts = 0, self.clock.time()
+        self.cuts_session_key = uuid.uuid4().hex
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
@@ -128,6 +130,10 @@ class RaceControl:
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
+        self.cuts_emitted: dict[str, int] = {}
+        self.cuts_at: dict[str, float] = {}
+        self.cuts_totals: dict[str, tuple[int, int]] = {}
+        self.cuts_owners: dict[int, str] = {}
         self.cuts_server: dict[int, int] = {}   # car -> cuts the acServer counted in the laps it finished in this race (the authority: what the rulebook's rule counts)
         self.cuts_client: dict[int, int] = {}   # car -> excursions its own game reported (live: it does not wait for the lap to end; evidence, the driver's game could lie about it)
         self.nascar: Nascar | None = None
@@ -1185,13 +1191,41 @@ class RaceControl:
                 self.giveback.report(car, now, ms, lap, spline)
                 self.audit("give_back_excursion", car=car, ms=ms, lap=lap, spline=spline, executed=True)
 
-    def add_cuts(self, car: int, n: int, from_client: bool) -> None:
+    def add_cuts(self, car: int, n: int, from_client: bool, rule: dict | None = None, driver_guid: str = "") -> None:
         """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
         with _lock:
+            if driver_guid:
+                client, server = self.cuts_totals.get(driver_guid, (0, 0))
+                if rule and rule.get("ladder") and self.cuts_owners.get(car) in (None, driver_guid):
+                    # Recover counts received before identity/rules were available.
+                    client = max(client, self.cuts_client.get(car, 0))
+                    server = max(server, self.cuts_server.get(car, 0))
+                self.cuts_owners[car] = driver_guid
+                self.cuts_totals[driver_guid] = (client + n, server) if from_client else (client, server + n)
+                if n > 0:
+                    self.cuts_at[driver_guid] = time.time()
             book = self.cuts_client if from_client else self.cuts_server
-            book[car] = book.get(car, 0) + n
-            self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
-            self._bump()
+            if rule and rule.get("ladder") and driver_guid:
+                # Slot changes must not transfer cuts or rounds to another driver.
+                self.cuts_client[car], self.cuts_server[car] = self.cuts_totals[driver_guid]
+            else:
+                book[car] = book.get(car, 0) + n
+            if rule and rule.get("ladder") and driver_guid:
+                size, ladder = rule["max"] + 1, rule["ladder"]
+                total = max(self.cuts_client.get(car, 0), self.cuts_server.get(car, 0))
+                for round_no in range(self.cuts_emitted.get(driver_guid, 0) + 1, total // size + 1):
+                    row = dict(server_id=self.server_id, session_key=self.cuts_session_key,
+                               driver_guid=driver_guid, round=round_no,
+                               seconds=ladder[min(round_no - 1, len(ladder) - 1)], ts=self.cuts_at.get(driver_guid, time.time()))
+                    if len(_cut_dues_pending) >= MAX_CUT_DUES_PENDING:
+                        log.error("cuts: pending ledger full; round could not be queued: %s", row)
+                        continue
+                    _cut_dues_pending[(self.server_id, self.cuts_session_key, driver_guid, round_no)] = row
+                    self.cuts_emitted[driver_guid] = round_no
+                    self.audit("cuts_due", due=row, executed=True, persistence="pending")
+            if n > 0:
+                self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
+                self._bump()
 
     def give_back_view(self, now: float) -> dict:
         """What the hub and the panel read: the obligations that are open ({id, car, creditors, left_s}) and the cases left for the director."""
@@ -1209,7 +1243,11 @@ class RaceControl:
             if not (rule and (self.session_ref or {}).get("session_type") == RACE_TYPE):
                 return {"cuts": {}, "cuts_rule": None}
             cars = set(self.cuts_server) | set(self.cuts_client)
-            return {"cuts": {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}, "cuts_rule": rule}
+            cuts = {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}
+            extra = ({"cuts_round": {c: n % (rule["max"] + 1) for c, n in cuts.items()},
+                      "cuts_rounds": {c: n // (rule["max"] + 1) for c, n in cuts.items()}}
+                     if rule.get("ladder") else {})
+            return {"cuts": cuts, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")}, **extra}
 
     def snapshot(self, running: bool = True, now: float | None = None) -> dict:
         rule = cut_rule_peek(self.server_id) if self.server_id else None   # (the cache only: this is also taken from the event loop and under the caller's lock, so no database; race-state refreshes it first)
@@ -1313,7 +1351,25 @@ def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: b
         return
     rc = state_of(server_id, True, session, create=True)
     if rc:
-        rc.add_cuts(car_id, n, from_client)
+        from app import supervisor   # supervisor owns the ACSP driver identities
+        inst = supervisor.get(server_id)
+        guid = ((inst.acsp.cars.get(car_id) or {}).get("driver_guid") or "") if inst else ""
+        rc.add_cuts(car_id, n, from_client, cut_rule_peek(server_id), str(guid))
+
+
+MAX_CUT_DUES_PENDING = 10000
+_cut_dues_pending: dict[tuple, dict] = {}   # protected by _lock, retained across session changes
+
+
+def pending_cut_dues() -> list[dict]:
+    with _lock:
+        return [dict(row) for row in _cut_dues_pending.values()]
+
+
+def acknowledge_cut_dues(rows: list[dict]) -> None:
+    with _lock:
+        for row in rows:
+            _cut_dues_pending.pop((row["server_id"], row["session_key"], row["driver_guid"], row["round"]), None)
 
 
 _states: dict[int, RaceControl] = {}

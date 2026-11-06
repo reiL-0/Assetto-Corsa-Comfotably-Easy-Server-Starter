@@ -141,7 +141,11 @@ def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: Session
     out, parsed = _out(p), _existing_result(sess, server_id, filename)
     with _write:
         _open(sess, server_id, filename)
-        sess.delete(p)
+        if p.auto_key:
+            p.dismissed = True
+            sess.add(p)
+        else:
+            sess.delete(p)
         sess.commit()
     record(server_id, "penalty_forgiven", filename=filename, penalty_id=penalty_id, driver_guid=p.driver_guid, executed=True)
     discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))

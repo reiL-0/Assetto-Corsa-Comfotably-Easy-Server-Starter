@@ -51,8 +51,13 @@ class CatalogueItem(_Strict):
 
 
 class CutRule(_Strict):
-    """Warn about track cuts in a Race: the first `tolerance` cuts are free, then every `cuts_per_step` cuts add `step_seconds`, up to `max_seconds`."""
+    """Without ladder, retain legacy notices. With ladder (e.g. [5, 5, 10]), every tolerance + 1 cuts completes a sanctioned round; the last step repeats.
+    In ladder mode only tolerance and ladder set the rounds/seconds; cuts_per_step,
+    step_seconds and max_seconds remain required for compatibility. Automatic seconds
+    are capped by the same rulebook's neutralization.max_auto_time_penalty_s.
+    """
 
+    ladder: list[Annotated[int, Field(ge=1, le=600)]] | None = Field(default=None, min_length=1, max_length=10)
     tolerance: int = Field(default=0, ge=0, le=1000)
     cuts_per_step: int = Field(ge=1, le=100)
     step_seconds: int = Field(ge=1, le=60)

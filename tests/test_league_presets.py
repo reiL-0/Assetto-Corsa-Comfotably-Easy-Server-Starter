@@ -48,7 +48,7 @@ def test_migration_007_adds_the_preset_columns_and_keeps_every_league_as_it_was(
     con = sqlite3.connect(path)
     assert con.execute("SELECT skin, fixed_setup FROM league_members").fetchall() == [("", "")]
     assert con.execute("SELECT car_setups, requirements FROM championships").fetchall() == [(None, None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     db.init_db()   # a rerun changes nothing
     con.close()
 
@@ -335,7 +335,7 @@ def test_migration_010_adds_the_number_column_to_every_member_empty(tmp_path, mo
     db.init_db()
     con = sqlite3.connect(path)
     assert con.execute("SELECT name, number FROM league_members").fetchall() == [("Ana", "")]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")][-2:] == [11, 12]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")][-3:] == [11, 12, 13]
     db.init_db()   # a rerun changes nothing
     assert con.execute("SELECT count(*) FROM league_members").fetchone() == (1,)
     con.close()
