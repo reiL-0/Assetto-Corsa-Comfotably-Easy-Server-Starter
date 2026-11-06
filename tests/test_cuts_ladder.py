@@ -367,3 +367,16 @@ def test_drive_through_ladder_loads_and_old_ones_get_the_default_fixed_seconds()
     r = rule(ladder=[0, 5, 5, 10])
     p = {"type": "Race", "laps": [{"driver_guid": "g", "lap_time_ms": 9, "cuts": 8}], "classification": [{"driver_guid": "g", "driver_name": "A"}]}
     assert [(d["seconds"], d["drive_throughs"]) for d in ladder_drafts(p, r, {"g"}, 600)] == [(5, 1)]
+
+
+def test_a_pass_after_the_row_was_saved_still_serves_it_before_the_result_is_counted(live, monkeypatch):
+    sid, client, _ = live
+    _rule_of(monkeypatch, DT_RULE)
+    monkeypatch.setattr(live_rc, "_cut_served", set())
+    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    adapter.save_cut_dues()   # the row is already in the database as due...
+    assert [d.state for d in dues(sid)] == ["due"]
+    rc = live_rc.state_of(sid, True, client.session)
+    assert rc.cuts_view(DT_RULE)["cuts_rule"] == {k: DT_RULE[k] for k in ("cap", "max", "per", "step")}, "the hub contract does not see the 0"
+    rc.report_pit(3, True)   # ...and the pass comes later, still unsaved
+    assert count(sid) == [], "result counting applies the mark to the saved row before it reads the dues"
