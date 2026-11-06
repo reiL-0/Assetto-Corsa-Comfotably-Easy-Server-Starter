@@ -197,6 +197,16 @@ def test_entry_list_with_drivers_ballast_and_locking():
     assert r.json()["config"]["SERVER"]["PICKUP_MODE_ENABLED"] == 1 and r.json()["config"]["SERVER"]["LOCKED_ENTRY_LIST"] == 0
 
 
+def test_a_caster_slot_never_writes_spectator_mode_1():
+    """acServer panics on SPECTATOR_MODE=1 ("Spectator mode not supported"): a caster is a normal slot, only without ballast."""
+    _install()
+    sid = _server()
+    form = {**FORM, "cars": [], "entries": [{"model": "bmw", "driver_name": "Ana", "guid": G1}, {"model": "bmw", "driver_name": "Cas", "guid": G3, "spectator": True}], "ballast": 30}
+    e = api.post(f"{V}/servers/{sid}/apply", json=form).json()["entry_list"]
+    assert [x["SPECTATOR_MODE"] for x in e] == [0, 0] and e[1]["BALLAST"] == 0 and e[0]["BALLAST"] == 30
+    assert "SPECTATOR_MODE=1" not in api.get(f"{V}/servers/{sid}/entry_list.ini").text
+
+
 def test_cfg_max_ballast_follows_the_entries():
     """acServer aborts the start when an entry's BALLAST > MAX_BALLAST_KG (default 100): the cfg must raise it by itself."""
     _install()

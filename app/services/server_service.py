@@ -255,9 +255,9 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     s.session = {**body.model_dump(exclude={"admin_password", "restart"}), "race_est_min": est}
     s.session["rulebook_revision"] = (hashlib.sha256(body.rulebook_snapshot.model_dump_json().encode()).hexdigest()
                                       if body.rulebook_snapshot else None)
-    if body.entries:
+    if body.entries:   # (SPECTATOR_MODE is always 0: acServer panics on 1, "Spectator mode not supported"; a caster is a normal slot that sits in the pits, `spectator` only drops his ballast/restrictor)
         s.entry_list = [
-            {"MODEL": e.model, "SKIN": e.skin or _skin_for(skins, e.model, body.random_skins), "SPECTATOR_MODE": int(e.spectator),
+            {"MODEL": e.model, "SKIN": e.skin or _skin_for(skins, e.model, body.random_skins), "SPECTATOR_MODE": 0,
              "DRIVERNAME": e.driver_name, "TEAM": e.team, "GUID": e.guid, "BALLAST": e.ballast or (0 if e.spectator else body.ballast), "RESTRICTOR": e.restrictor or (0 if e.spectator else body.restrictor),   # (the pace car / a spectator is not weighed down)
             
              **({"FIXED_SETUP": f"{setup}.ini"} if (setup := e.fixed_setup or body.car_setups.get(e.model)) else {})}   # its own setup, else the one set for its car
