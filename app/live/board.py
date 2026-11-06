@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 
 NS = 1_000_000  # ACSM reports lap times in nanoseconds; ACSP gives milliseconds
-NO_TIME = 2**31  # acServer's "no lap yet" values are huge sentinels (0xFFFFFFFF, 999999999...)
+NO_TIME = 999_999_999  # acServer's smallest "no lap yet" sentinel (also 0xFFFFFFFF)
 RACE = 3  # ACSP / ACSM session type
 
 

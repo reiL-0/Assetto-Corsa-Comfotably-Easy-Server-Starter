@@ -37,6 +37,17 @@ def test_kept_best_survives_the_restart_and_a_slower_lap_does_not_replace_it():
     assert next(iter(new.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))["BestLap"] == 98_000 * NS
 
 
+def test_acserver_no_lap_sentinel_never_becomes_a_best_or_saved_practice():
+    b = _practice_board()
+    _lap(b, 0, 999_999_999)  # acServer's 16666:39.999 for a car without a lap
+    car = next(iter(b.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))
+    assert car["BestLap"] == 0 and car["BestValidLap"] == 0
+    assert practicekeep.snapshot(b) == []
+    _lap(b, 0, 123_456)
+    _lap(b, 0, 999_999_999)  # other leaderboard row says no lap: retain the real best
+    assert next(iter(b.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))["BestLap"] == 123_456 * NS
+
+
 def test_clear_and_grip():
     b = _practice_board()
     _lap(b, 0, 100_000)
