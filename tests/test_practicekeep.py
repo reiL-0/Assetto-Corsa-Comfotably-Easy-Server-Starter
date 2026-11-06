@@ -46,6 +46,12 @@ def test_acserver_no_lap_sentinel_never_becomes_a_best_or_saved_practice():
     _lap(b, 0, 123_456)
     _lap(b, 0, 999_999_999)  # other leaderboard row says no lap: retain the real best
     assert next(iter(b.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))["BestLap"] == 123_456 * NS
+    # Even if an existing Driver or legacy seed row holds the sentinel, it never reaches BestLap
+    b.drivers[0].best_ms = 999_999_999
+    assert next(iter(b.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))["BestLap"] == 0
+    fresh = LiveBoard()
+    practicekeep.seed(fresh, [{"guid": "bad", "name": "Bad", "model": "m", "skin": "s", "best_ms": 999_999_999}])
+    assert len(fresh.drivers) == 0 and not fresh.keep_next
 
 
 def test_clear_and_grip():

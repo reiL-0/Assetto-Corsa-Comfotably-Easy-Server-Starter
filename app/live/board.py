@@ -110,6 +110,9 @@ class LiveBoard:
         return int(self.session.get("elapsed_ms", 0) + max(0.0, now - self.session_at) * 1000)
 
     def _entry(self, d: Driver, position: int) -> dict:
+        best_lap = (d.best_ms * NS) if 0 < d.best_ms < NO_TIME else 0
+        last_lap = (d.last_ms * NS) if 0 < d.last_ms < NO_TIME else 0
+        best_valid = (d.best_valid_ms * NS) if 0 < d.best_valid_ms < NO_TIME else 0
         return {
             "CarInfo": {
                 "DriverName": d.name, "DriverGUID": d.guid, "DriverInitials": "", "TeamName": "",
@@ -122,9 +125,9 @@ class LiveBoard:
             "TotalNumLaps": d.laps,
             "Cars": {
                 d.model: {
-                    "BestLap": d.best_ms * NS, "LastLap": d.last_ms * NS, "NumLaps": d.laps,
+                    "BestLap": best_lap, "LastLap": last_lap, "NumLaps": d.laps,
                     "TotalLapTime": d.total_ms * NS, "BestLapSplits": {}, "TopSpeedBestLap": round(d.top_kmh),
-                    **({"ValidLaps": d.valid_laps, "BestValidLap": d.best_valid_ms * NS} if d.valid_laps is not None else {}),   # (ours, not ACSM's: the lobby page shows the valid laps and the quickest of them)
+                    **({"ValidLaps": d.valid_laps, "BestValidLap": best_valid} if d.valid_laps is not None else {}),   # (ours, not ACSM's: the lobby page shows the valid laps and the quickest of them)
                 }
             },
             "LastPos": {"X": d.pos[0], "Y": d.pos[1], "Z": d.pos[2]},
