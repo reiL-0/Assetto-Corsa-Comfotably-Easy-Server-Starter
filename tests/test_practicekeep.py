@@ -110,3 +110,30 @@ def test_session_info_that_finds_the_practice_consumes_the_seed_and_a_returning_
     b.drop_kept()   # (ACSPClient._apply, because has_kept())
     car = next(iter(b.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))
     assert car["BestLap"] == 0 and car["NumLaps"] == 0
+
+
+def test_kept_splits_survive_the_restart_and_slower_lap_retains_splits():
+    old = _practice_board()
+    old.drivers[0].best_splits = [25000, 35000, 40000]
+    _lap(old, 0, 100_000)
+    practicekeep.save(904, old, 0.93)
+    kept = practicekeep.load(904)
+    assert kept.drivers[0]["best_splits"] == [25000, 35000, 40000]
+
+    new = LiveBoard()
+    practicekeep.seed(new, kept.drivers)
+    new.apply({"type": "session_info", "session_type": 1, "track": "spa", "track_config": ""})
+    lb = new.leaderboard()
+    car = next(iter(lb["DisconnectedDrivers"][0]["Cars"].values()))
+    splits = car["BestLapSplits"]
+    assert splits["0"]["SplitTime"] == 25000 * NS
+    assert splits["1"]["SplitTime"] == 35000 * NS
+    assert splits["2"]["SplitTime"] == 40000 * NS
+
+    # Reconnecting and doing a slower lap retains the kept best_splits
+    new.apply({"type": "new_connection", "car_id": 3, "driver_name": "Ana", "driver_guid": GUID, "car_model": "gt3", "car_skin": "s"})
+    _lap(new, 3, 105_000)
+    car_conn = next(iter(new.leaderboard()["ConnectedDrivers"][0]["Cars"].values()))
+    assert car_conn["BestLap"] == 100_000 * NS
+    assert car_conn["BestLapSplits"]["0"]["SplitTime"] == 25000 * NS
+

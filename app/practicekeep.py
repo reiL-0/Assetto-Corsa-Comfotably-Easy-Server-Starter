@@ -22,7 +22,7 @@ _last: dict[int, tuple] = {}   # server id -> what was written last: a lap that 
 
 def snapshot(board: LiveBoard) -> list[dict]:
     return [{"guid": d.guid, "name": d.name, "model": d.model, "skin": d.skin, "best_ms": d.best_ms, "best_valid_ms": d.best_valid_ms,
-             "laps": d.laps, "valid_laps": d.valid_laps}
+             "laps": d.laps, "valid_laps": d.valid_laps, "best_splits": list(d.best_splits)}
             for d in board.drivers if d.guid and 0 < d.best_ms < NO_TIME]
 
 
@@ -32,12 +32,13 @@ def seed(board: LiveBoard, rows: list[dict]) -> None:
     board.keep_next = bool(valid)
     for r in valid:
         board.drivers.append(Driver(car_id=-1, name=r["name"], guid=r["guid"], model=r["model"], skin=r["skin"], connected=False, best_ms=r["best_ms"],
-                                    kept_ms=r["best_ms"], best_valid_ms=r.get("best_valid_ms") or 0, laps=r.get("laps", 0), valid_laps=r.get("valid_laps")))
+                                    kept_ms=r["best_ms"], best_valid_ms=r.get("best_valid_ms") or 0, laps=r.get("laps", 0), valid_laps=r.get("valid_laps"),
+                                    best_splits=list(r.get("best_splits") or [])))
 
 
 def save(server_id: int, board: LiveBoard, grip: float | None) -> None:
     rows = snapshot(board)
-    key = (grip, tuple((r["guid"], r["best_ms"], r["laps"]) for r in rows))
+    key = (grip, tuple((r["guid"], r["best_ms"], r["laps"], tuple(r.get("best_splits") or ())) for r in rows))
     if _last.get(server_id) == key:
         return
     try:

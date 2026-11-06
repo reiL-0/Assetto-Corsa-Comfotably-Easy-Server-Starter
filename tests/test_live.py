@@ -233,3 +233,42 @@ def test_leaderboard_is_read_from_the_server_log():
     lb.feed("x")
     names = [d["CarInfo"]["DriverName"] for d in lb.board.leaderboard()["ConnectedDrivers"]]
     assert names == ["C.JASSO"]
+
+
+def test_live_sector_splits_computed_and_serialized():
+    b = _board()
+    t, s = 0.0, 0.98
+    b.apply({"type": "car_update", "car_id": 0, "pos": [0, 0, 0], "velocity": [20, 0, 0], "gear": 3, "rpm": 5000, "spline_pos": s}, now=t)
+    # Start line wrap-around (0.98 -> 0.02)
+    t += 0.2
+    s = 0.02
+    b.apply({"type": "car_update", "car_id": 0, "pos": [0, 0, 0], "velocity": [20, 0, 0], "gear": 3, "rpm": 5000, "spline_pos": s}, now=t)
+    # Drive across Sector 1 boundary (1/3) and Sector 2 boundary (2/3)
+    while s < 0.99:
+        t += 0.2
+        s = min(0.99, s + 0.02)
+        b.apply({"type": "car_update", "car_id": 0, "pos": [0, 0, 0], "velocity": [20, 0, 0], "gear": 3, "rpm": 5000, "spline_pos": s}, now=t)
+    # Finish line wrap-around (0.99 -> 0.02)
+    t += 0.2
+    s = 0.02
+    b.apply({"type": "car_update", "car_id": 0, "pos": [0, 0, 0], "velocity": [20, 0, 0], "gear": 3, "rpm": 5000, "spline_pos": s}, now=t)
+
+    # acServer emits lap_completed with official laptime (e.g. 10200 ms)
+    official_ms = round(t * 1000)
+    b.apply({"type": "lap_completed", "car_id": 0, "laptime_ms": official_ms, "cuts": 0, "grip_level": 1.0,
+             "leaderboard": [{"car_id": 0, "laptime_ms": official_ms, "laps": 1, "has_completed": False}]})
+
+    lb = b.leaderboard()
+    ana = lb["ConnectedDrivers"][0]
+    car = ana["Cars"]["bmw_m3_e30"]
+    splits = car["BestLapSplits"]
+    assert "0" in splits and "1" in splits and "2" in splits
+    s1_ns = splits["0"]["SplitTime"]
+    s2_ns = splits["1"]["SplitTime"]
+    s3_ns = splits["2"]["SplitTime"]
+    assert s1_ns > 0 and s2_ns > 0 and s3_ns > 0
+    assert s1_ns + s2_ns + s3_ns == official_ms * 1_000_000
+    assert car["BestLap"] == official_ms * 1_000_000
+    assert splits["0"]["Cuts"] == 0
+
+
