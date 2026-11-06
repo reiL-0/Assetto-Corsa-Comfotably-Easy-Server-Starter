@@ -136,7 +136,7 @@ def test_legacy_rules_keep_their_calculation_and_notice(live):
         assert s.exec(select(Notice).where(Notice.server_id == sid)).one().value == 10000
 
 
-@pytest.mark.parametrize("ladder", [[], [0], [601], [5] * 11])
+@pytest.mark.parametrize("ladder", [[], [-1], [601], [5] * 11])
 def test_ladder_validation(ladder):
     with pytest.raises(ValidationError):
         rule(ladder=ladder)
@@ -171,16 +171,16 @@ def test_counting_the_actual_result_file_twice_and_failed_writes(live, monkeypat
     live_rc.on_cuts(sid, client.session, 3, 9, False)
     real_stage = auto.stage_cut_dues
     with monkeypatch.context() as patch:
-        def fail(sess, rows):
+        def fail(sess, rows, *served):
             assert not live_rc._lock._is_owned()
             raise RuntimeError("disk full")
         patch.setattr(auto, "stage_cut_dues", fail)
         with pytest.raises(RuntimeError, match="disk full"):
             adapter.save_cut_dues()
     assert len(live_rc.pending_cut_dues()) == 2 and dues(sid) == []
-    def checked_stage(sess, rows):
+    def checked_stage(sess, rows, *served):
         assert not live_rc._lock._is_owned()
-        real_stage(sess, rows)
+        real_stage(sess, rows, *served)
     monkeypatch.setattr(auto, "stage_cut_dues", checked_stage)
     folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
     folder.mkdir(parents=True, exist_ok=True)
@@ -305,3 +305,65 @@ def test_ladder_drafts_preview():
     assert sec(2) == [] and sec(3) == [5] and sec(5) == [5] and sec(6) == [10] and sec(9) == [20] and sec(12) == [30]
     assert sec(9, cap=8) == [18], "each step is capped like the real penalty"
     assert cut_drafts(parsed(9), rule, {"g"}) == [], "the legacy notices stay off in ladder mode"
+
+
+DT_RULE = {"max": 3, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5, 5, 10]}
+
+
+def count(sid, cap=10, fixed=10, ladder=(0, 5, 5, 10)):
+    rb = Rulebook(detectors=Detectors(cuts=rule(ladder=list(ladder), dt_fixed_s=fixed)))
+    rb.neutralization.max_auto_time_penalty_s = cap
+    with Session(engine) as s:
+        c = Championship(name=f"dt{cap}{fixed}", rulebook=rb.model_dump())
+        s.add(c)
+        s.commit()
+        cut_penalties(s, c, sid, "dt.json", parsed(), time.time() + 1, time.time() - 60)
+        s.commit()
+        return [p.value for p in s.exec(select(Penalty).where(Penalty.server_id == sid).order_by(Penalty.id)).all()]
+
+
+def test_drive_through_first_step_is_issued_live_and_served_by_a_pit_pass(live, monkeypatch):
+    sid, client, _ = live
+    _rule_of(monkeypatch, DT_RULE)
+    monkeypatch.setattr(live_rc, "_cut_served", set())
+    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    rc = live_rc.state_of(sid, True, client.session)
+    assert [(p["car_id"], p["laps"]) for p in rc.penalties] == [(3, live_rc.CUT_DT_LAPS)], "the drive-through is a live penalty"
+    rc.report_pit(3, True, now=rc.dt_open and min(t for _, t in rc.dt_open.values()) - 1)   # a pass from before the penalty does not serve it
+    assert len(live_rc.pending_cut_served()) == 0
+    rc.report_pit(3, True)
+    assert len(live_rc.pending_cut_served()) == 1 and not rc.dt_open
+    adapter.save_cut_dues()   # served marks are saved with their rows, once
+    adapter.save_cut_dues()
+    assert [(d.round, d.seconds, d.state) for d in dues(sid)] == [(1, 0, "served")]
+    assert live_rc.pending_cut_served() == set()
+    assert count(sid) == [], "served: no time penalty"
+
+
+def test_unserved_drive_through_costs_the_fixed_seconds_capped_then_5_5_10_10(live, monkeypatch):
+    sid, client, _ = live
+    _rule_of(monkeypatch, DT_RULE)
+    monkeypatch.setattr(live_rc, "_cut_served", set())
+    live_rc.on_cuts(sid, client.session, 3, 20, False)   # 5 rounds: DT, 5, 5, 10, 10
+    assert count(sid, cap=7, fixed=30) == [7000, 5000, 5000, 7000, 7000], "the fixed seconds obey the same cap as any automatic one"
+
+
+def test_served_mark_outlives_the_session_state_and_is_saved_with_the_row(live, monkeypatch):
+    sid, client, _ = live
+    _rule_of(monkeypatch, DT_RULE)
+    monkeypatch.setattr(live_rc, "_cut_served", set())
+    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    live_rc.state_of(sid, True, client.session).report_pit(3, True)
+    live_rc.state_of(sid, False)   # the session ends before the monitor saved anything
+    assert count(sid) == [], "result counting stages the row and the served mark together"
+    adapter.save_cut_dues()
+    assert [d.state for d in dues(sid)] == ["served"]
+
+
+def test_drive_through_ladder_loads_and_old_ones_get_the_default_fixed_seconds():
+    assert rule(ladder=[0, 5, 5, 10]).dt_fixed_s is None
+    assert CutRule.model_validate({"tolerance": 2, "cuts_per_step": 1, "step_seconds": 5, "max_seconds": 600, "ladder": [5, 5, 10]}).dt_fixed_s is None
+    from app.stewards.auto import ladder_drafts
+    r = rule(ladder=[0, 5, 5, 10])
+    p = {"type": "Race", "laps": [{"driver_guid": "g", "lap_time_ms": 9, "cuts": 8}], "classification": [{"driver_guid": "g", "driver_name": "A"}]}
+    assert [(d["seconds"], d["drive_throughs"]) for d in ladder_drafts(p, r, {"g"}, 600)] == [(5, 1)]

@@ -70,7 +70,7 @@ def test_a_league_without_a_rulebook_has_one_derived_from_its_older_columns():
     got = api.get(f"{V}/championships/{cid}/rulebook").json()
     assert got["source"] == "legacy" and got["rulebook"]["scoring"]["table"] == [10, 5]
     assert [(i["name"], i["kind"], i["value"]) for i in got["rulebook"]["catalogue"]] == [("Contacto", "time", 5), ("Cortar", "dsq", 0)]
-    assert got["rulebook"]["detectors"]["cuts"] == {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 12, "ladder": None}
+    assert got["rulebook"]["detectors"]["cuts"] == {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 12, "ladder": None, "dt_fixed_s": None}
 
 
 def test_a_saved_rulebook_becomes_the_source_and_the_older_columns_are_refused():
@@ -119,7 +119,7 @@ def test_the_dry_run_says_what_a_rulebook_would_warn_about_and_writes_nothing():
         before = (len(s.exec(select(Notice)).all()), len(s.exec(select(Penalty)).all()))
     assert api.post(url, json={"server_id": sid, "filename": "dry.json"}).json()["notices"] == []   # the league has no cut rule
     r = api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": PRESETS["vrl-base"].model_dump()}).json()
-    assert [(n["driver_guid"], n["cuts"], n["seconds"]) for n in r["notices"]] == [(A, 10, 20), (B, 5, 5)]   # VRL: every 3 cuts a round, +5 s, +5 s, +10 s: A (10 cuts) has 3 rounds, B (5) has 1
+    assert [(n["driver_guid"], n["cuts"], n["seconds"]) for n in r["notices"]] == [(A, 10, 10), (B, 5, 0)]   # VRL: every 3 cuts a round, drive-through, +5 s, +5 s, +10 s: A (10 cuts) has 3 rounds (DT + 10 s), B (5) has 1 (the DT, no seconds)
     assert "contactos y de quién es la culpa" in r["not_evaluated"]
     lax = {**PRESETS["vrl-base"].model_dump(), "detectors": {"cuts": {"tolerance": 0, "cuts_per_step": 5, "step_seconds": 5, "max_seconds": 30}}}
     assert {n["driver_guid"]: n["seconds"] for n in api.post(url, json={"server_id": sid, "filename": "dry.json", "rulebook": lax}).json()["notices"]} == {A: 10, B: 5}

@@ -51,13 +51,15 @@ class CatalogueItem(_Strict):
 
 
 class CutRule(_Strict):
-    """Without ladder, retain legacy notices. With ladder (e.g. [5, 5, 10]), every tolerance + 1 cuts completes a sanctioned round; the last step repeats.
+    """Without ladder, retain legacy notices. With ladder (e.g. [0, 5, 5, 10]), every tolerance + 1 cuts completes a sanctioned round; the last step repeats.
+    A step of 0 is a live drive-through (3 laps to serve it); one never served by the result is charged `dt_fixed_s` seconds instead.
     In ladder mode only tolerance and ladder set the rounds/seconds; cuts_per_step,
     step_seconds and max_seconds remain required for compatibility. Automatic seconds
     are capped by the same rulebook's neutralization.max_auto_time_penalty_s.
     """
 
-    ladder: list[Annotated[int, Field(ge=1, le=600)]] | None = Field(default=None, min_length=1, max_length=10)
+    ladder: list[Annotated[int, Field(ge=0, le=600)]] | None = Field(default=None, min_length=1, max_length=10)
+    dt_fixed_s: int | None = Field(default=None, ge=1, le=600)   # None = 10 s
     tolerance: int = Field(default=0, ge=0, le=1000)
     cuts_per_step: int = Field(ge=1, le=100)
     step_seconds: int = Field(ge=1, le=60)
@@ -177,6 +179,6 @@ PRESETS: dict[str, Rulebook] = {
             CatalogueItem(key="stop-go-30", name="Stop & go 30 s", kind="stopgo", value=30, conduct_points=4),
             CatalogueItem(key="dsq", name="Descalificación", kind="dsq", conduct_points=9),
         ],
-        detectors=Detectors(cuts=CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=600, ladder=[5, 5, 10])),
+        detectors=Detectors(cuts=CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=600, ladder=[0, 5, 5, 10])),
     ),
 }

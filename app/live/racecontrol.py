@@ -71,6 +71,7 @@ PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
 HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart call...) stays on screen the whole caution: it is dropped when the flag leaves the cautions or when its tag is replaced (the TTL is only a ceiling)
+CUT_DT_LAPS = 3                 # laps to serve the drive-through of a cuts ladder step 0 (served = the hub reports the car in the pit lane afterwards)
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
@@ -131,6 +132,7 @@ class RaceControl:
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
         self.cuts_emitted: dict[str, int] = {}
+        self.dt_open: dict[tuple, tuple[int, float]] = {}   # cut-ladder drive-throughs not served yet: due key -> (car, issued at)
         self.cuts_at: dict[str, float] = {}
         self.cuts_totals: dict[str, tuple[int, int]] = {}
         self.cuts_owners: dict[int, str] = {}
@@ -737,6 +739,10 @@ class RaceControl:
         if in_pit:
             with _lock:
                 self._pit_seen[car_id] = self.clock.time() if now is None else now
+                for key, (car, issued) in list(self.dt_open.items()):
+                    if car == car_id and self._pit_seen[car_id] > issued:   # a pit-lane pass after the penalty came out serves it
+                        del self.dt_open[key]
+                        _cut_served.add(key)
                 # Keep the return command through parking: pit-lane entry is not
                 # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
@@ -1220,8 +1226,13 @@ class RaceControl:
                     if len(_cut_dues_pending) >= MAX_CUT_DUES_PENDING:
                         log.error("cuts: pending ledger full; round could not be queued: %s", row)
                         continue
-                    _cut_dues_pending[(self.server_id, self.cuts_session_key, driver_guid, round_no)] = row
+                    key = (self.server_id, self.cuts_session_key, driver_guid, round_no)
+                    _cut_dues_pending[key] = row
                     self.cuts_emitted[driver_guid] = round_no
+                    if row["seconds"] == 0:   # a drive-through step: one penalty per car at a time (a single pit pass serves them all)
+                        if not any(c == car for c, _ in self.dt_open.values()):
+                            self.add_penalty(car, CUT_DT_LAPS)
+                        self.dt_open[key] = (car, self.clock.time())
                     self.audit("cuts_due", due=row, executed=True, persistence="pending")
             if n > 0:
                 self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
@@ -1364,6 +1375,19 @@ _cut_dues_pending: dict[tuple, dict] = {}   # protected by _lock, retained acros
 def pending_cut_dues() -> list[dict]:
     with _lock:
         return [dict(row) for row in _cut_dues_pending.values()]
+
+
+_cut_served: set[tuple] = set()   # keys of drive-through dues served, waiting to be written (protected by _lock; outlives the RaceControl that saw the pit pass)
+
+
+def pending_cut_served() -> set[tuple]:
+    with _lock:
+        return set(_cut_served)
+
+
+def acknowledge_cut_served(keys: set[tuple]) -> None:
+    with _lock:
+        _cut_served.difference_update(keys)
 
 
 def acknowledge_cut_dues(rows: list[dict]) -> None:

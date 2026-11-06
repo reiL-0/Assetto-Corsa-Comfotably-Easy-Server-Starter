@@ -187,15 +187,17 @@ def save_dues(rows: list[dict]) -> None:
 
 
 def save_cut_dues() -> None:
-    from app.live.racecontrol import pending_cut_dues, acknowledge_cut_dues
+    from app.live.racecontrol import pending_cut_dues, acknowledge_cut_dues, pending_cut_served, acknowledge_cut_served
     from app.stewards.auto import stage_cut_dues
+    served = pending_cut_served()   # (first: a served key's row was queued before it, so the rows read next hold it unless it is already saved)
     rows = pending_cut_dues()
-    if not rows:
+    if not rows and not served:
         return
     with Session(engine) as s:
-        stage_cut_dues(s, rows)
+        stage_cut_dues(s, rows, served)
         s.commit()
     acknowledge_cut_dues(rows)
+    acknowledge_cut_served(served)
     for row in rows:
         raceaudit.record(row["server_id"], "cuts_due_saved", due=row, executed=True)
 

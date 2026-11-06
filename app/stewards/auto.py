@@ -9,6 +9,7 @@ Contacts and track limits are still evidence (see README.md).
 
 from __future__ import annotations
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.live.raceaudit import record
@@ -79,7 +80,8 @@ def ladder_drafts(parsed: dict, rule: CutRule, racing: set[str], cap: int) -> li
     for d in _cuts_per_driver(parsed, racing):
         rounds = d["cuts"] // size
         if rounds:
-            out.append(d | {"seconds": sum(min(rule.ladder[min(r, len(rule.ladder) - 1)], cap) for r in range(rounds))})
+            steps = [rule.ladder[min(r, len(rule.ladder) - 1)] for r in range(rounds)]
+            out.append(d | {"seconds": sum(min(s, cap) for s in steps), "drive_throughs": steps.count(0)})
     return out
 
 
@@ -134,12 +136,15 @@ def cut_notices(sess: Session, c: Championship, server_id: int, filename: str, p
     return made
 
 
-def stage_cut_dues(sess: Session, rows: list[dict]) -> None:
-    """Idempotent inserts; caller owns the transaction and acknowledges after commit."""
+def stage_cut_dues(sess: Session, rows: list[dict], served: set[tuple] = frozenset()) -> None:
+    """Idempotent inserts, then the drive-throughs served (a `due` one becomes `served`, never back); caller owns the transaction and acknowledges after commit."""
     from sqlalchemy.dialects.sqlite import insert
     for row in rows:
         sess.execute(insert(CutDue).values(**row, state="due").on_conflict_do_nothing(
             index_elements=["server_id", "session_key", "driver_guid", "round"]))
+    for server_id, session_key, guid, round_no in served:
+        sess.execute(update(CutDue).where(CutDue.server_id == server_id, CutDue.session_key == session_key, CutDue.driver_guid == guid,
+                                          CutDue.round == round_no, CutDue.state == "due").values(state="served"))
 
 
 def cut_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
@@ -152,8 +157,8 @@ def cut_penalties(sess: Session, c: Championship, server_id: int, filename: str,
     if parsed["type"] != "Race" or not rule or rule.ladder is None or sess.get(ResultClose, (server_id, filename)):
         return 0
     # Include the last lap even if the monitor has not persisted its queue yet.
-    from app.live.racecontrol import pending_cut_dues
-    stage_cut_dues(sess, [r for r in pending_cut_dues() if r["server_id"] == server_id])
+    from app.live.racecontrol import pending_cut_dues, pending_cut_served
+    stage_cut_dues(sess, [r for r in pending_cut_dues() if r["server_id"] == server_id], {k for k in pending_cut_served() if k[0] == server_id})
     racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
     made = 0
     for due in sess.exec(select(CutDue).where(CutDue.server_id == server_id, CutDue.state == "due", CutDue.ts >= since, CutDue.ts <= finished_at).order_by(CutDue.ts, CutDue.round)).all():
@@ -162,11 +167,14 @@ def cut_penalties(sess: Session, c: Championship, server_id: int, filename: str,
         else:
             key = f"cuts:{due.id}"
             if not sess.exec(select(Penalty.id).where(Penalty.auto_key == key)).first():
-                seconds, reason = capped_auto_time(due.seconds, rb.neutralization.max_auto_time_penalty_s, f"Cortes de pista: ronda {due.round}")
+                if due.seconds:
+                    seconds, reason = capped_auto_time(due.seconds, rb.neutralization.max_auto_time_penalty_s, f"Cortes de pista: ronda {due.round}")
+                else:   # a drive-through nobody served: the rule's fixed seconds instead
+                    seconds, reason = capped_auto_time((rule.dt_fixed_s or 10), rb.neutralization.max_auto_time_penalty_s, f"Cortes de pista: ronda {due.round}, drive-through sin cumplir")
                 sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="time",
                                  value=seconds * 1000, auto_key=key, created_by="auto", reason=reason))
                 _audit_proposal(sess, server_id, "cuts_penalty", rb, driver_guid=due.driver_guid, filename=filename,
-                                round=due.round, original_seconds=due.seconds, final_seconds=seconds,
+                                round=due.round, original_seconds=due.seconds or (rule.dt_fixed_s or 10), final_seconds=seconds,
                                 cap=rb.neutralization.max_auto_time_penalty_s, source="auto")
                 made += 1
             due.state = "applied"
