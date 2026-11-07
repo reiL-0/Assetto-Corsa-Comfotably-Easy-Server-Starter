@@ -36,10 +36,11 @@ PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader w
 
 
 class Caution:
-    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=(), pace_only: bool = False) -> None:
+    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=(), pace_only: bool = False, completed_laps: dict[int, int] | None = None) -> None:
         self.pace_only = pace_only   # a yellow without NASCAR (practice, qualifying) behind a pace car: only its lap count, the "to go" and the green; no free pass, no wave-around, no judging, pits open
         self.t0 = now
         self.p0 = dict(progress)
+        self.completed_laps = dict(completed_laps) if completed_laps is not None else None
         self.frozen = sorted(self.p0, key=lambda c: -self.p0[c])
         self.leader = self.frozen[0] if self.frozen else None
         self.involved, self.pitted, self.penalised = set(involved), set(pitted), set(penalised)
@@ -68,6 +69,11 @@ class Caution:
         """Cars a lap or more behind the leader at the moment of the caution, in frozen order."""
         if self.leader is None:
             return []
+        if self.completed_laps is not None:
+            # A missing counter is unknown, not a zero and not a spline-based guess.
+            # The leader of the scoring table may differ from the spline leader.
+            top = max((self.completed_laps[c] for c in self.frozen if c in self.completed_laps), default=None)
+            return [c for c in self.frozen if top is not None and c in self.completed_laps and top - self.completed_laps[c] >= 1]
         top = self.p0[self.leader]
         return [c for c in self.frozen if top - self.p0[c] >= 1.0]
 
@@ -137,6 +143,8 @@ class Caution:
     def remove(self, car: int) -> None:
         """A car that is not a competitor (it was named the pace car during the caution): out of the order, the lapped list and every set. Its free pass is not given to the next one."""
         self.p0.pop(car, None)
+        if self.completed_laps is not None:
+            self.completed_laps.pop(car, None)
         self.frozen = [c for c in self.frozen if c != car]
         for group in (self.involved, self.pitted, self.penalised, self.allowed, self.violators):
             group.discard(car)

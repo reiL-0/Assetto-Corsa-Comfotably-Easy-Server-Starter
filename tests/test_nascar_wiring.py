@@ -573,6 +573,17 @@ def _field(client, **cars):
     for car, spline_laps in cars.items():
         spline, laps = spline_laps
         client.field.update(int(car[1:]), spline, laps)
+        client.field.completed_laps[int(car[1:])] = laps
+
+
+def test_live_yellow_uses_server_lap_counts_when_spline_progress_disagrees(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.20, 5), c4=(0.10, 4), c5=(0.11, 4))
+    client.field.completed_laps.update({3: 5, 4: 5, 5: 4})
+    rc.set_flag('yellow', field=client.field)
+    assert rc.caution.lapped() == [5] and rc.caution.free_pass == 5
 
 
 def test_a_yellow_freezes_the_order_names_the_free_pass_and_a_pass_under_it_costs_a_drive_through(live):
@@ -620,6 +631,7 @@ def test_to_go_tells_the_wave_around_the_restart_place_and_who_may_choose(live):
     client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'), (6, 'Dora'))})
     for car, spline, laps in ((3, 0.50, 9), (4, 0.30, 9), (5, 0.52, 7), (6, 0.20, 8)):
         client.field.update(car, spline, laps)   # 5 is two laps down and 0.02 ahead of the leader (the wave-around), 6 one lap down (the free pass)
+        client.field.completed_laps[car] = laps
     steward = _client('steward')
     assert steward.post(f'{V}/servers/{sid}/race-control/restart', json={}).status_code == 409, 'no caution yet'
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
