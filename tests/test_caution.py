@@ -28,6 +28,25 @@ def test_the_order_is_frozen_by_progress_and_the_lapped_cars_are_a_lap_or_more_b
     assert Caution(field(5.20, 4.21), 0.0).lapped() == [], "0.99 behind is still the lead lap"
 
 
+def test_free_pass_uses_completed_laps_not_distance_from_leader_on_track():
+    # A lapped car can be physically just ahead of the leader; a lead-lap car
+    # can appear one lap behind in an uncorrected spline estimate.
+    c = Caution({1: 5.20, 2: 4.22, 3: 4.10}, 0, completed_laps={1: 5, 2: 4, 3: 5})
+    assert c.lapped() == [2] and c.free_pass == 2
+    c = Caution({1: 5.20, 2: 4.10}, 0, completed_laps={1: 5, 2: 5})
+    assert c.lapped() == [] and c.free_pass is None
+    c = Caution({1: 5.20, 2: 5.15, 3: 4.22, 4: 4.10}, 0,
+                completed_laps={1: 5, 2: 5, 3: 4, 4: 4}, involved=[3])
+    assert c.free_pass is None, "an ineligible first lapped car does not hand the pass to the next"
+    c = Caution({1: 5.20, 2: 4.10, 3: 3.90}, 0, completed_laps={1: 5, 3: 4})
+    assert c.lapped() == [3] and c.free_pass == 3, "unknown counters are not inferred from spline progress"
+    c = Caution({1: 5.20, 2: 4.10}, 0, completed_laps={})
+    assert c.free_pass is None, "no official lap data means no automatic award"
+    c = Caution({1: 5.20, 2: 4.10}, 0, completed_laps={1: 5, 2: 4})
+    c.remove(1)
+    assert c.lapped() == [] and c.free_pass == 2, "a removed pace car cannot remain the lap leader"
+
+
 def test_the_free_pass_is_the_first_lapped_car_and_only_if_it_is_eligible_never_the_next_one():
     p = field(5.20, 5.15, 4.10, 3.95)
     assert Caution(p, 0.0).free_pass == 3

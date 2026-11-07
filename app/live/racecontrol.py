@@ -250,7 +250,15 @@ class RaceControl:
                 self.vsc_fallback = mode == "delta" and flag == "vsc" and not self.vsc_profiles   # asked for delta, no clean lap yet: the fixed pace runs for the whole flag
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
-                actions += self._caution_step(flag, was_caution, field.snapshot(), now, pits)
+                samples = field.samples() if hasattr(field, "samples") and callable(field.samples) else None
+                if isinstance(samples, dict):
+                    snap = {c: getattr(s, "progress", s) for c, s in samples.items()}
+                    laps = {c: s.completed_laps for c, s in samples.items() if getattr(s, "completed_laps", None) is not None}
+                else:
+                    snap = field.snapshot() if hasattr(field, "snapshot") else dict(field)
+                    raw_laps = getattr(field, "completed_laps", None)
+                    laps = dict(raw_laps) if isinstance(raw_laps, dict) else None
+                actions += self._caution_step(flag, was_caution, snap, now, pits, laps)
             self._bump()
             self.audit("flag", flag=flag, source=source, pace_kmh=pace_kmh, grace_s=grace_s, tolerance_kmh=tolerance_kmh, penalty=pen, actions=actions,
                        thresholds=raceaudit.thresholds(pace_rules, delta_rules, pass_rules, caution_rules), executed=True)
@@ -651,7 +659,7 @@ class RaceControl:
             if self.giveback:
                 self.giveback.note_contact(now, car, other)   # (who touched whom around a move off the track: for the director, not for the automatic judge)
 
-    def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=()) -> list[tuple]:
+    def _caution_step(self, flag: str, was_caution: bool, progress: dict[int, float], now: float, pits=(), completed_laps=None) -> list[tuple]:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
             self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
@@ -659,7 +667,7 @@ class RaceControl:
             progress = self.without_pace_car(progress)
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
-            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits, pace_only=self.nascar is None)
+            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits, pace_only=self.nascar is None, completed_laps=completed_laps)
             if self.caution.pace_only:
                 return []   # (no messages of the NASCAR rules: the yellow banner is already out)
             if self.nascar and self.nascar.phase == BREAK:
