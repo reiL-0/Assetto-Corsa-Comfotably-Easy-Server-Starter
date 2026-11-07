@@ -410,8 +410,9 @@ def _control(server_id: int, sess: SessionDep):
 @control_router.post("")
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
+    track_len = inst.acsp.length.metres() if getattr(getattr(inst, "acsp", None), "length", None) else None
     try:
-        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
+        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field, mode=body.mode, track_length_m=track_len)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if body.flag in ("vsc", "fcy"):

@@ -167,7 +167,7 @@ class RaceControl:
     def _clear_vsc(self) -> None:
         self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0}
         self.evaluated, self.violations, self.exempt = True, [], []
-        self.vsc_mode, self.vsc_profiles, self.vsc_fallback = "fixed", {}, False   # `delta` only for a VSC that started with at least one reference lap; vsc_profiles: car model -> minimum ms of the 20 sectors, frozen at the start
+        self.vsc_mode, self.vsc_profiles, self.vsc_fallback, self.vsc_default_profile = "fixed", {}, False, None   # `delta` only for a VSC/FCY that started with at least one reference lap or fallback; vsc_profiles: car model -> minimum ms of the 20 sectors, frozen at the start
         self._since: float | None = None   # the instant (clock of the samples) the grace of a delta VSC ended: latched ONCE, never recomputed from the wall clock
         self._pen_cars: set[tuple[int, int]] = set()   # (car, slot generation) already penalised in this flag, by whichever judge: one penalty per car and flag
         self._green_clear_since = self._green_last_look = None
@@ -202,7 +202,7 @@ class RaceControl:
         self.ts = self.clock.time()
 
     @fieldrec.capture(_lock)
-    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None, mode: str = "fixed") -> list[tuple]:
+    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None, mode: str = "fixed", track_length_m: float | None = None) -> list[tuple]:
         """Return NASCAR actions for the caller to execute after releasing the lock."""
         if flag not in FLAGS:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
@@ -242,12 +242,19 @@ class RaceControl:
                 self.caution = None
                 self.notices = [x for x in self.notices if not x.get("hold") or x.get("hold") == "winner"]   # (the caution is over: what was held on the screen goes with it, but the winner stays until the session restarts)
             if flag in SLOWING:
+                if track_length_m:
+                    self.track_length_m = track_length_m
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
                 self.legacy = "pace" in self.auto_off
-                self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if (mode == "delta" and flag == "vsc" and not self.legacy) else {}   # frozen NOW: the reference does not move while the VSC runs
-                self.vsc_mode = "delta" if self.vsc_profiles else "fixed"
-                self.vsc_fallback = mode == "delta" and flag == "vsc" and not self.vsc_profiles   # asked for delta, no clean lap yet: the fixed pace runs for the whole flag
+                delta_wanted = mode == "delta" and flag in SLOWING and not self.legacy
+                self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if delta_wanted else {}
+                L = max(100.0, float(track_length_m or getattr(self, "track_length_m", None) or 4000.0))
+                pace = max(10.0, float(pace_kmh or 80))
+                sec_ms = round((L / 20.0) / (pace / 3.6) * 1000)
+                self.vsc_default_profile = [sec_ms] * 20 if delta_wanted else None
+                self.vsc_mode = "delta" if delta_wanted else "fixed"
+                self.vsc_fallback = delta_wanted and not bool(self.vsc_profiles)
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 samples = field.samples() if hasattr(field, "samples") and callable(field.samples) else None
@@ -987,6 +994,8 @@ class RaceControl:
     def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
         """One look for the blue flag and the danger warning (shadow). `mono`: self.clock.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
         with _lock:
+            if length:
+                self.track_length_m = length
             racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
@@ -1019,10 +1028,10 @@ class RaceControl:
             return res
 
     def auto_live(self, fresh_modes: dict | None = None) -> list[str]:
-        """The types a screen may be shown now: the hub asks every second when this is not empty and rarely otherwise (`vsc`: a delta VSC is running)."""
+        """The types a screen may be shown now: the hub asks every second when this is not empty and rarely otherwise (`vsc`: a delta VSC/FCY is running)."""
         with _lock:
             out = sorted(k for k, v in self.flag_modes.items() if v == "live" and k not in self.auto_off and (fresh_modes is None or fresh_modes.get(k) == "live"))
-            return out + ["vsc"] if self.flag == "vsc" and self.vsc_mode == "delta" else out
+            return out + ["vsc"] if self.flag in SLOWING and self.vsc_mode == "delta" else out
 
     def judging_continuously(self) -> bool:
         """Whether the continuous judge penalises now: not when this flag started with the kill switch `pace` on (then the old single judgement at the end of the grace decides, and only it), and not while
@@ -1039,8 +1048,9 @@ class RaceControl:
             models = models or {}
             pc = self.pace_car
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
-            green = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
-            delta_on = self.flag == "vsc" and self.vsc_mode == "delta" and now >= self.grace_end
+            stype = (self.session_ref or {}).get("session_type")
+            green = stype in (1, 2, 3) and self.flag in ("green", "white")   # practice, qualifying or race (ACSP 1/2/3): an unknown session type never teaches a reference lap
+            delta_on = self.flag in SLOWING and self.vsc_mode == "delta" and now >= self.grace_end
             if delta_on and self._since is None:
                 self._since = mono - (now - self.grace_end)   # the instant the grace ended, on the clock of the samples: latched, a later change of the wall clock does not move it
             since = self._since if self._since is not None else float("inf")
@@ -1057,12 +1067,12 @@ class RaceControl:
                     self.reflaps.feed(car, models.get(car), events, car in in_pit)
                 else:
                     self.reflaps.forget(car)   # (a lap that was running when the green went away is not a reference: its partial times are dropped)
-                prof = self.vsc_profiles.get(models.get(car)) if self.vsc_mode == "delta" else None
+                prof = (self.vsc_profiles.get(models.get(car)) or self.vsc_default_profile) if self.vsc_mode == "delta" else None
                 if prof is not None:
                     for d in self.deltajudge.feed(mono, self.vsc_id, delta_on, since, car, s.generation, prof, events, car in in_pit):
                         found.append({**d, "kind": "delta", "speed_kmh": round(speeds.get(car) or 0)})
             if self.vsc_mode == "delta":
-                covered = {c for c in samples if self.vsc_profiles.get(models.get(c)) is not None}
+                covered = {c for c in samples if (self.vsc_profiles.get(models.get(c)) or self.vsc_default_profile) is not None}
             active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
             fixed = self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc and c not in covered},
                                         {c: v for c, v in speeds.items() if c != pc and c not in covered}, in_pit)
@@ -1116,9 +1126,9 @@ class RaceControl:
             return out
 
     def delta_block(self, model: str | None) -> dict | None:
-        """What a screen of a car of this model needs to show the delta of the VSC being run: the frozen minimum ms per sector and the judge's numbers. None if this is not a delta VSC for it."""
+        """What a screen of a car of this model needs to show the delta of the VSC/FCY being run: the frozen minimum ms per sector and the judge's numbers. None if this is not a delta flag for it."""
         with _lock:
-            prof = self.vsc_profiles.get(model) if (self.flag == "vsc" and self.vsc_mode == "delta") else None
+            prof = (self.vsc_profiles.get(model) or self.vsc_default_profile) if (self.flag in SLOWING and self.vsc_mode == "delta") else None
             return None if prof is None else {"mode": "delta", "min_ms": list(prof), "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
 
     @fieldrec.capture(_lock)
