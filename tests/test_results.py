@@ -32,12 +32,51 @@ def test_parse_race_result_computes_position_and_gap(tmp_path):
 
 
 def test_parse_qualify_result_gaps_by_best_lap(tmp_path):
-    data = dict(RACE_JSON, Type="Qualify")
+    data = {**RACE_JSON, "Type": "Qualify", "Laps": [*RACE_JSON["Laps"], {"DriverGuid": "2", "LapTime": 91000, "Cuts": 0}]}
     p = tmp_path / "q.json"
     p.write_text(json.dumps(data))
 
     parsed = parse_result_file(p)
     assert parsed["classification"][1]["gap_ms"] == 1000  # 91000 - 90000
+
+
+def test_qualifying_classification_uses_only_clean_laps_not_acserver_order(tmp_path):
+    data = {**RACE_JSON, "Type": "Qualify", "Result": [
+        {"DriverName": "Bob", "DriverGuid": "2", "CarModel": "car_b", "BestLap": 88000, "TotalTime": 1},
+        {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_a", "BestLap": 90000, "TotalTime": 1},
+        {"DriverName": "Cat", "DriverGuid": "3", "CarModel": "car_c", "BestLap": 89000, "TotalTime": 1},
+    ], "Laps": [
+        {"DriverGuid": "2", "LapTime": 88000, "Cuts": 1},
+        {"DriverGuid": "2", "LapTime": 92000, "Cuts": 0},
+        {"DriverGuid": "1", "LapTime": 90000, "Cuts": 0},
+        {"DriverGuid": "3", "LapTime": 89000, "Cuts": 2},
+    ]}
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps(data))
+    cls = parse_result_file(p)["classification"]
+    assert [(e["driver_guid"], e["best_lap_ms"], e["position"], e["gap_ms"]) for e in cls] == [
+        ("1", 90000, 1, None), ("2", 92000, 2, 2000), ("3", None, 3, None)]
+
+
+def test_mixed_qualifying_cut_data_does_not_count_known_dirty_lap(tmp_path):
+    data = {**RACE_JSON, "Type": "Qualify", "Result": [
+        {"DriverName": "Bob", "DriverGuid": "2", "CarModel": "car_b", "BestLap": 88000, "TotalTime": 1},
+        {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "car_a", "BestLap": 90000, "TotalTime": 1},
+    ], "Laps": [
+        {"DriverGuid": "2", "LapTime": 88000, "Cuts": 1},
+        {"DriverGuid": "1", "LapTime": 90000},
+    ]}
+    p = tmp_path / "mixed-q.json"
+    p.write_text(json.dumps(data))
+    cls = parse_result_file(p)["classification"]
+    assert [(e["driver_guid"], e["best_lap_ms"]) for e in cls] == [("1", 90000), ("2", None)]
+
+
+def test_old_qualifying_result_without_cut_data_preserves_original_classification(tmp_path):
+    data = {**RACE_JSON, "Type": "Qualify", "Laps": [{"DriverGuid": "1", "LapTime": 90000}, {"DriverGuid": "2", "LapTime": 91000}]}
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps(data))
+    assert [(e["driver_guid"], e["best_lap_ms"]) for e in parse_result_file(p)["classification"]] == [("1", 90000), ("2", 91000)]
 
 
 def test_empty_slots_and_cars_without_a_lap_are_not_given_a_time(tmp_path):

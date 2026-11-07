@@ -405,6 +405,7 @@ class ChampionshipEvent(SQLModel, table=True):
     filename: str  # result JSON under data/instances/<server_id>/results/
     session_type: str | None = None  # "Race" (scores) or "Qualify" (feeds the grid penalties); None = added by hand, read as it is
     event_id: int | None = None  # the saved event whose run produced it (counted automatically, league.count_results); None = added by hand
+    rulebook_snapshot: dict | None = Field(default=None, sa_type=JSON)  # frozen when this result is attached; NULL = legacy
     scores: bool = True  # False = shown in the league's results but adds nothing to its table (a practice); the admin can flip it
     created_at: datetime = Field(default_factory=_now)
 

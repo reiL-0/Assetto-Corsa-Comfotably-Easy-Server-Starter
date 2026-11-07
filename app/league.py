@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import cut_notices, cut_penalties, give_back_penalties
+from app.stewards.auto import _event_rules, cut_notices, cut_penalties, give_back_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -141,9 +141,17 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     """The event's session as it must be loaded at `at` (unix s): for a league event, the roster's eligible drivers as a locked
     entry list; for any other event, the saved session untouched. 409 when nobody is eligible or the roster does not fit."""
     s = SessionIn(**ev.data)
+    from app.rulebook import CutRule
     c = sess.get(Championship, ev.league_id) if ev.league_id else None
     if not c:
-        return s
+        if "cuts_rule" not in ev.data:
+            return s
+        from app.rulebook import Rulebook
+        snapshot = Rulebook()
+        snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data["cuts_rule"] is not None else None
+        snapshot.detectors.give_back.enabled = False
+        return s.model_copy(update={"rulebook_league_id": None, "rulebook_event_id": ev.id, "rulebook_snapshot": snapshot,
+                                    "rulebook_revision": hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()})
     if c.archived_at:
         raise HTTPException(409, f"league {c.name!r} is archived: its events can no longer run")
     ok, out, suspended = [], [], []
@@ -174,8 +182,10 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
         entries.append(EntryIn(model=model, driver_name=m.name, team=m.team, guid=m.guid, skin=m.skin if model == m.car else "", fixed_setup=setup, spectator=m.non_racing and m.in_pits))   # a skin belongs to the driver's own car
     from app.rulebook import effective
     snapshot = effective(c).model_copy(deep=True)
+    if "cuts_rule" in ev.data:
+        snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data["cuts_rule"] is not None else None
     revision = hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()
-    return s.model_copy(update={"rulebook_revision": revision, "rulebook_league_id": c.id, "rulebook_snapshot": snapshot, "entries": entries, "locked": True, "pickup": False, "cars": cars})
+    return s.model_copy(update={"rulebook_revision": revision, "rulebook_league_id": c.id, "rulebook_event_id": ev.id, "rulebook_snapshot": snapshot, "entries": entries, "locked": True, "pickup": False, "cars": cars})
 
 
 def active_suspensions(sess: Session, championship_id: int, kinds: tuple[str, ...], at: float, guid: str | None = None) -> list[LeagueSuspension]:
@@ -193,15 +203,20 @@ def qualy_banned(server_id: int, guid: str) -> bool:
         return bool(ev and ev.league_id and active_suspensions(s, ev.league_id, ("qualy",), time.time(), guid))
 
 
-def _applied_rulebook(sess: Session, server_id: int, c: Championship | None):
-    from app.rulebook import Rulebook, effective
-    if c is None:   # no league event running: no league rules, whatever snapshot the last session left on the server
-        return None
+def _applied_rulebook(sess: Session, server_id: int, c: Championship | None, ev: Event | None = None):
+    from app.rulebook import Rulebook
     server = sess.get(Server, server_id)
-    snapshot = (server.session or {}).get("rulebook_snapshot") if server else None
-    if snapshot:
+    applied = (server.session or {}) if server else {}
+    snapshot = applied.get("rulebook_snapshot")
+    if c is None and ev is None:
+        return None
+    if snapshot and ((c and applied.get("rulebook_league_id") in (None, c.id) and
+                      (ev is None or applied.get("rulebook_event_id") in (None, ev.id))) or
+                     (ev and c is None and applied.get("rulebook_event_id") == ev.id and applied.get("rulebook_league_id") is None)):
         return Rulebook.model_validate(snapshot)
-    return effective(c) if c else None
+    if c:
+        return _event_rules(c, ev)
+    return None
 
 
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
@@ -234,7 +249,7 @@ def cut_rule(server_id: int) -> dict | None:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c)
+            rb = _applied_rulebook(s, server_id, c, ev)
             cut = rb.detectors.cuts if rb else None
             if cut:
                 rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)}
@@ -261,7 +276,7 @@ def give_back_rule(server_id: int) -> dict | None:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c)
+            rb = _applied_rulebook(s, server_id, c, ev)
             gb = rb.detectors.give_back if rb else None
             if gb and gb.enabled:
                 rule = {"seconds": gb.seconds, "window_s": gb.window_s}
@@ -285,7 +300,7 @@ def flag_modes(server_id: int) -> dict:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c)
+            rb = _applied_rulebook(s, server_id, c, ev)
             if rb:
                 modes = rb.detectors.flags.model_dump()
         if len(_FLAG_MODES) > 64:
@@ -319,7 +334,7 @@ def neutralization_rule(server_id: int) -> dict:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c)
+            rb = _applied_rulebook(s, server_id, c, ev)
             if rb:
                 modes = rb.neutralization.model_dump()
                 server = s.get(Server, server_id)
@@ -424,7 +439,9 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
         if parsed["type"] not in ("Race", "Qualify"):
             continue
         scores = ev.league_id is not None   # a practice (count_only_league_id) is listed but adds nothing: no points, no suspension served, no grid, no cut warnings
-        sess.add(ChampionshipEvent(championship_id=c.id, server_id=sc.server_id, filename=f.name, event_id=ev.id, session_type=parsed["type"], scores=scores))
+        sess.add(ChampionshipEvent(championship_id=c.id, server_id=sc.server_id, filename=f.name, event_id=ev.id, session_type=parsed["type"], scores=scores,
+                                   rulebook_snapshot=_event_rules(c, ev).model_dump(mode="json")))
+        sess.flush()  # sanctions read this row in the same transaction
         if not scores:
             continue
         if parsed["type"] == "Race":

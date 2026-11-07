@@ -157,6 +157,18 @@ def parse_result_file(path: Path) -> dict:
         e["position"] = i + 1
     classification = merged
 
+    if session_type == "Qualify" and data.get("Laps") and any("Cuts" in lap for lap in data["Laps"]):
+        clean: dict[str, int] = {}
+        for lap in data.get("Laps", []):
+            guid, ms = lap.get("DriverGuid"), lap.get("LapTime")
+            if guid and ms and 0 < ms < NO_LAP_MS and lap.get("Cuts", 0) == 0:
+                clean[guid] = min(clean.get(guid, ms), ms)
+        for e in classification:
+            e["best_lap_ms"] = clean.get(e["driver_guid"])
+        classification.sort(key=lambda e: e["best_lap_ms"] if e["best_lap_ms"] is not None else float("inf"))
+        for i, e in enumerate(classification):
+            e["position"] = i + 1
+
     cut = _finish_cut(path, data.get("Laps", [])) if is_race else None
     if cut is not None:
         _cut_after_finish(data, classification, cut)

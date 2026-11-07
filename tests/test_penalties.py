@@ -12,7 +12,7 @@ from app.auth import _sha
 from app.config import settings
 from app.db import engine
 from app.main import app
-from app.models import Penalty, Token, User
+from app.models import ChampionshipEvent, Penalty, Token, User
 from app.results import apply_penalties, parse_result_file
 
 V = "/api/v1"
@@ -322,6 +322,8 @@ def test_auto_time_cap_uses_applied_snapshot_and_preserves_manual_sanctions(cap)
         sess.flush()
         server.session = {**server.session, "rulebook_league_id": league.id}
         sess.add(server)
+        sess.add(ChampionshipEvent(championship_id=league.id, server_id=sid, filename=filename,
+                                   rulebook_snapshot=server.session["rulebook_snapshot"]))
         sess.add(GiveBackDue(server_id=sid, driver_guid=A, seconds=30, ts=100, created_by="auto"))
         sess.add(GiveBackDue(server_id=sid, driver_guid=B, seconds=30, ts=100, created_by="director"))
         sess.commit()
@@ -375,6 +377,8 @@ def test_result_rules_belong_to_its_league(same_league):
             "rulebook_snapshot": {"neutralization": {"max_auto_time_penalty_s": 2},
                 "detectors": {"give_back": {"enabled": False}}}}
         sess.add(server)
+        sess.add(ChampionshipEvent(championship_id=league.id, server_id=sid, filename=filename,
+                                   rulebook_snapshot=server.session["rulebook_snapshot"] if same_league else None))
         sess.add(GiveBackDue(server_id=sid, driver_guid=A, seconds=30, ts=100, created_by="auto"))
         sess.commit()
         assert give_back_penalties(sess, league, sid, filename, parsed, 200, 0) == (0 if same_league else 1)

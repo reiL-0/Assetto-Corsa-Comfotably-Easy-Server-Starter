@@ -13,22 +13,26 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.live.raceaudit import record
-from app.models import Championship, CutDue, GiveBackDue, Notice, Penalty, ResultClose, Server
+from app.models import Championship, ChampionshipEvent, CutDue, Event, GiveBackDue, Notice, Penalty, ResultClose, Server
 from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
 
 
-def _applied_rules(sess: Session, c: Championship, server_id: int) -> Rulebook:
-    """Use the applied session snapshot, including when the league has since been edited."""
-    server = sess.get(Server, server_id)
-    applied = (server.session or {}) if server else {}
-    snapshot = applied.get("rulebook_snapshot")
-    # ponytail: Server.session stores no application timestamp or result binding.
-    # Same-league results from an older event cannot be distinguished here; only
-    # league identity can currently be verified, not temporal compatibility.
-    return (Rulebook.model_validate(snapshot)
-            if snapshot and c.id is not None and applied.get("rulebook_league_id") == c.id
-            else effective(c))
+def _event_rules(c: Championship, event: Event | None) -> Rulebook:
+    rb = effective(c).model_copy(deep=True)
+    if event and "cuts_rule" in event.data:
+        rb.detectors.cuts = CutRule.model_validate(event.data["cuts_rule"]) if event.data["cuts_rule"] is not None else None
+    return rb
+
+
+def _applied_rules(sess: Session, c: Championship, server_id: int, filename: str | None = None) -> Rulebook:
+    """Use the result's frozen snapshot; legacy rows have only today's league/event settings."""
+    counted = sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.server_id == server_id,
+                        ChampionshipEvent.filename == filename, ChampionshipEvent.championship_id == c.id)).first() if filename else None
+    if counted and counted.rulebook_snapshot is not None:
+        return Rulebook.model_validate(counted.rulebook_snapshot)
+    event = sess.get(Event, counted.event_id) if counted and counted.event_id else None
+    return _event_rules(c, event)
 
 
 def _audit_proposal(sess, server_id, kind, rb, **fields):
@@ -89,7 +93,7 @@ def give_back_penalties(sess: Session, c: Championship, server_id: int, filename
     """The time penalties of the advantage gained off the track (app/live/giveback.py): every `GiveBackDue` of this server that fell due while this schedule ran (`since`, its start, up to the end of this Race) and is
     still due becomes a time `Penalty` on this result, once (`auto_key` = giveback:<id>), with its original seconds limited by the applied cap when automatic; director sanctions retain their value and author. A due of a driver who is not in the result is `expired`: that race is over,
     it must not wait for the next one. Does not commit; returns how many penalties were made."""
-    rb = _applied_rules(sess, c, server_id)
+    rb = _applied_rules(sess, c, server_id, filename)
     if parsed["type"] != "Race" or not rb.detectors.give_back.enabled or sess.get(ResultClose, (server_id, filename)):
         return 0
     racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
@@ -118,7 +122,7 @@ def give_back_penalties(sess: Session, c: Championship, server_id: int, filename
 
 def cut_notices(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict) -> int:
     """Add the cut warnings of this Race result under the league's rulebook; returns how many were created. Does not commit (the caller counts the file in the same transaction)."""
-    rb = _applied_rules(sess, c, server_id)
+    rb = _applied_rules(sess, c, server_id, filename)
     rule = rb.detectors.cuts
     if parsed["type"] != "Race" or not rule or sess.get(ResultClose, (server_id, filename)):
         return 0
@@ -152,7 +156,7 @@ def cut_penalties(sess: Session, c: Championship, server_id: int, filename: str,
     rulebook's neutralization.max_auto_time_penalty_s (default 10 s, configurable
     in that same rulebook). The required legacy cut fields do not set these seconds.
     """
-    rb = _applied_rules(sess, c, server_id)
+    rb = _applied_rules(sess, c, server_id, filename)
     rule = rb.detectors.cuts
     if parsed["type"] != "Race" or not rule or rule.ladder is None or sess.get(ResultClose, (server_id, filename)):
         return 0

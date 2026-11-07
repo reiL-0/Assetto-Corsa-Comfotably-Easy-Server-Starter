@@ -4,13 +4,15 @@ from datetime import UTC, datetime
 
 from conftest import ADMIN
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app import content
 from app.auth import _sha
 from app.db import engine
+from app.league import cut_rule, invalidate_rule_cache, session_for
 from app.main import app
-from app.models import Token, User
+from app.models import Championship, ChampionshipEvent, Event, LeagueMember, Schedule, Server, Token, User
+from app.stewards.auto import _applied_rules
 
 V = "/api/v1"
 api = TestClient(app, headers=ADMIN)
@@ -60,6 +62,109 @@ def test_create_list_update_duplicate_delete():
     assert api.delete(f"{V}/events/{dup.json()['id']}").status_code == 204
     assert api.get(f"{V}/events/{dup.json()['id']}").status_code == 404
     assert api.get(f"{V}/events/{eid}").status_code == 200  # the original is untouched
+
+
+def test_event_cut_rule_tristate_and_applied_snapshot():
+    rule = {"tolerance": 2, "cuts_per_step": 1, "step_seconds": 5, "max_seconds": 30}
+    with Session(engine) as s:
+        c = Championship(name="cut rule league", auto_rules={"cuts_per_step": 2, "step_seconds": 7, "max_seconds": 28})
+        s.add(c)
+        s.commit()
+        s.refresh(c)
+        s.add(LeagueMember(championship_id=c.id, guid="76561190000000001", name="Driver", car="evbmw"))
+        s.commit()
+        cid = c.id
+    _install()
+    with Session(engine) as s:
+        standalone = Event(title="open practice cuts", data={**SESSION, "cuts_rule": rule})
+        s.add(standalone)
+        s.commit()
+        applied = session_for(s, standalone, 0)
+        assert applied.rulebook_snapshot.detectors.cuts.step_seconds == 5
+        assert applied.rulebook_snapshot.detectors.give_back.enabled is False
+        assert applied.rulebook_league_id is None
+        srv = Server(name="open cuts practice", base_port=18010, session=applied.model_dump(mode="json"))
+        s.add(srv)
+        s.flush()
+        schedule = Schedule(event_id=standalone.id, server_id=srv.id, start_at=4102444800, state="running")
+        s.add(schedule)
+        s.commit()
+        invalidate_rule_cache(srv.id)
+        assert cut_rule(srv.id)["step"] == 5
+        schedule.state = "done"
+        s.add(schedule)
+        s.commit()
+        invalidate_rule_cache(srv.id)
+    body = {"title": "Cuts", "session": SESSION, "league_id": cid}
+    absent = api.post(f"{V}/events", json=body)
+    assert absent.status_code == 201 and "cuts_rule" not in absent.json()
+    assert "cuts_rule" not in api.get(f"{V}/events/{absent.json()['id']}").json()
+    assert "cuts_rule" not in next(e for e in api.get(f"{V}/events").json() if e["id"] == absent.json()["id"])
+    off = api.post(f"{V}/events", json={**body, "cuts_rule": None})
+    assert off.status_code == 201 and off.json()["cuts_rule"] is None
+    custom = api.post(f"{V}/events", json={**body, "cuts_rule": rule})
+    assert custom.status_code == 201
+    assert api.post(f"{V}/events", json={**body, "cuts_rule": {**rule, "tolerance": -1}}).status_code == 422
+    with Session(engine) as s:
+        events = [s.get(Event, r.json()["id"]) for r in (absent, off, custom)]
+        assert "cuts_rule" not in events[0].data and events[1].data["cuts_rule"] is None
+        assert events[2].data["cuts_rule"] == {**rule, "ladder": None, "dt_fixed_s": None}
+        assert [session_for(s, ev, 0).rulebook_snapshot.detectors.cuts.tolerance if i != 1 else session_for(s, ev, 0).rulebook_snapshot.detectors.cuts for i, ev in enumerate(events)] == [0, None, 2]
+        assert session_for(s, events[2], 0).rulebook_snapshot.detectors.cuts.step_seconds == 5
+        assert session_for(s, events[2], 0).rulebook_event_id == events[2].id
+    eid = custom.json()["id"]
+    assert api.get(f"{V}/events/{eid}").json()["cuts_rule"]["tolerance"] == 2
+    kept = api.put(f"{V}/events/{eid}", json=body)
+    assert kept.json()["cuts_rule"]["tolerance"] == 2
+    copied = api.post(f"{V}/events/{eid}/duplicate")
+    assert copied.json()["cuts_rule"]["tolerance"] == 2
+    assert api.put(f"{V}/events/{eid}", json={**body, "cuts_rule": None}).json()["cuts_rule"] is None
+    assert api.put(f"{V}/events/{eid}", json={**body, "inherit_cuts_rule": True, "cuts_rule": rule}).status_code == 422
+    assert api.put(f"{V}/events/{eid}", json={**body, "inherit_cuts_rule": True, "cuts_rule": None}).status_code == 422
+    cleared = api.put(f"{V}/events/{eid}", json={**body, "inherit_cuts_rule": True})
+    assert cleared.status_code == 200 and "cuts_rule" not in cleared.json()
+    with Session(engine) as s:
+        ev = s.get(Event, eid)
+        assert "cuts_rule" not in ev.data
+        assert session_for(s, ev, 0).rulebook_snapshot.detectors.cuts.step_seconds == 7
+    assert "cuts_rule" not in api.get(f"{V}/events/{eid}").json()
+    assert "cuts_rule" not in next(e for e in api.get(f"{V}/events").json() if e["id"] == eid)
+
+
+def test_a_later_event_snapshot_does_not_change_an_older_result_rule():
+    with Session(engine) as s:
+        c = Championship(name="snapshot league", auto_rules={"cuts_per_step": 1, "step_seconds": 3, "max_seconds": 30})
+        s.add(c)
+        s.commit()
+        s.refresh(c)
+        old = Event(title="old", data={**SESSION, "cuts_rule": None}, league_id=c.id)
+        new = Event(title="new", data={**SESSION, "cuts_rule": {"tolerance": 1, "cuts_per_step": 1, "step_seconds": 5, "max_seconds": 30}}, league_id=c.id)
+        server = Server(name="snapshot server", base_port=18000)
+        s.add_all([old, new, server])
+        s.commit()
+        s.refresh(old)
+        s.refresh(new)
+        s.refresh(server)
+        server.session = {"rulebook_league_id": c.id, "rulebook_event_id": new.id,
+                          "rulebook_snapshot": {"detectors": {"cuts": new.data["cuts_rule"]}}}
+        s.add_all([server, ChampionshipEvent(championship_id=c.id, server_id=server.id, filename="old.json", event_id=old.id)])
+        s.commit()
+        assert _applied_rules(s, c, server.id, "old.json").detectors.cuts is None
+        assert _applied_rules(s, c, server.id, "new.json").detectors.cuts.step_seconds == 3  # no binding yet: legacy fallback
+        s.add(ChampionshipEvent(championship_id=c.id, server_id=server.id, filename="new.json", event_id=new.id))
+        s.commit()
+        assert _applied_rules(s, c, server.id, "new.json").detectors.cuts.step_seconds == 5
+        frozen = {"detectors": {"cuts": new.data["cuts_rule"]}}
+        counted = s.exec(select(ChampionshipEvent).where(ChampionshipEvent.filename == "new.json")).one()
+        counted.rulebook_snapshot = frozen
+        s.add(counted)
+        s.commit()
+        new.data = {**new.data, "cuts_rule": None}
+        server.session = {**server.session, "rulebook_snapshot": {"detectors": {"cuts": None}}}
+        s.add_all([new, server])
+        s.commit()
+        assert _applied_rules(s, c, server.id, "new.json").detectors.cuts.step_seconds == 5
+        assert _applied_rules(s, c, server.id, "old.json").detectors.cuts is None
 
 
 def test_event_validation_and_permissions():
