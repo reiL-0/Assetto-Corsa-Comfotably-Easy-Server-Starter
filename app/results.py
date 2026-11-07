@@ -94,7 +94,7 @@ def _finish_cut(path: Path, laps: list[dict]) -> int | None:
 
 
 def _cut_after_finish(data: dict, classification: list[dict], cut: int) -> None:
-    """Each car's race ends at its first lap completed at or after `cut`: the laps after it are dropped and the classification is recomputed on the rest (laps, then time)."""
+    """Each car's race ends at its first lap completed at or after `cut`: the laps after it are dropped and the classification is recomputed on the rest (laps, then finish crossing order)."""
     kept: dict[str, list[dict]] = defaultdict(list)
     done: set[str] = set()
     for lap in data.get("Laps", []):
@@ -110,14 +110,36 @@ def _cut_after_finish(data: dict, classification: list[dict], cut: int) -> None:
     for e in classification:
         mine = kept.get(e["driver_guid"], [])
         if e["driver_guid"] in done:   # (a car that never crossed the line again keeps what acServer wrote)
-            e["total_time_ms"] = sum(lap.get("LapTime") or 0 for lap in mine)
             clean = [lap["LapTime"] for lap in mine if lap.get("LapTime") and not lap.get("Cuts")]
             e["best_lap_ms"] = min(clean) if clean else None
         e["_laps"] = len(mine)
-    classification.sort(key=lambda e: (-e["_laps"], e["total_time_ms"] or float("inf")))
+        e["_finish_ts"] = mine[-1].get("Timestamp") if mine else None
+        e["_in_done"] = e["driver_guid"] in done
+        e["_sum_lap_ms"] = sum(lap.get("LapTime") or 0 for lap in mine)
+
+    # Lead car crosses at or after cut first; cars on the lead lap finish in the order they crossed the line;
+    # lapped cars taking the flag finish ahead of DNFs at the same lap count.
+    classification.sort(key=lambda e: (
+        -e["_laps"],
+        0 if e["_in_done"] else 1,
+        e["_finish_ts"] if e["_finish_ts"] is not None else float("inf"),
+    ))
+
+    winner = classification[0] if classification else None
+    winner_laps = winner["_laps"] if winner else 0
+    winner_ts = winner["_finish_ts"] if winner else 0
+    winner_time = (winner["_sum_lap_ms"] or winner.get("total_time_ms") or 0) if winner else 0
+
     for i, e in enumerate(classification):
         e["position"] = i + 1
+        if winner and e["_laps"] == winner_laps and e["_in_done"] and e["_finish_ts"] is not None and winner_ts is not None:
+            e["total_time_ms"] = winner_time + (e["_finish_ts"] - winner_ts)
+        else:
+            e["total_time_ms"] = 0
         del e["_laps"]
+        del e["_finish_ts"]
+        del e["_in_done"]
+        del e["_sum_lap_ms"]
 
 
 def parse_result_file(path: Path) -> dict:

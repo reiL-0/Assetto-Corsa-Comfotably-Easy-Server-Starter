@@ -154,3 +154,39 @@ def test_a_driver_in_two_slots_is_one_row_the_one_that_drove_kept_as_it_is(tmp_p
     other = {**alice, "CarModel": "car_d", "BestLap": 92000, "TotalTime": 100}   # two rows with a time: the first stays, nothing is added up or mixed
     kept = parse([other, bob, alice])
     assert len(kept) == 2 and (kept[0]["car_model"], kept[0]["best_lap_ms"], kept[0]["total_time_ms"]) == ("car_d", 92000, 100)
+
+
+def test_finish_crossing_order_ranks_by_line_crossing_not_laptime_sum(tmp_path):
+    """Ann finishes 3 laps at t=300000; Bob finishes 3 laps at t=300500 (+500ms behind) but had smaller sum(LapTime) due to rolling start or disconnect."""
+    laps = [
+        _lap("A", "Ann", 1, 100_000, 40000),
+        _lap("A", "Ann", 2, 200_000, 40000),
+        _lap("A", "Ann", 3, 300_000, 40000),
+        _lap("B", "Bob", 1, 100_100, 35000),  # Bob's LapTime is smaller
+        _lap("B", "Bob", 2, 200_200, 35000),
+        _lap("B", "Bob", 3, 300_500, 35000),  # but crossed the line 500ms after Ann
+        _lap("C", "Cat", 1, 105_000, 42000),
+        _lap("C", "Cat", 2, 301_000, 42000),  # Cat takes checkered flag at lap 2
+        _lap("D", "Dan", 1, 105_000, 42000),
+        _lap("D", "Dan", 2, 210_000, 42000),  # Dan retired earlier at lap 2
+    ]
+    laps.sort(key=lambda l: l["Timestamp"])
+    p = tmp_path / "2026_11_07_6_24_RACE.json"
+    p.write_text(json.dumps({
+        "TrackName": "t", "TrackConfig": "", "Type": "RACE", "Laps": laps,
+        "Result": [
+            {"DriverName": "Bob", "DriverGuid": "B", "CarModel": "m", "BestLap": 35000, "TotalTime": 105000},
+            {"DriverName": "Ann", "DriverGuid": "A", "CarModel": "m", "BestLap": 40000, "TotalTime": 120000},
+            {"DriverName": "Cat", "DriverGuid": "C", "CarModel": "m", "BestLap": 42000, "TotalTime": 84000},
+            {"DriverName": "Dan", "DriverGuid": "D", "CarModel": "m", "BestLap": 42000, "TotalTime": 84000},
+        ],
+    }))
+    (tmp_path / "1.finish").write_text(json.dumps({"at": p.stat().st_mtime - 1, "laps": 3}))
+
+    parsed = parse_result_file(p)
+    cls = parsed["classification"]
+    assert [e["driver_name"] for e in cls] == ["Ann", "Bob", "Cat", "Dan"]
+    assert cls[0]["position"] == 1 and cls[0]["gap_ms"] is None and cls[0]["total_time_ms"] == 120000
+    assert cls[1]["position"] == 2 and cls[1]["gap_ms"] == 500 and cls[1]["total_time_ms"] == 120500
+    assert cls[2]["position"] == 3 and cls[2]["gap_ms"] is None and cls[2]["total_time_ms"] == 0
+    assert cls[3]["position"] == 4 and cls[3]["gap_ms"] is None and cls[3]["total_time_ms"] == 0

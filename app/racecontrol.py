@@ -420,6 +420,10 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
         _say(rc, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}", "flag")
     else:
         _say(rc, SAY[body.flag], "flag")
+    if body.flag == "checkered":
+        laps = max(0, rc.leader_laps_seen - (rc.lap_base if rc.nascar else 0))
+        if laps > 0:
+            _mark_finish(server_id, laps)
     nascar_actions(server_id, rc, actions)   # (after the director's own notice: a white flag the engine adds comes last)
     return rc.snapshot()
 
