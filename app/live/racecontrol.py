@@ -180,6 +180,7 @@ class RaceControl:
         self._green_speeds, self._green_connected = {}, set()
         self.legacy = False   # the pace is judged by the old single judgement at the end of the grace (set when a VSC / FCY starts with the kill switch `pace` on): never both judges in one flag
         self._samples: dict[int, deque] = {}   # car id -> (time, km/h) of the last few seconds
+        self._pit_lap: set[int] = set()  # pit observed during the current lap; protected by _lock
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
 
     def audit(self, kind, **fields):
@@ -304,6 +305,8 @@ class RaceControl:
         with _lock:
             if not self.formation or self.pace_car_in or car != self.pace_car:
                 return False
+            if self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
+                return False
             self.caution_laps += 1
             self.audit("formation_lap", car=car, laps=self.caution_laps, executed=True)
             if self.caution_laps < FORMATION_LAPS:
@@ -319,6 +322,8 @@ class RaceControl:
             if not (self.formation and self.pace_car_in):
                 return False
             if (car == self.pace_car) != alone:
+                return False
+            if not alone and self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return False
             if not self.pace_car_pitted:
                 if not alone:
@@ -342,6 +347,8 @@ class RaceControl:
                 return None
             if car != (self.caution.restart[0] if self.caution.restart else self.pace_car):
                 return None
+            if car != self.pace_car and self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
+                return None   # A lap through the pit lane cannot start a restart.
             if not self.go_armed:
                 self.go_early += 1
                 if self.go_early == 1:   # (a second crossing is a whole lap later: the progress never showed the car mid-lap, so the green goes ahead)
@@ -556,9 +563,11 @@ class RaceControl:
                 return None
             if not (c and self.flag in CAUTION and not self.pace_car_in and (self.one_more or not self.caution_notified)):   # (after the six-lap warning only a pending "two to go" still counts)
                 return None
+            if now - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
+                return None   # A pit-lane crossing is not a caution lap on track.
             if self.pace_car is not None:
-                if car != self.pace_car or now - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
-                    return None   # (the pace car crossing the line in the pit lane is not a lap on the track)
+                if car != self.pace_car:
+                    return None
             elif car != c.leader and (connected is None or c.leader in connected):
                 return None   # (the leader left the server: any car crossing counts, or the count would never move)
             if self.one_more:   # "two to go" was called: this crossing is the "one to go"
@@ -753,6 +762,7 @@ class RaceControl:
         """The hub of that car says whether it is in the pit lane. Only a yes is kept (a no never cancels one), and it expires: see the module docstring."""
         if in_pit:
             with _lock:
+                self._pit_lap.add(car_id)
                 self._pit_seen[car_id] = self.clock.time() if now is None else now
                 for key, (car, issued) in list(self.dt_open.items()):
                     if car == car_id and self._pit_seen[car_id] > issued:   # a pit-lane pass after the penalty came out serves it
@@ -1218,6 +1228,8 @@ class RaceControl:
     def add_cuts(self, car: int, n: int, from_client: bool, rule: dict | None = None, driver_guid: str = "") -> None:
         """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
         with _lock:
+            if car == self.pace_car:
+                return
             if driver_guid:
                 client, server = self.cuts_totals.get(driver_guid, (0, 0))
                 if rule and rule.get("ladder") and self.cuts_owners.get(car) in (None, driver_guid):
@@ -1376,10 +1388,17 @@ def on_excursion(server_id: int, session: object, car_id: int, ms: int, lap: int
 
 def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool) -> None:
     """Cuts of a car, from the acServer's lap count or from the driver's own game. Only in a race (the counter and the rule are the race's)."""
-    if n <= 0 or (session or {}).get("session_type") != RACE_TYPE:
+    if (from_client and n <= 0) or (session or {}).get("session_type") != RACE_TYPE:
         return
     rc = state_of(server_id, True, session, create=True)
-    if rc:
+    if rc and not from_client:
+        # This ingress closes a lap; add_cuts(0) also serves monitor reconciliation.
+        with _lock:
+            pit_lap = car_id in rc._pit_lap
+            rc._pit_lap.discard(car_id)
+        if pit_lap:
+            return
+    if rc and car_id != rc.pace_car:
         from app import supervisor   # supervisor owns the ACSP driver identities
         inst = supervisor.get(server_id)
         guid = ((inst.acsp.cars.get(car_id) or {}).get("driver_guid") or "") if inst else ""

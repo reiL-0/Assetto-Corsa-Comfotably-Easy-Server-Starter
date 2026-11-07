@@ -235,3 +235,27 @@ def test_nothing_is_admitted_after_the_intake_is_closed_for_shutdown(monkeypatch
         engine.accept(True)
     engine.on_event(c, _hit(0), now=5000.1)   # reopened (a new startup): admitted again, and the closed attempt left no dedup key behind
     assert engine.flush() and len(_incidents(f"{V}/servers/{sid}/incidents").json()) == 1
+
+
+@pytest.mark.parametrize("kind", ["limits", "cuts"])
+def test_pace_car_track_limits_never_reach_incident_queue(monkeypatch, kind):
+    from app.live import racecontrol
+    from types import SimpleNamespace
+
+    session = {"session_type": 3}
+    rc = racecontrol.RaceControl(session)
+    rc.pace_car = 3
+    monkeypatch.setattr(racecontrol, "_states", {9876: rc})
+    admitted = []
+    monkeypatch.setattr(engine, "_admit", lambda *args: admitted.append(args) or True)
+    client = SimpleNamespace(server_id=9876, session=session,
+                             cars={3: {"driver_name": "Safety"}, 4: {"driver_name": "Driver"}})
+    report = {"speed": 120, "ms": 800, "pos": [], "wheels": 4, "lap": 2, "spline": 0.5}
+    if kind == "limits":
+        assert not engine.record_limits(client, 3, "Safety", report)
+    else:
+        engine.on_event(client, {"type": "lap_completed", "car_id": 3, "cuts": 10})
+    assert admitted == []
+    assert engine.record_limits(client, 4, "Driver", report)
+    engine.on_event(client, {"type": "lap_completed", "car_id": 4, "cuts": 1})
+    assert len(admitted) == 2
