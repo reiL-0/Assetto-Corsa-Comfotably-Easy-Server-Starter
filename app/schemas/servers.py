@@ -166,6 +166,7 @@ class SessionIn(BaseModel):
     category: str = Field(default="", max_length=64)  # applied event category for neutralization
     rulebook_revision: str | None = None  # SHA-256 of the applied document
     rulebook_league_id: int | None = None
+    rulebook_event_id: int | None = None  # binds the snapshot to the scheduled event's results
     rulebook_snapshot: Rulebook | None = None  # versioned copy saved with the applied session
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
     race_wait_s: int = Field(default=60, ge=0, le=600)

@@ -212,6 +212,12 @@ def _m013_cut_dues(con: sqlite3.Connection) -> None:
     _ensure_index(con, "ix_cut_dues_server_id", "cut_dues", ("server_id",))
 
 
+def _m014_result_rulebook_snapshot(con: sqlite3.Connection) -> None:
+    """Existing results have no recoverable applied snapshot; NULL keeps the legacy fallback."""
+    if "rulebook_snapshot" not in {row[1] for row in con.execute('PRAGMA table_info("championship_events")')}:
+        con.execute('ALTER TABLE "championship_events" ADD COLUMN "rulebook_snapshot" JSON')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -226,6 +232,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (11, _m011_practice_no_points),
     (12, _m012_server_csp_off),
     (13, _m013_cut_dues),
+    (14, _m014_result_rulebook_snapshot),
 ]
 
 
