@@ -1049,7 +1049,7 @@ class RaceControl:
             pc = self.pace_car
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
             stype = (self.session_ref or {}).get("session_type")
-            green = (stype in (1, 2, 3) or stype is None) and self.flag in ("green", "white")
+            green = stype in (1, 2, 3) and self.flag in ("green", "white")   # practice, qualifying or race (ACSP 1/2/3): an unknown session type never teaches a reference lap
             delta_on = self.flag in SLOWING and self.vsc_mode == "delta" and now >= self.grace_end
             if delta_on and self._since is None:
                 self._since = mono - (now - self.grace_end)   # the instant the grace ended, on the clock of the samples: latched, a later change of the wall clock does not move it
