@@ -312,6 +312,21 @@ def test_notices_expire_are_capped_and_never_carry_quotes():
     snap = rc.snapshot(now=103.0)
     assert snap["notices"] == [{"id": a["id"], "kind": "race", "left_s": 7, "text": a["text"], "to": -1}]
     assert rc.snapshot(now=111.0)["notices"] == [], "gone after its ttl"
+
+
+def test_manual_checkered_flag_writes_finish_marker(live, tmp_path, monkeypatch):
+    import json
+    sid, c, sent = live
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    rc = state_of(sid, True, c.session, create=True)
+    rc.leader_laps_seen = 78
+    steward = _client("steward")
+    r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "checkered"})
+    assert r.status_code == 200
+    markers = list((tmp_path / "instances" / str(sid) / "results").glob("*.finish"))
+    assert len(markers) == 1
+    m = json.loads(markers[0].read_text())
+    assert m["laps"] == 78
     ids = [rc.notify(f"n{i}", now=200.0)["id"] for i in range(100)]
     assert ids == sorted(set(ids)), "ids only rise"
     assert len(rc.snapshot(now=201.0)["notices"]) == 64, "the last 64 are kept (a full field gets one instruction each)"
