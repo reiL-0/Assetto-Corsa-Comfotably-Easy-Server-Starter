@@ -11,6 +11,7 @@ from collections import deque
 from sqlmodel import Session
 
 from app.db import engine
+from app.live.racecontrol import state_of
 from app.models import Incident, Server
 from app.stewards.detectors import at_contact, at_fault, detect
 
@@ -106,6 +107,10 @@ def on_event(client, event: dict, now: float | None = None) -> None:
     d = detect(event)
     if not d:
         return
+    if d["kind"] == "cuts":
+        rc = state_of(client.server_id, True, client.session)
+        if rc and d["car_id"] == rc.pace_car:
+            return
     now = now or time.time()
     cars = (d["car_id"], d["other_car_id"]) if d["kind"] != "contact" else tuple(sorted((d["car_id"], d["other_car_id"])))
     key = (client.server_id, d["kind"], cars)
@@ -139,6 +144,9 @@ def record_limits(client, car_id: int, name: str, report: dict, now: float | Non
     queued (unknown car, flood, full queue). Call it from the event loop, like on_event: it reads the client's live state.
     The client can lie, so this is only ever evidence for a steward, never a sanction by itself."""
     now = now or time.time()
+    rc = state_of(client.server_id, True, client.session)
+    if rc and car_id == rc.pace_car:
+        return False
     car = client.cars.get(car_id)
     if not car or (car.get("driver_name") or "").strip().lower() != name.strip().lower():
         return False

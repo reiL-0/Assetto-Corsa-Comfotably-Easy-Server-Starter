@@ -380,3 +380,67 @@ def test_a_pass_after_the_row_was_saved_still_serves_it_before_the_result_is_cou
     assert rc.cuts_view(DT_RULE)["cuts_rule"] == {k: DT_RULE[k] for k in ("cap", "max", "per", "step")}, "the hub contract does not see the 0"
     rc.report_pit(3, True)   # ...and the pass comes later, still unsaved
     assert count(sid) == [], "result counting applies the mark to the saved row before it reads the dues"
+
+
+@pytest.mark.parametrize("from_client", [True, False])
+def test_pace_car_cuts_never_create_counts_or_dues(from_client):
+    rc = live_rc.RaceControl({"session_type": 3})
+    rc.pace_car = 3
+    for ladder in (None, [0, 5]):
+        rc.add_cuts(3, 20, from_client, {**RULE, "ladder": ladder}, GUID)
+        rc.add_cuts(3, 0, False, {**RULE, "ladder": ladder}, GUID)
+    assert not rc.cuts_client and not rc.cuts_server
+    assert not rc.cuts_totals and not rc.cuts_owners and not rc.cuts_at
+    assert not rc.cuts_emitted and not rc.dt_open and not rc.penalties
+    assert not live_rc.pending_cut_dues()
+
+
+def test_pace_car_cut_ingress_and_late_identity_tick_are_ignored(monkeypatch):
+    session = {"session_type": 3}
+    rc = live_rc.RaceControl(session)
+    rc.pace_car = 3
+    monkeypatch.setattr(live_rc, "_states", {9876: rc})
+    calls = []
+    monkeypatch.setattr(rc, "add_cuts", lambda *args: calls.append(args))
+    for from_client in (True, False):
+        live_rc.on_cuts(9876, session, 3, 10, from_client)
+    assert calls == []
+    rc = live_rc.RaceControl(session)
+    rc.pace_car = 3
+    # The monitor may recover an old count once a GUID or ladder becomes known.
+    rc.cuts_client[3] = 20
+    rc.add_cuts(3, 0, False, {**RULE, "ladder": [0, 5]}, GUID)
+    assert not rc.cuts_totals and not rc.cuts_emitted and not rc.dt_open
+
+
+@pytest.mark.parametrize("pit,server,hub,expected", [(True, 4, 0, 0), (False, 4, 0, 4), (True, 4, 1, 1)])
+def test_pit_lap_server_cuts(live, monkeypatch, pit, server, hub, expected):
+    sid, client, _ = live
+    _rule_of(monkeypatch, RULE)
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.report_pit(3, pit)
+    # The monitor's identity recovery is not a completed lap.
+    rc.add_cuts(3, 0, False, RULE, GUID)
+    if hub:
+        live_rc.on_cuts(sid, client.session, 3, hub, True)
+    live_rc.on_cuts(sid, client.session, 3, server, False)
+    assert max(rc.cuts_client.get(3, 0), rc.cuts_server.get(3, 0)) == expected
+    assert rc.cuts_server.get(3, 0) == (0 if pit else server)
+    live_rc.on_cuts(sid, client.session, 3, 2, False)
+    assert rc.cuts_server[3] == (0 if pit else server) + 2
+
+
+def test_zero_cut_lap_clears_pit_and_pace_car_stays_excluded(live, monkeypatch):
+    sid, client, _ = live
+    _rule_of(monkeypatch, RULE)
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.report_pit(3, True)
+    client._apply({"type": "lap_completed", "car_id": 3, "laptime_ms": 1000, "cuts": 0,
+                   "leaderboard": [{"car_id": 3, "laps": 1, "laptime_ms": 1000}]})
+    live_rc.on_cuts(sid, client.session, 3, 2, False)
+    assert rc.cuts_server[3] == 2
+    rc.pace_car = 3
+    rc.report_pit(3, True)
+    live_rc.on_cuts(sid, client.session, 3, 5, False)
+    live_rc.on_cuts(sid, client.session, 3, 5, True)
+    assert rc.cuts_server[3] == 2 and rc.cuts_client.get(3, 0) == 0

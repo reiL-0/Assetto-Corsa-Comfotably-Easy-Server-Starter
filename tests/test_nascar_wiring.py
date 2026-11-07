@@ -1367,3 +1367,62 @@ def test_manual_to_go_works_under_a_plain_yellow_without_nascar_or_pace_car(live
     assert rc.flag == 'yellow', 'the green stays the director\'s'
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
     assert steward.post(url, json={'to_go': 1}).status_code == 409
+
+
+def test_restart_leader_crossing_in_pit_lane_cannot_release_green():
+    from app.live.field import Field
+
+    field = Field()
+    field.update(3, 0.50, 9)
+    field.update(4, 0.48, 9)
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.configure_nascar(70)
+    rc.set_pace_car(9, 120, 'g9')
+    rc.set_flag('yellow', field=field)
+    rc.restart_plan(field.snapshot())
+    rc.go_armed = True
+    now = rc.clock.time()
+    rc.report_pit(9, True, now)
+    rc.report_pit(3, True, now)
+    assert rc.green_if_due(3, field) is None
+    assert rc.flag == 'yellow'
+    assert rc.go_early == 0 and rc.blocked_crossings == 0
+    rc._pit_seen[3] = now - 60
+    assert rc.green_if_due(3, field) is not None
+    assert rc.flag == 'green'
+
+
+def test_formation_competitor_crossing_in_pits_cannot_release_green():
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.formation = rc.pace_car_in = rc.pace_car_pitted = True
+    rc.pace_car = 9
+    rc.report_pit(3, True)
+    assert not rc.formation_green(3, False)
+    rc._pit_seen[3] -= 60
+    assert rc.formation_green(3, False)
+
+
+
+def test_formation_pace_car_crossing_in_pits_does_not_advance_formation():
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.pace_car = 9
+    rc.formation = True
+    rc.caution_laps = 0
+    rc.report_pit(9, True)
+    assert not rc.formation_lap(9)
+    assert rc.caution_laps == 0 and not rc.pace_car_in
+
+
+def test_caution_leader_crossing_in_pits_does_not_advance_without_pace_car():
+    from app.live.field import Field
+
+    field = Field()
+    field.update(3, 0.50, 9)
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.configure_nascar(70)
+    rc.set_flag('yellow', field=field)
+    before = rc.caution_laps
+    now = rc.clock.time()
+    rc.report_pit(3, True, now)
+    assert rc.caution_lap(3, {3: 80}, now, {3}) is None
+    assert rc.caution_laps == before

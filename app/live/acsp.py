@@ -437,7 +437,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             leader_laps = max((row["laps"] for row in event["leaderboard"] if row["car_id"] != pace), default=0)
             rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
             from app.live.racecontrol import on_cuts
-            on_cuts(self.server_id, self.session, event["car_id"], event.get("cuts") or 0, False)   # (the counter of the hub: the cuts of the lap the acServer just closed)
+            on_cuts(self.server_id, self.session, event["car_id"], event.get("cuts") or 0, False)   # Always close the lap pit marker, including laps without server cuts.
             if actions:
                 nascar_actions(self.server_id, rc, actions, event["car_id"])
             if not (rc and rc.nascar):
