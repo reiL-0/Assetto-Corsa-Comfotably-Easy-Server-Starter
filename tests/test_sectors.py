@@ -137,7 +137,9 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3", 4: "lmp"}
     rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
-    assert rc.vsc_mode == "fixed" and rc.vsc_fallback, "no clean lap yet: the fixed pace runs for the whole flag"
+    assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta runs with synthetic fallback profile"
+    assert rc.delta_block("gt3") is not None and len(rc.delta_block("gt3")["min_ms"]) == 20
+    assert rc.auto_live() == ["vsc"]
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
@@ -145,20 +147,24 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert rc.vsc_mode == "delta" and not rc.vsc_fallback and set(rc.vsc_profiles) == {"gt3"} and len(rc.vsc_profiles["gt3"]) == 20
     frozen = {k: list(v) for k, v in rc.vsc_profiles.items()}
     blk = rc.delta_block("gt3")
-    assert blk["mode"] == "delta" and blk["min_ms"] == frozen["gt3"] and blk["tol"] == 0.2 and rc.delta_block("lmp") is None and rc.delta_block(None) is None
-    assert rc.auto_live() == ["vsc"] and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"] and rc.auto_for(1, 0, 500.0, None, "lmp") is None
-    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference) is judged by the fixed pace
+    assert blk["mode"] == "delta" and blk["min_ms"] == frozen["gt3"] and blk["tol"] == 0.2
+    assert rc.delta_block("lmp") is not None and len(rc.delta_block("lmp")["min_ms"]) == 20   # lmp gets synthetic default profile
+    assert rc.delta_block(None) is not None and len(rc.delta_block(None)["min_ms"]) == 20
+    assert rc.auto_live() == ["vsc"] and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
+    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, default profile) drives at 120 km/h > 80 km/h
     bad = {1: lambda p: speed(p) / 1.10, 3: lambda p: speed(p) / 1.60, 4: lambda p: 120 / 3.6}
     out, p = _field(rc, bad, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.30, 3: 0.30, 4: 0.30})   # the grace (5 s)
     assert out == [], "nobody is judged during the grace"
     out, _ = _field(rc, bad, 505.0, 80.0, models, wall0=1006.0, p0=p)
     kinds = {(d["car"], d["kind"]) for d in out}
-    assert kinds == {(1, "delta"), (4, "pace")}, kinds
+    assert kinds == {(1, "delta"), (4, "delta")}, kinds
     assert sorted(x["car_id"] for x in rc.violations) == [1, 4] and sorted((x["car_id"], x["laps"]) for x in rc.penalties) == [(1, 3), (4, 3)]
     assert rc.vsc_profiles["gt3"] == frozen["gt3"], "the reference did not move while the VSC ran"
-    assert rc.autoflags_view()["vsc_mode"] == "delta" and rc.autoflags_view()["delta"][-1]["car"] == 1
+    assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1, 4}
     rc.set_flag("fcy", 80, grace_s=5, mode="delta", now=2000.0)
-    assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY is always the fixed pace"
+    assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
+    rc.set_flag("fcy", 80, grace_s=5, mode="fixed", now=2100.0)
+    assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY with mode=fixed is fixed pace"
     import pytest
     with pytest.raises(ValueError):
         rc.set_flag("vsc", 80, mode="f1")

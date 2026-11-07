@@ -75,5 +75,5 @@ def test_a_vsc_can_ask_for_the_delta_mode_and_without_a_reference_lap_it_runs_th
     assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "f1"}).status_code == 422
     assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "delta"}).status_code == 200
     view = _client("steward").get(f"{url}/autoflags").json()
-    assert view["vsc_mode"] == "fixed" and view["vsc_fallback"] is True and view["ref_models"] == [], view
+    assert view["vsc_mode"] == "delta" and view["vsc_fallback"] is True and view["ref_models"] == [], view
     assert _client("steward").post(url, json={"flag": "green"}).status_code == 200
