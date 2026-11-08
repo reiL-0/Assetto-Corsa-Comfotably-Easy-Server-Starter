@@ -105,7 +105,8 @@ def create_event(body: EventIn, sess: SessionDep) -> EventOut:
     _check_league(sess, body.count_only_league_id)
     if body.league_id is not None and body.count_only_league_id is not None:
         raise HTTPException(422, "league_id and count_only_league_id are not used together")
-    data = body.session.model_dump()
+    # Only the event-level field selects its cuts rule.
+    data = body.session.model_dump(exclude={"cuts_rule"})
     if "cuts_rule" in body.model_fields_set:
         data["cuts_rule"] = body.cuts_rule.model_dump() if body.cuts_rule else None
     e = Event(title=body.title, notes=body.notes, data=data, derived=body.derived, league_id=body.league_id, count_only_league_id=body.count_only_league_id)
@@ -128,7 +129,8 @@ def update_event(event_id: int, body: EventIn, sess: SessionDep) -> EventOut:
     _check_league(sess, body.count_only_league_id)
     if body.league_id is not None and body.count_only_league_id is not None:
         raise HTTPException(422, "league_id and count_only_league_id are not used together")
-    data = body.session.model_dump()
+    # Only the event-level field selects its cuts rule.
+    data = body.session.model_dump(exclude={"cuts_rule"})
     if "cuts_rule" in body.model_fields_set:
         data["cuts_rule"] = body.cuts_rule.model_dump() if body.cuts_rule else None
     elif not body.inherit_cuts_rule and "cuts_rule" in e.data:  # omission keeps an older client's saved choice; explicit inherit clears it

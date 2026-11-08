@@ -140,7 +140,7 @@ def remove_member(championship_id: int, guid: str, sess: SessionDep) -> None:
 def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     """The event's session as it must be loaded at `at` (unix s): for a league event, the roster's eligible drivers as a locked
     entry list; for any other event, the saved session untouched. 409 when nobody is eligible or the roster does not fit."""
-    s = SessionIn(**ev.data)
+    s = SessionIn(**{k: v for k, v in ev.data.items() if k != "cuts_rule"})
     from app.rulebook import CutRule
     c = sess.get(Championship, ev.league_id) if ev.league_id else None
     if not c:
@@ -219,6 +219,12 @@ def _applied_rulebook(sess: Session, server_id: int, c: Championship | None, ev:
     return None
 
 
+class _ManualCutRule(dict):
+    """Server-only rule snapshot: metadata stays outside the hub JSON keys."""
+
+    live_only = True
+
+
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
@@ -235,8 +241,9 @@ def invalidate_rule_cache(server_id: int) -> None:
 
 
 def cut_rule(server_id: int) -> dict | None:
-    """The track-cut rule of the league event running on this server now, as the hub's counter needs it: {max: free cuts (tolerance), per: cuts per step, step: seconds per step, cap: most seconds}.
-    None when no league event is running, its rulebook has no cut rule or it is not a league's. Read from the database at most every CUT_RULE_TTL s (the state of the hub asks every second)."""
+    """Running event rules take precedence, including no rule; otherwise use the server session.
+    Cached under the rule lock; refreshed by request threads, never the live event loop.
+    """
     hit = _CUT_RULES.get(server_id)
     if hit and time.time() - hit[0] < CUT_RULE_TTL:
         return hit[1]
@@ -251,10 +258,18 @@ def cut_rule(server_id: int) -> dict | None:
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
             rb = _applied_rulebook(s, server_id, c, ev)
             cut = rb.detectors.cuts if rb else None
+            if sc is None:
+                from app.rulebook import CutRule
+
+                server = s.get(Server, server_id)
+                raw = (server.session or {}).get("cuts_rule") if server else None
+                cut = CutRule.model_validate(raw) if raw is not None else None
             if cut:
-                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s)}
+                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s) if rb else cut.max_seconds}
                 if cut.ladder is not None:
                     rule["ladder"] = list(cut.ladder)
+                if sc is None:
+                    rule = _ManualCutRule(rule)
         if len(_CUT_RULES) > 64:
             _CUT_RULES.clear()
         _CUT_RULES[server_id] = (time.time(), rule)
