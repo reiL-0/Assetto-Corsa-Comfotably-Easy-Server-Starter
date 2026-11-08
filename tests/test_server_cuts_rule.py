@@ -47,15 +47,23 @@ def test_manual_rule_and_event_precedence(monkeypatch, ladder):
         event_rule = league.cut_rule(sid)
         assert event_rule == {**expected, 'cap': 10}
         assert not getattr(event_rule, 'live_only', False)
+        championship.rulebook = Rulebook(detectors=Detectors(cuts=None)).model_dump()
+        s.add(championship)
+        s.commit()
+        league.invalidate_rule_cache(sid)
+        assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
+        assert league.cut_rule(sid).live_only
         ev.data = {'cuts_rule': None}
         s.add(ev)
         s.commit()
         league.invalidate_rule_cache(sid)
-        assert league.cut_rule(sid) is None
+        assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
+        assert league.cut_rule(sid).live_only
         server2 = Server(name='no cuts', base_port=19100 + (1000 if ladder else 0))
         s.add(server2)
         s.commit()
-        assert league.cut_rule(server2.id) is None
+        assert league.cut_rule(server2.id) == league.DEFAULT_CUT_RULE
+        assert league.cut_rule(server2.id).live_only
 
 
 @pytest.mark.parametrize('manual', [True, False])
@@ -129,3 +137,16 @@ def test_applied_event_rule_stays_out_of_manual_server_session():
         s.refresh(server)
         assert server.session.get('cuts_rule') is None
         assert server.session['rulebook_snapshot']['detectors']['cuts'] == custom.model_dump()
+
+
+def test_cold_default_counts_live_without_dues(monkeypatch):
+    monkeypatch.setattr(league, '_CUT_RULES', {})
+    monkeypatch.setattr(rc, '_cut_dues_pending', {})
+    rule = league.cut_rule_cached(999992)
+    assert rule == league.DEFAULT_CUT_RULE and rule.live_only
+    state = rc.RaceControl({'session_type': 3})
+    state.server_id = 999992
+    state.add_cuts(1, 3, True, rule, 'driver')
+    assert state.cuts_view(rule)['cuts'] == {'1': 3}
+    assert state.penalties and state.dt_open and not rc.pending_cut_dues()
+    assert state.cuts_view(rule)['cuts_rule'] == dict(cap=600, max=2, per=1, step=5)

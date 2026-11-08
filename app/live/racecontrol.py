@@ -181,6 +181,7 @@ class RaceControl:
         self._green_speeds, self._green_connected = {}, set()
         self.legacy = False   # the pace is judged by the old single judgement at the end of the grace (set when a VSC / FCY starts with the kill switch `pace` on): never both judges in one flag
         self._samples: dict[int, deque] = {}   # car id -> (time, km/h) of the last few seconds
+        self._limits_counted: dict[int, float] = {}  # monotonic; session-owned, at most 256 slots, under _lock
         self._pit_lap: set[int] = set()  # pit observed during the current lap; protected by _lock
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
 
@@ -1288,10 +1289,11 @@ class RaceControl:
             return {"obligations": obs, "give_back_reviews": list(gb.reviews) if gb else []}
 
     def cuts_view(self, rule: dict | None) -> dict:
-        """The counter of the hub: {cuts: {car: n}, cuts_rule}. n is the larger of the two counts (the game's own report is faster, the acServer's is the one that counts: neither is ever hidden by the other).
+        """The counter of the hub: {cuts: {car: n}, cuts_rule}. n includes CSP reports; native lap cuts are ignored at ingress.
         Only in a race and with a rule: otherwise nothing is shown."""
         with _lock:
-            if not (rule and (self.session_ref or {}).get("session_type") == RACE_TYPE):
+            session = self.session_ref if isinstance(self.session_ref, dict) else {}   # (a test may hold a bare object as the session reference: the default rule is always there now)
+            if not (rule and session.get("session_type") == RACE_TYPE):
                 return {"cuts": {}, "cuts_rule": None}
             cars = set(self.cuts_server) | set(self.cuts_client)
             cuts = {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}
@@ -1396,18 +1398,17 @@ def on_excursion(server_id: int, session: object, car_id: int, ms: int, lap: int
         rc.give_back_report(car_id, time.time() if now is None else now, ms, lap, spline)
 
 
-def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool) -> None:
-    """Cuts of a car, from the acServer's lap count or from the driver's own game. Only in a race (the counter and the rule are the race's)."""
+def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool = False) -> None:
+    """Only CSP reports count in a race; native lap events only clear the pit mark."""
     if (from_client and n <= 0) or (session or {}).get("session_type") != RACE_TYPE:
         return
     rc = state_of(server_id, True, session, create=True)
     if rc and not from_client:
         # This ingress closes a lap; add_cuts(0) also serves monitor reconciliation.
         with _lock:
-            pit_lap = car_id in rc._pit_lap
             rc._pit_lap.discard(car_id)
-        if pit_lap:
-            return
+        # Native cuts will only be recorded in a future shadow mode; they never count.
+        return
     if rc and car_id != rc.pace_car:
         from app import supervisor   # supervisor owns the ACSP driver identities
         inst = supervisor.get(server_id)

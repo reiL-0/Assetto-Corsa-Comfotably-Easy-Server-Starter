@@ -60,10 +60,10 @@ def test_rounds_repeat_the_last_step_and_keep_old_state_keys(live, monkeypatch):
     assert rc.cuts_view(RULE)["cuts"] == {"3": 16}
 
 
-def test_nine_server_cuts_create_two_rounds_and_persistence_retries_are_safe(live, monkeypatch):
+def test_nine_hub_cuts_create_two_rounds_and_persistence_retries_are_safe(live, monkeypatch):
     sid, client, _ = live
     _rule_of(monkeypatch, RULE)
-    live_rc.on_cuts(sid, client.session, 3, 9, False)
+    live_rc.on_cuts(sid, client.session, 3, 9, True)
     pending = live_rc.pending_cut_dues()
     assert [r["round"] for r in pending] == [1, 2]
     with Session(engine) as s:
@@ -77,7 +77,7 @@ def test_nine_server_cuts_create_two_rounds_and_persistence_retries_are_safe(liv
     assert rc.cuts_view(RULE)["cuts_round"] == {"3": 1}
     # A new session with the same AC session index is a different race.
     client.session = dict(client.session)
-    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    live_rc.on_cuts(sid, client.session, 3, 4, True)
     adapter.save_cut_dues()
     assert len(dues(sid)) == 3
     assert len({d.session_key for d in dues(sid)}) == 2
@@ -92,7 +92,7 @@ def test_result_counting_caps_each_round_no_notice_and_dismissal_is_permanent(li
     sid, client, _ = live
     _rule_of(monkeypatch, RULE)
     start = time.time() - 1
-    live_rc.on_cuts(sid, client.session, 3, 16, False)
+    live_rc.on_cuts(sid, client.session, 3, 16, True)
     rb = Rulebook(detectors=Detectors(cuts=rule(ladder=[5, 5, 10])))
     rb.neutralization.max_auto_time_penalty_s = 7
     with Session(engine) as s:
@@ -168,7 +168,7 @@ def test_counting_the_actual_result_file_twice_and_failed_writes(live, monkeypat
     sid, client, _ = live
     _rule_of(monkeypatch, RULE)
     start = time.time() - 1
-    live_rc.on_cuts(sid, client.session, 3, 9, False)
+    live_rc.on_cuts(sid, client.session, 3, 9, True)
     real_stage = auto.stage_cut_dues
     with monkeypatch.context() as patch:
         def fail(sess, rows, *served):
@@ -326,7 +326,7 @@ def test_drive_through_first_step_is_issued_live_and_served_by_a_pit_pass(live, 
     sid, client, _ = live
     _rule_of(monkeypatch, DT_RULE)
     monkeypatch.setattr(live_rc, "_cut_served", set())
-    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    live_rc.on_cuts(sid, client.session, 3, 4, True)
     rc = live_rc.state_of(sid, True, client.session)
     assert [(p["car_id"], p["laps"]) for p in rc.penalties] == [(3, live_rc.CUT_DT_LAPS)], "the drive-through is a live penalty"
     rc.report_pit(3, True, now=rc.dt_open and min(t for _, t in rc.dt_open.values()) - 1)   # a pass from before the penalty does not serve it
@@ -344,7 +344,7 @@ def test_unserved_drive_through_costs_the_fixed_seconds_capped_then_5_5_10_10(li
     sid, client, _ = live
     _rule_of(monkeypatch, DT_RULE)
     monkeypatch.setattr(live_rc, "_cut_served", set())
-    live_rc.on_cuts(sid, client.session, 3, 20, False)   # 5 rounds: DT, 5, 5, 10, 10
+    live_rc.on_cuts(sid, client.session, 3, 20, True)   # 5 rounds: DT, 5, 5, 10, 10
     assert count(sid, cap=7, fixed=30) == [7000, 5000, 5000, 7000, 7000], "the fixed seconds obey the same cap as any automatic one"
 
 
@@ -352,7 +352,7 @@ def test_served_mark_outlives_the_session_state_and_is_saved_with_the_row(live, 
     sid, client, _ = live
     _rule_of(monkeypatch, DT_RULE)
     monkeypatch.setattr(live_rc, "_cut_served", set())
-    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    live_rc.on_cuts(sid, client.session, 3, 4, True)
     live_rc.state_of(sid, True, client.session).report_pit(3, True)
     live_rc.state_of(sid, False)   # the session ends before the monitor saved anything
     assert count(sid) == [], "result counting stages the row and the served mark together"
@@ -373,7 +373,7 @@ def test_a_pass_after_the_row_was_saved_still_serves_it_before_the_result_is_cou
     sid, client, _ = live
     _rule_of(monkeypatch, DT_RULE)
     monkeypatch.setattr(live_rc, "_cut_served", set())
-    live_rc.on_cuts(sid, client.session, 3, 4, False)
+    live_rc.on_cuts(sid, client.session, 3, 4, True)
     adapter.save_cut_dues()   # the row is already in the database as due...
     assert [d.state for d in dues(sid)] == ["due"]
     rc = live_rc.state_of(sid, True, client.session)
@@ -413,7 +413,7 @@ def test_pace_car_cut_ingress_and_late_identity_tick_are_ignored(monkeypatch):
     assert not rc.cuts_totals and not rc.cuts_emitted and not rc.dt_open
 
 
-@pytest.mark.parametrize("pit,server,hub,expected", [(True, 4, 0, 0), (False, 4, 0, 4), (True, 4, 1, 1)])
+@pytest.mark.parametrize("pit,server,hub,expected", [(True, 4, 0, 0), (False, 4, 0, 0), (True, 4, 1, 1)])
 def test_pit_lap_server_cuts(live, monkeypatch, pit, server, hub, expected):
     sid, client, _ = live
     _rule_of(monkeypatch, RULE)
@@ -425,9 +425,9 @@ def test_pit_lap_server_cuts(live, monkeypatch, pit, server, hub, expected):
         live_rc.on_cuts(sid, client.session, 3, hub, True)
     live_rc.on_cuts(sid, client.session, 3, server, False)
     assert max(rc.cuts_client.get(3, 0), rc.cuts_server.get(3, 0)) == expected
-    assert rc.cuts_server.get(3, 0) == (0 if pit else server)
+    assert rc.cuts_server.get(3, 0) == 0
     live_rc.on_cuts(sid, client.session, 3, 2, False)
-    assert rc.cuts_server[3] == (0 if pit else server) + 2
+    assert rc.cuts_server.get(3, 0) == 0
 
 
 def test_zero_cut_lap_clears_pit_and_pace_car_stays_excluded(live, monkeypatch):
@@ -438,9 +438,9 @@ def test_zero_cut_lap_clears_pit_and_pace_car_stays_excluded(live, monkeypatch):
     client._apply({"type": "lap_completed", "car_id": 3, "laptime_ms": 1000, "cuts": 0,
                    "leaderboard": [{"car_id": 3, "laps": 1, "laptime_ms": 1000}]})
     live_rc.on_cuts(sid, client.session, 3, 2, False)
-    assert rc.cuts_server[3] == 2
+    assert rc.cuts_server.get(3, 0) == 0
     rc.pace_car = 3
     rc.report_pit(3, True)
     live_rc.on_cuts(sid, client.session, 3, 5, False)
     live_rc.on_cuts(sid, client.session, 3, 5, True)
-    assert rc.cuts_server[3] == 2 and rc.cuts_client.get(3, 0) == 0
+    assert rc.cuts_server.get(3, 0) == 0 and rc.cuts_client.get(3, 0) == 0

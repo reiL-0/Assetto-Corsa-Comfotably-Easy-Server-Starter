@@ -299,6 +299,8 @@ class Instance:
     async def connect_acsp(self, remote_port: int, local_port: int, host: str, car_slots: int = 0) -> None:
         """Open our side of the plugin socket. If the port is not free (a socket of an earlier run closing) try a few times, then keep
         trying in the background: the server runs either way (the site falls back to the log meanwhile) and must never be left unowned."""
+        from app.stewards.limits_config import load
+        await asyncio.to_thread(load, self.server_id)  # before UDP can count the first lap
         for attempt in range(3):
             try:
                 self.acsp = await acsp.connect(self.server_id, remote_port, local_port, host, car_slots=car_slots)

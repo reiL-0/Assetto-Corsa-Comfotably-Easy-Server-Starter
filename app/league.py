@@ -225,6 +225,9 @@ class _ManualCutRule(dict):
     live_only = True
 
 
+DEFAULT_CUT_RULE = {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5, 5, 10]}
+
+
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
@@ -241,7 +244,7 @@ def invalidate_rule_cache(server_id: int) -> None:
 
 
 def cut_rule(server_id: int) -> dict | None:
-    """Running event rules take precedence, including no rule; otherwise use the server session.
+    """Running event rules take precedence; absent rules use the live-only default.
     Cached under the rule lock; refreshed by request threads, never the live event loop.
     """
     hit = _CUT_RULES.get(server_id)
@@ -251,7 +254,7 @@ def cut_rule(server_id: int) -> dict | None:
         hit = _CUT_RULES.get(server_id)
         if hit and time.time() - hit[0] < CUT_RULE_TTL:
             return hit[1]
-        rule = None
+        rule = _ManualCutRule(DEFAULT_CUT_RULE)
         with Session(engine) as s:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
@@ -390,9 +393,9 @@ def cut_rule_stale(server_id: int) -> bool:
 
 
 def cut_rule_cached(server_id: int) -> dict | None:
-    """What `cut_rule` read last, with no database and no waiting (None before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
+    """What `cut_rule` read last, with no database and no waiting (live-only default before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
     hit = _CUT_RULES.get(server_id)
-    return hit[1] if hit else None
+    return hit[1] if hit and hit[1] is not None else _ManualCutRule(DEFAULT_CUT_RULE)
 
 
 def _qualy_grid(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict) -> None:
