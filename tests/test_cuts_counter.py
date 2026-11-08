@@ -1,5 +1,4 @@
-"""The cut counter of the hub ("CUTS 2/5"): the rule of the league event running on the server, the cuts of each car in a race (the acServer's lap count and the driver's own game, the larger one is shown) and the
-state the hub reads (race-state `cuts` / `cuts_rule`)."""
+"""Hub cut counters use CSP reports and keep the legacy JSON rule shape."""
 import time
 
 from conftest import ADMIN
@@ -39,7 +38,7 @@ def _league_event(sid, rules):
 def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     sid = api.post(f"{V}/servers", json={"name": "cuts-rule"}).json()["id"]
     league._CUT_RULES.clear()
-    assert league.cut_rule(sid) is None, "no event running"
+    assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
     _league_event(sid, RULE)
     league._CUT_RULES.clear()
     assert league.cut_rule(sid) == {"max": 0, "per": 1, "step": 5, "cap": 10}, "the older field has no free cuts"
@@ -54,7 +53,7 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     sid2 = api.post(f"{V}/servers", json={"name": "cuts-no-rule"}).json()["id"]
     _league_event(sid2, None)
     league._CUT_RULES.clear()
-    assert league.cut_rule(sid2) is None, "a league without a cut rule: no counter"
+    assert league.cut_rule(sid2) == league.DEFAULT_CUT_RULE
     league._CUT_RULES[sid] = (time.time(), {"max": 9, "per": 2, "step": 3, "cap": 9})
     assert league.cut_rule(sid) == {"max": 9, "per": 2, "step": 3, "cap": 9}, "read at most every CUT_RULE_TTL s"
     league._CUT_RULES[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"max": 9, "per": 2, "step": 3, "cap": 9})
@@ -73,19 +72,21 @@ def test_the_counter_counts_a_race_only_shows_the_larger_count_and_starts_again_
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}
     live_rc.on_cuts(sid, client.session, 3, 1, True)      # the driver's own game: an excursion, live
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 1}
-    live_rc.on_cuts(sid, client.session, 3, 2, False)     # the acServer closes the lap with 2 cuts: the larger count wins, nothing is added up twice
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 2}
+    live_rc.on_cuts(sid, client.session, 3, 2, False)     # native lap cuts do not count
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 1}
     live_rc.on_cuts(sid, client.session, 3, 1, True)
     live_rc.on_cuts(sid, client.session, 3, 1, True)
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 3}, "the game reports faster than the lap ends"
     live_rc.on_cuts(sid, client.session, 3, 0, False)
     live_rc.on_cuts(sid, client.session, 4, 1, False)
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 3, "4": 1}
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 3}
     client.session = {"session_index": 3, "session_type": 3}   # the next session: the counts start again
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}
-    _rule_of(monkeypatch, None)
+    _rule_of(monkeypatch, league._ManualCutRule(league.DEFAULT_CUT_RULE))
     live_rc.on_cuts(sid, client.session, 3, 1, True)
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_rule"] is None and api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}, "no rule: no counter"
+    view = api.get(f"{V}/servers/{sid}/race-state").json()
+    assert view["cuts_rule"] == {k: league.DEFAULT_CUT_RULE[k] for k in ("cap", "max", "per", "step")}
+    assert view["cuts"] == {"3": 1}
 
 
 def test_the_lap_completed_event_and_the_drivers_report_feed_the_counter(live, monkeypatch):
@@ -94,12 +95,12 @@ def test_the_lap_completed_event_and_the_drivers_report_feed_the_counter(live, m
     client.session = {"session_index": 2, "session_type": 3}
     supervisor._instances[sid] = type("I", (), {"running": True, "server_id": sid, "acsp": client})()   # (the manager's own report route reads the instance's server id)
     client._apply({"type": "lap_completed", "car_id": 3, "laptime_ms": 90000, "cuts": 2, "leaderboard": [{"car_id": 3, "laps": 1, "laptime_ms": 90000}]})
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 2}, "the cuts of the lap the acServer closed"
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}, "native cuts are ignored"
     r = api.post(f"{V}/servers/{sid}/stewards/report", json={"car_id": 3, "name": "Ana", "ms": 900, "wheels": 4, "speed": 120.0, "lap": 2, "spline": 0.4, "pos": [1, 2, 3]})
     assert r.status_code == 204
     r = api.post(f"{V}/servers/{sid}/stewards/report", json={"car_id": 3, "name": "Otro", "ms": 900, "wheels": 4, "speed": 120.0, "lap": 2, "spline": 0.4, "pos": []})
     assert r.status_code == 409, "a report of somebody else's slot is refused and counts for nothing"
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 2}, "one excursion reported: still below the acServer's 2"
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 1}, "only the CSP excursion counts"
 
 
 def test_stale_rules_are_read_once_by_concurrent_requests_and_the_snapshot_never_reads_the_database(monkeypatch):
@@ -114,8 +115,8 @@ def test_stale_rules_are_read_once_by_concurrent_requests_and_the_snapshot_never
         reads.append(1)
         return real(*a, **k)
     monkeypatch.setattr(league, "Session", counting)
-    assert league.cut_rule_cached(sid) is None, "never read: nothing to show, and no database touched"
-    assert not reads and live_rc.cut_rule_peek(sid) is None and not reads
+    assert league.cut_rule_cached(sid) == league.DEFAULT_CUT_RULE
+    assert not reads and live_rc.cut_rule_peek(sid) == league.DEFAULT_CUT_RULE and not reads
     out = []
     ts = [threading.Thread(target=lambda: out.append(league.cut_rule(sid))) for _ in range(8)]
     [t.start() for t in ts]

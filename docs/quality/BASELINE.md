@@ -123,6 +123,8 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | PUT | `/api/v1/servers/{server_id}/stewards` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/stewards/report` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/stop` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| GET | `/api/v1/servers/{server_id}/track-limits` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| PUT | `/api/v1/servers/{server_id}/track-limits` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/wake` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | DELETE | `/api/v1/servers/{server_id}/weather_plan` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/weather_plan` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

@@ -156,6 +156,7 @@ def record_limits(client, car_id: int, name: str, report: dict, now: float | Non
         return Incident(server_id=client.server_id, ts=now, session_type=sess_info.get("session_type"), session_name=sess_info.get("name", ""),
                         session_ms=client.board.elapsed_ms(now), kind="limits", car_id=car_id, driver_guid=car.get("driver_guid"),
                         driver_name=car.get("driver_name", ""), speed=report["speed"], value=report["ms"], world_pos=report["pos"],
-                        evidence={"source": "client", "wheels": report["wheels"], "lap": report["lap"], "spline": report["spline"]})
+                        evidence={"source": "client", "wheels": report["wheels"], "lap": report["lap"], "spline": report["spline"],
+                                  **{k: report[k] for k in ("vo", "vi", "vp") if report.get(k) is not None}})
 
     return _admit((client.server_id, "limits", (car_id,)), now, LIMITS_MIN_S, build)

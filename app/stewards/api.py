@@ -2,6 +2,7 @@
 admin writes: the router guard in api/v1)."""
 
 import asyncio
+import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +13,8 @@ from app import supervisor
 from app.auth import require_any
 from app.db import SessionDep
 from app.models import Incident
+from app.stewards import limits_config, limits_filter
+from app.stewards.limits_filter import TrackLimitsConfig
 from app.servers import ServerOut, _get, _out
 from app.stewards import engine
 
@@ -44,6 +47,19 @@ def set_stewards(server_id: int, body: StewardsIn, sess: SessionDep) -> ServerOu
     return _out(s)
 
 
+@router.get("/track-limits", response_model=TrackLimitsConfig, dependencies=[Depends(require_any("admin"))])
+def get_track_limits(server_id: int, sess: SessionDep) -> TrackLimitsConfig:
+    _get(sess, server_id)
+    return limits_config.load(server_id)
+
+
+@router.put("/track-limits", response_model=TrackLimitsConfig, dependencies=[Depends(require_any("admin"))])
+def put_track_limits(server_id: int, body: TrackLimitsConfig, sess: SessionDep) -> TrackLimitsConfig:
+    _get(sess, server_id)
+    limits_config.save(sess, server_id, body)
+    return body
+
+
 class LimitsIn(BaseModel):
     """What a driver's CSP script (static/csp/opr_cuts.lua on the website) saw: it was off the track for `ms`."""
 
@@ -52,6 +68,9 @@ class LimitsIn(BaseModel):
     ms: int = Field(ge=0, le=600_000)  # time spent outside
     wheels: int = Field(ge=0, le=4)  # most wheels outside during it
     speed: float = Field(ge=0, le=1000)  # top speed outside, km/h
+    vo: float | None = Field(default=None, ge=0, le=1000, allow_inf_nan=False)
+    vi: float | None = Field(default=None, ge=0, le=1000, allow_inf_nan=False)
+    vp: float | None = Field(default=None, ge=0, le=1000, allow_inf_nan=False)
     lap: int = Field(default=0, ge=0, le=10_000)
     spline: float = Field(default=0.0, ge=0, le=1)  # track position where it started
     pos: list[float] = Field(default_factory=list, max_length=3)  # world x, y, z where it started
@@ -63,6 +82,7 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
     204 queued or ignored on purpose (mode off, flood) · 409 the server is not running or that slot is not that driver.
     `async` so the live state (cars, session) is read on the event loop, where ACSPClient changes it; the database lookup goes to a thread."""
     await asyncio.to_thread(_get, sess, server_id)
+    cfg = await asyncio.to_thread(limits_config.load, server_id)
     inst = next((i for i in supervisor.live() if i.server_id == server_id), None)
     if not inst or not inst.acsp:
         raise HTTPException(409, "server not running")
@@ -71,7 +91,17 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
     if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
         raise HTTPException(409, "that car is not that driver")
     if engine.record_limits(inst.acsp, body.car_id, body.name, body.model_dump(exclude={"car_id", "name"})):
-        from app.live.racecontrol import on_cuts
-        on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)   # (the counter of the hub, live: an excursion that was not a flood)
+        from app.live.racecontrol import RACE_TYPE, on_cuts, state_of, _lock
+        if (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
+            rc = state_of(server_id, True, inst.acsp.session, create=True)
+            with _lock:
+                now = time.monotonic()
+                ok, reason = limits_filter.count_cut(cfg, body.model_dump(), now, rc.flag,
+                                                    rc._limits_counted.get(body.car_id))
+                if ok and body.car_id != rc.pace_car:
+                    on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)
+                    rc._limits_counted[body.car_id] = now
+                elif not ok:
+                    rc.audit("cut_filtered", car=body.car_id, reason=reason, executed=False)
         from app.live.racecontrol import on_excursion
         on_excursion(server_id, inst.acsp.session, body.car_id, body.ms, body.lap, body.spline)   # (the advantage judge: when the excursion started and how long it lasted)

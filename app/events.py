@@ -26,7 +26,7 @@ class EventIn(BaseModel):
     derived: bool = False  # the calendar sync's per-event copy of a preset; can be set, never cleared
     league_id: int | None = None  # run with this league's eligible roster as the (locked) entry list (app/league.py)
     count_only_league_id: int | None = None  # a practice: its result is listed in this league's results with no points; the entry list stays open
-    cuts_rule: CutRule | None = None  # omitted keeps the saved choice on PUT; explicit null switches cuts off
+    cuts_rule: CutRule | None = None  # omitted keeps the saved choice on PUT; explicit null remains accepted for compatibility and uses the live-only default
     inherit_cuts_rule: bool = False  # true removes an override so the event inherits league rulebook
 
     @model_validator(mode="after")
