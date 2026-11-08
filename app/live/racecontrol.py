@@ -132,6 +132,7 @@ class RaceControl:
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
         self.cuts_emitted: dict[str, int] = {}
+        self._manual_dt_keys: set[tuple] = set()
         self.dt_open: dict[tuple, tuple[int, float]] = {}   # cut-ladder drive-throughs not served yet: due key -> (car, issued at)
         self.cuts_at: dict[str, float] = {}
         self.cuts_totals: dict[str, tuple[int, int]] = {}
@@ -767,7 +768,10 @@ class RaceControl:
                 for key, (car, issued) in list(self.dt_open.items()):
                     if car == car_id and self._pit_seen[car_id] > issued:   # a pit-lane pass after the penalty came out serves it
                         del self.dt_open[key]
-                        _cut_served.add(key)
+                        if key in self._manual_dt_keys:
+                            self._manual_dt_keys.discard(key)
+                        else:
+                            _cut_served.add(key)
                 # Keep the return command through parking: pit-lane entry is not
                 # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
@@ -1253,17 +1257,23 @@ class RaceControl:
                     row = dict(server_id=self.server_id, session_key=self.cuts_session_key,
                                driver_guid=driver_guid, round=round_no,
                                seconds=ladder[min(round_no - 1, len(ladder) - 1)], ts=self.cuts_at.get(driver_guid, time.time()))
-                    if len(_cut_dues_pending) >= MAX_CUT_DUES_PENDING:
+                    live_only = getattr(rule, "live_only", False)
+                    if not live_only and len(_cut_dues_pending) >= MAX_CUT_DUES_PENDING:
                         log.error("cuts: pending ledger full; round could not be queued: %s", row)
                         continue
                     key = (self.server_id, self.cuts_session_key, driver_guid, round_no)
-                    _cut_dues_pending[key] = row
+                    if not live_only:
+                        _cut_dues_pending[key] = row
                     self.cuts_emitted[driver_guid] = round_no
                     if row["seconds"] == 0:   # a drive-through step: one penalty per car at a time (a single pit pass serves them all)
                         if not any(c == car for c, _ in self.dt_open.values()):
                             self.add_penalty(car, CUT_DT_LAPS)
                         self.dt_open[key] = (car, self.clock.time())
-                    self.audit("cuts_due", due=row, executed=True, persistence="pending")
+                        if live_only:
+                            self._manual_dt_keys.add(key)
+                    # Manual sessions only execute zero-second (DT) steps live;
+                    # positive seconds are counter-only and never reach results.
+                    self.audit("cuts_due", due=row, executed=True, persistence="live_only" if live_only else "pending")
             if n > 0:
                 self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
                 self._bump()
