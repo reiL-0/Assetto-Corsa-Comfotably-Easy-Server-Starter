@@ -364,6 +364,7 @@ def autoflags_tick(now: float) -> None:
         if not rc:
             continue
         rc.blue_rule = blue_rule_peek(inst.server_id)
+        rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}   # (who is in each slot NOW: a sanction needs a name, not only a number)
         out = _non_racing_guids(now)
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}

@@ -131,6 +131,7 @@ class RaceControl:
         self.flag_dt_open: dict[tuple, tuple[int, float]] = {}   # blue drive-throughs not served yet: due key -> (car, issued at)
         self.blue_new: list[dict] = []                       # offences waiting for the adapter to tell the driver (`take_blue_offences`)
         self._neutral_end = 0.0                              # wall time the race was last not under green or white: a lap that began before it is not a clean lap
+        self._pace_owner: dict[int, str] = {}                # slot -> the driver whose laps are in its pace
         self._pace_gen: dict[int, int] = {}                  # slot -> generation seen: a slot that changes hands forgets its pace
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
@@ -1050,6 +1051,9 @@ class RaceControl:
             self.autoflags.pace_ok = self.pace.quicker
             if self.flag not in ("green", "white"):
                 self._neutral_end = now
+            for c, g in self.audit_guids.items():   # (and so does a slot whose driver is not the one its laps came from)
+                if g and self._pace_owner.get(c, g) != g:
+                    self.pace.forget(c); self._pace_owner[c] = g
             for c, smp in samples.items():   # (a slot that changed hands starts from no pace)
                 if self._pace_gen.get(c, smp.generation) != smp.generation:
                     self.pace.forget(c)
@@ -1069,10 +1073,15 @@ class RaceControl:
             self._blue_judge(mono, now, racing and self.autoflags.modes.get("blue") == "live")
 
     @fieldrec.capture(_lock)
-    def lap_done(self, car: int, ms: int, cuts: int, laps: int, now: float) -> None:
-        """A car completed a lap (ACSP): it feeds the pace of the blue flag when it is a CLEAN lap (not the first, no server cut, no pit-lane pass, begun under green or white, not the pace car)."""
+    def lap_done(self, car: int, ms: int, cuts: int, laps: int, now: float, guid: str = "") -> None:
+        """A car completed a lap (ACSP): it feeds the pace of the blue flag when it is a CLEAN lap (not the first, no server cut, no pit-lane pass, begun under green or white, not the pace car). `guid` is the driver
+        in the slot now: a slot that changed hands starts from no pace, whatever the field's samples have already noticed."""
         with _lock:
-            clean = (laps >= 2 and not cuts and car not in self._pit_lap and car != self.pace_car and self.flag in ("green", "white")
+            if guid and self._pace_owner.get(car, guid) != guid:
+                self.pace.forget(car)
+            if guid:
+                self._pace_owner[car] = guid
+            clean = (bool(guid) and laps >= 2 and not cuts and car not in self._pit_lap and car != self.pace_car and self.flag in ("green", "white")
                      and now - ms / 1000.0 >= self._neutral_end and (self.session_ref or {}).get("session_type") == RACE_TYPE)
             self.pace.lap(car, ms, clean)
 
@@ -1096,21 +1105,23 @@ class RaceControl:
 
     def _blue_offence(self, car: int, by: int, rule: dict, now: float) -> None:
         guid = str(self.audit_guids.get(car) or "")
-        n = self.blue_count.get(guid or f"car{car}", 0) + 1
-        self.blue_count[guid or f"car{car}"] = n
+        if not guid:   # the slot's driver is not known (yet): nobody is sanctioned for a car that cannot be named (a slot can change hands); it is written down
+            self.audit("blue_offence_unattributed", car=car, by=by, executed=False)
+            return
+        n = self.blue_count.get(guid, 0) + 1
+        self.blue_count[guid] = n
         ladder = rule["ladder"]
         step = ladder[min(n - 1, len(ladder) - 1)]
         if step == 0 and not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) \
                 and not any(c == car for c, _ in self.flag_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
             self.add_penalty(car, CUT_DT_LAPS)
-        if guid:
-            key = (self.server_id, self.cuts_session_key, guid, "blue", n)
-            if len(_flag_dues_pending) < MAX_FLAG_DUES_PENDING:
-                _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind="blue", seq=n, seconds=rule["unserved_s"] if step == 0 else step, ts=time.time())
-                if step == 0:
-                    self.flag_dt_open[key] = (car, self.clock.time())
-            else:
-                log.error("flags: pending ledger full; offence could not be queued: %s", key)
+        key = (self.server_id, self.cuts_session_key, guid, "blue", n)
+        if len(_flag_dues_pending) < MAX_FLAG_DUES_PENDING:
+            _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind="blue", seq=n, seconds=rule["unserved_s"] if step == 0 else step, ts=time.time())
+            if step == 0:
+                self.flag_dt_open[key] = (car, self.clock.time())
+        else:
+            log.error("flags: pending ledger full; offence could not be queued: %s", key)
         self.audit("blue_offence", car=car, by=by, driver=guid, seq=n, step=step, executed=True)
         self.blue_new.append({"car": car, "seq": n, "step": step, "laps": CUT_DT_LAPS})
         self._bump()
@@ -1133,7 +1144,7 @@ class RaceControl:
                 if res and res.get("blue") and "blue" in live and self._blue_rule()["ladder"]:   # the counter next to the flag: seconds left to let him through, offences so far, the step of the next one
                     rule, k = self._blue_rule(), (slot, res["blue"]["by"])
                     guid = str(self.audit_guids.get(slot) or "")
-                    n = self.blue_count.get(guid or f"car{slot}", 0)
+                    n = self.blue_count.get(guid, 0)
                     ladder = rule["ladder"]
                     res["blue"].update(left_s=max(0, math.ceil(rule["yield_s"] - (mono - self.blue_since.get(k, mono)))), n=n, step=ladder[min(n, len(ladder) - 1)], ignored=k in self.blue_ignored)
             if vsc is not None:

@@ -77,16 +77,53 @@ def test_shadow_nascar_and_a_rule_without_ladder_never_sanction():
     assert not rc.autoflags.blue, "NASCAR: a lapped car need not give way: no blue at all"
 
 
+def test_an_unknown_driver_is_never_sanctioned_and_a_neutralisation_restarts_the_countdown():
+    rcmod._flag_dues_pending.clear()
+    rc = rc_live(); rc.audit_guids = {}
+    tick(rc, 10.0); tick(rc, 40.0)
+    assert not rc.take_blue_offences() and not rc.penalties and not rcmod.pending_flag_dues(), "a car that cannot be named is not sanctioned"
+    rc = rc_live()
+    tick(rc, 10.0); tick(rc, 20.0)
+    rc.flag = "yellow"; tick(rc, 21.0); tick(rc, 40.0)   # a caution: the flag is gone and so is the countdown
+    assert not rc.autoflags.blue and not rc.blue_since and not rc.blue_ignored
+    rc.flag = "green"; tick(rc, 50.0); tick(rc, 51.0)
+    assert not rc.take_blue_offences(), "back to green the seconds start again: no instant offence with the time accumulated before"
+    tick(rc, 66.0)
+    assert [o["seq"] for o in rc.take_blue_offences()] == [1]
+
+
+def test_a_second_drive_through_is_not_added_but_the_one_pit_pass_serves_both():
+    rcmod._flag_dues_pending.clear(); rcmod._flag_served.clear()
+    rc = rc_live()
+    rc.add_penalty(1, 3)   # the car already owes a drive-through
+    tick(rc, 10.0); tick(rc, 26.0)
+    assert len(rc.penalties) == 1 and [o["step"] for o in rc.take_blue_offences()] == [0]
+    rc.report_pit(1, True, now=rc.clock.time() + 5)
+    assert rcmod.pending_flag_served() == {(7, rc.cuts_session_key, "GA", "blue", 1)}, "its due is closed by the same pass"
+    rcmod._flag_dues_pending.clear(); rcmod._flag_served.clear()
+
+
+def test_a_driver_who_took_the_slot_does_not_inherit_the_pace():
+    rc = RaceControl(session_ref={"session_type": 3}); rc.server_id = 7
+    for n in (2, 3, 4):
+        rc.lap_done(1, 90000, 0, n, 1000.0 + n, "GA")
+    assert rc.pace.of(1) == 90000
+    rc.lap_done(1, 120000, 0, 5, 1010.0, "GB")   # another driver in the same slot: his pace starts from nothing
+    assert rc.pace.of(1) is None
+    rc.lap_done(1, 90000, 0, 6, 1020.0, "")   # no driver known: the lap is not trusted
+    assert rc.pace.of(1) is None
+
+
 def test_clean_laps_only_feed_the_pace():
     rc = RaceControl(session_ref={"session_type": 3}); rc.server_id = 7
-    rc.lap_done(1, 90000, 0, 1, 1000.0)   # the first lap
-    rc.lap_done(1, 90000, 1, 2, 1000.0)   # a server cut
-    rc._pit_lap.add(1); rc.lap_done(1, 90000, 0, 3, 1000.0); rc._pit_lap.discard(1)   # a pit lap
-    rc.lap_done(rc.pace_car if rc.pace_car is not None else 99, 90000, 0, 4, 1000.0)
+    rc.lap_done(1, 90000, 0, 1, 1000.0, "GA")   # the first lap
+    rc.lap_done(1, 90000, 1, 2, 1000.0, "GA")   # a server cut
+    rc._pit_lap.add(1); rc.lap_done(1, 90000, 0, 3, 1000.0, "GA"); rc._pit_lap.discard(1)   # a pit lap
+    rc.lap_done(rc.pace_car if rc.pace_car is not None else 99, 90000, 0, 4, 1000.0, "GP")
     assert rc.pace.of(1) is None
     for n in (4, 5, 6):
-        rc.lap_done(1, 90000, 0, n, 1000.0 + n)
+        rc.lap_done(1, 90000, 0, n, 1000.0 + n, "GA")
     assert rc.pace.of(1) == 90000
     rc._neutral_end = 2000.0   # a caution ended: a lap that began before it is not clean
-    rc.lap_done(2, 90000, 0, 5, 2010.0)
+    rc.lap_done(2, 90000, 0, 5, 2010.0, "GB")
     assert rc.pace.of(2) is None
