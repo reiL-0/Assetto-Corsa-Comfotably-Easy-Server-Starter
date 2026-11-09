@@ -445,7 +445,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -664,9 +664,14 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
         raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
     _, rc = _control(server_id, sess)
     if body.kind == "red":
-        rc.set_red(body.on)   # (the cars have `pit_s` seconds to be in the pit lane; it stays beside any track flag until withdrawn)
+        inst = _live(server_id)
+        rc.set_red(body.on, field=inst.acsp.field if inst else None)   # (the cars have `pit_s` seconds to be in the pit lane; it stays beside any track flag until withdrawn)
         if not body.on:
+            rc.drop_hold("red-order")
             return rc.snapshot()
+        if rc.red_ref and inst:
+            top = " · ".join(f"{i + 1} {_name(inst, c)}" for i, c in enumerate(rc.red_ref["order"][:10]))
+            _say(rc, f"ORDEN DE REINICIO (vuelta {rc.red_ref['lap']}): {top}", "race", hold="red-order")
     _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
     log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()
