@@ -82,9 +82,10 @@ def test_server_lap_source_consumes_pit_mark(monkeypatch):
     assert state.cuts_client[1] == 1
 
 
-def test_filtered_report_keeps_evidence_and_judge_and_only_counts_accepted(monkeypatch):
+@pytest.mark.parametrize("session_type", [1, 2, 3])
+def test_filtered_report_keeps_evidence_and_judge_and_only_counts_accepted(monkeypatch, session_type):
     import app.stewards.api as api
-    session = {'session_type': 3}
+    session = {'session_type': session_type}
     client = SimpleNamespace(cars={1: {'driver_name': 'Ana'}}, session=session)
     monkeypatch.setattr(api, '_get', lambda *a: None)
     monkeypatch.setattr(api.supervisor, 'live', lambda: [SimpleNamespace(server_id=902, acsp=client)])
@@ -220,7 +221,8 @@ def test_full_filter_order():
 
 @pytest.mark.parametrize('session_type', [1, 2])
 @pytest.mark.parametrize('speed', [30, 100])
-def test_non_race_report_does_not_create_or_audit_state(monkeypatch, session_type, speed):
+@pytest.mark.parametrize('pace', [False, True])
+def test_non_race_report_filters_and_creates_state(monkeypatch, session_type, speed, pace):
     import app.stewards.api as api
     session = {'session_type': session_type}
     client = SimpleNamespace(cars={1: {'driver_name': 'Ana'}}, session=session)
@@ -228,6 +230,9 @@ def test_non_race_report_does_not_create_or_audit_state(monkeypatch, session_typ
     monkeypatch.setattr(api.supervisor, 'live', lambda: [SimpleNamespace(server_id=905, acsp=client)])
     monkeypatch.setattr(store, 'load', lambda sid: Config(min_speed_kmh=40))
     monkeypatch.setattr(rc, '_states', {})
+    if pace:
+        state = rc.state_of(905, True, session, create=True)
+        state.pace_car = 1
     record, cuts, judge, audit = Mock(return_value=True), Mock(), Mock(), Mock()
     monkeypatch.setattr(api.engine, 'record_limits', record)
     monkeypatch.setattr(rc, 'on_cuts', cuts)
@@ -236,10 +241,12 @@ def test_non_race_report_does_not_create_or_audit_state(monkeypatch, session_typ
     async def immediate(fn, *args): return fn(*args)
     monkeypatch.setattr(api.asyncio, 'to_thread', immediate)
     asyncio.run(report_limits(905, LimitsIn(car_id=1, name='Ana', **{**BASE, 'vo': speed}), None))
-    assert rc.state_of(905, True, session) is None
-    assert rc._states == {}
-    cuts.assert_not_called()
-    audit.assert_not_called()
+    state = rc.state_of(905, True, session)
+    assert state is not None
+    assert cuts.call_count == int(speed >= 40 and not pace)
+    assert state._limits_counted.keys() == ({1} if speed >= 40 and not pace else set())
+    if speed < 40:
+        assert any(c.args == ("cut_filtered",) for c in audit.call_args_list)
     record.assert_called_once()
     judge.assert_called_once_with(905, session, 1, BASE['ms'], 0, 0.0)
 

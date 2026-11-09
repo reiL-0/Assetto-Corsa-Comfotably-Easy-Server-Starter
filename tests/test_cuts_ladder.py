@@ -53,6 +53,7 @@ def test_rounds_repeat_the_last_step_and_keep_old_state_keys(live, monkeypatch):
         assert view["cuts"] == {"3": total} and view["cuts_rule"] == {k: RULE[k] for k in ("cap", "max", "per", "step")}
         assert view["cuts_round"] == {"3": total % 4}
         assert view["cuts_rounds"] == {"3": total // 4}
+        assert view["cuts_ladder"] == RULE["ladder"]
     # The two sources overlap: neither awards the same round again.
     live_rc.on_cuts(sid, client.session, 3, 16, False)
     adapter.save_cut_dues()
@@ -444,3 +445,72 @@ def test_zero_cut_lap_clears_pit_and_pace_car_stays_excluded(live, monkeypatch):
     live_rc.on_cuts(sid, client.session, 3, 5, False)
     live_rc.on_cuts(sid, client.session, 3, 5, True)
     assert rc.cuts_server.get(3, 0) == 0 and rc.cuts_client.get(3, 0) == 0
+
+
+@pytest.mark.parametrize('session_type', [1, 2])
+@pytest.mark.parametrize('manual', [False, True])
+def test_informational_cuts_never_enter_ladder(monkeypatch, session_type, manual):
+    from app import league
+    from types import SimpleNamespace
+    sid, client = 906, SimpleNamespace(session={'session_type': session_type})
+    monkeypatch.setattr(live_rc, '_states', {})
+    monkeypatch.setattr('app.supervisor.get', lambda sid: None)
+    informational_rule = league._ManualCutRule(league.DEFAULT_CUT_RULE) if manual else {**RULE, 'ladder': [0, 5]}
+    _rule_of(monkeypatch, informational_rule)
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.pace_car = 4
+    rev = rc.rev
+    for _ in range(10):
+        live_rc.on_cuts(sid, client.session, 3, 1, True)
+        live_rc.on_cuts(sid, client.session, 4, 1, True)
+    live_rc.on_cuts(sid, client.session, 3, 20, False)
+    view = rc.cuts_view(informational_rule)
+    assert view == {'cuts': {'3': 10}, 'cuts_rule': {k: informational_rule[k] for k in ('cap', 'max', 'per', 'step')}, 'cuts_info': True}
+    assert rc.rev > rev
+    assert not rc.cuts_emitted and not rc.dt_open and not rc.penalties
+    assert not rc.cuts_totals and not live_rc.pending_cut_dues()
+    live_rc.on_excursion(sid, client.session, 3, 1000, 1, 0.5)
+    fresh = live_rc.state_of(sid, True, {'session_type': 3}, create=True)
+    assert fresh.cuts_view(informational_rule)['cuts'] == {}
+    assert 'cuts_info' not in fresh.cuts_view(informational_rule)
+    assert 'cuts_info' not in live_rc.RaceControl(object()).cuts_view(informational_rule)
+
+
+@pytest.mark.parametrize('manual', [False, True])
+def test_race_ladder_still_executes_dt_and_dues(monkeypatch, manual):
+    from app import league
+    rule = league._ManualCutRule(league.DEFAULT_CUT_RULE) if manual else {**RULE, 'ladder': [0, 5]}
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.server_id = 907
+    for _ in range(10):
+        rc.add_cuts(3, 1, True, rule, GUID)
+    rounds = 10 // (rule['max'] + 1)
+    assert rc.cuts_emitted == {GUID: rounds}
+    assert len(rc.dt_open) == len(rc.penalties) == 1
+    assert len(live_rc.pending_cut_dues()) == (0 if manual else rounds)
+    assert 'cuts_info' not in rc.cuts_view(rule)
+
+
+@pytest.mark.parametrize('session', [None, object(), {'session_type': 0}, {'session_type': 99}])
+def test_other_sessions_ignore_cuts(monkeypatch, session):
+    monkeypatch.setattr(live_rc, '_states', {})
+    live_rc.on_cuts(908, session, 3, 1, True)
+    assert not live_rc._states
+    rc = live_rc.RaceControl(session)
+    rc.add_cuts(3, 10, True, RULE, GUID)
+    assert not rc.cuts_client and not live_rc.pending_cut_dues()
+    assert rc.cuts_view(RULE) == {'cuts': {}, 'cuts_rule': None}
+
+
+@pytest.mark.parametrize("session_type", [1, 2, 3, 0])
+@pytest.mark.parametrize("ladder", [None, [], [0, 5, 5, 10]])
+def test_ladder_payload_only_in_race(session_type, ladder):
+    rc = live_rc.RaceControl({"session_type": session_type})
+    current = {k: v for k, v in RULE.items() if k != "ladder"}
+    if ladder is not None:
+        current["ladder"] = ladder
+    view = rc.cuts_view(current)
+    assert ("cuts_ladder" in view) == (session_type == 3 and bool(ladder))
+    if "cuts_ladder" in view:
+        assert view["cuts_ladder"] == ladder
+        assert set(view["cuts_rule"]) == {"cap", "max", "per", "step"}

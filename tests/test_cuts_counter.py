@@ -60,13 +60,13 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 10}, "and read again after it"
 
 
-def test_the_counter_counts_a_race_only_shows_the_larger_count_and_starts_again_with_each_session(live, monkeypatch):
+def test_the_counter_exposes_driving_sessions_shows_the_larger_race_count_and_resets_each_session(live, monkeypatch):
     sid, client, _ = live
     rule = {"max": 5, "per": 1, "step": 5, "cap": 15}
     _rule_of(monkeypatch, rule)
     client.session = {"session_index": 1, "session_type": 2}   # qualifying
     live_rc.on_cuts(sid, client.session, 3, 2, False)
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_rule"] is None, "not a race: nothing counted, nothing shown"
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_info"] is True
     client.session = {"session_index": 2, "session_type": 3}   # the race
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_rule"] == rule, "the rule is there before the first cut: CUTS 0/5"
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}

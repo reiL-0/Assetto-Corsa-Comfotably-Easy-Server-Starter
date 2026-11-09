@@ -411,8 +411,8 @@ def test_http_snapshot_and_configuration(live):
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
-    assert armed.keys() - {'cuts_round', 'cuts_rounds'} == before.keys()   # (the default cut rule has a ladder: a race state adds the per-round counters the empty template does not have)
-    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed', 'cuts_round', 'cuts_rounds')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed')}
+    assert armed.keys() - {'cuts_round', 'cuts_rounds', 'cuts_ladder'} == before.keys()   # (the default cut rule has a ladder: a race state adds the per-round counters the empty template does not have)
+    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed', 'cuts_round', 'cuts_rounds', 'cuts_ladder')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed')}
     assert before['nascar_armed'] is None and armed['nascar_armed'] == {'total': 70, 'shares': [30, 45, 25]}   # (the arming of the server: what survives practice, qualifying and restarts)
     assert armed['nascar']['total'] == 70 and armed['rev'] > before['rev']
     assert armed['nascar']['next_delay_min'] == 10
