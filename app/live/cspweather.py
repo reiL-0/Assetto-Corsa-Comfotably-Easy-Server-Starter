@@ -41,6 +41,7 @@ class WeatherDirector:
         self.t0 = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=minutes)
         self.track, self.layout, self.tz = str(srv.get("TRACK") or ""), str(srv.get("CONFIG_TRACK") or ""), data.get("timezone")
         self.clock0, self.last = time.monotonic(), ""
+        self.signal: float | None = None   # how wet the track is now, 0..1 (the larger of rain and wetness of the last step); None until the plan has played: the DRS rules read it (app/live/drs.py)
         self.task = asyncio.get_running_loop().create_task(self.run())   # needs the event loop: build it from async code (see servers._restart_weather)
 
     def stop(self) -> None:
@@ -74,6 +75,7 @@ class WeatherDirector:
                 continue   # this session has no entry: the server's own weather applies
             state = w.step(self.period, board.elapsed_ms() / 1000)
             if state:
+                self.signal = max(state["rain"], state["wetness"])
                 self.last = command(state, self._unix(), self.period)
                 key = (state["current"], state["upcoming"], round(state["transition"], 2), round(state["ambient"]), round(state["wind_kmh"]), round(state["rain"], 2))
                 if key != self.sent_key or time.monotonic() - self.sent_at >= KEEPALIVE:   # nothing new: do not make every client recompute

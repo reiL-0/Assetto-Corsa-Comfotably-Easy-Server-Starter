@@ -43,7 +43,7 @@ from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -127,6 +127,25 @@ def _due_notices(inst, rc, car: int, seconds: int) -> None:
 
 _unsaved_dues: list[dict] = []   # penalties that fell due and could not be written yet: tried again at every tick
 MAX_UNSAVED_DUES = 1000
+
+
+def drs_stale_servers() -> list[int]:
+    """Servers in a race whose cached DRS rule has to be read again (the monitor does it in a worker thread: never on the event loop)."""
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and drs_rule_stale(i.server_id)]
+
+
+def drs_tick(now: float) -> None:
+    """The DRS state of every race that has the rule on: the leader's laps and how wet the track is go in, the state the hubs read comes out (RaceControl.drs_tick). Event loop, no database."""
+    for inst in supervisor.live():
+        session = inst.acsp.session
+        if (session or {}).get("session_type") != RACE_TYPE:
+            continue
+        rule = drs_rule_peek(inst.server_id)
+        rc = state_of(inst.server_id, True, session, create=bool(rule))
+        if not rc:
+            continue
+        laps = max((s.completed_laps if s.completed_laps is not None else int(max(s.progress, 0)) for c, s in inst.acsp.field.samples().items() if c != rc.pace_car), default=0)
+        rc.drs_tick(rule, now, laps, inst.director.signal if inst.director else None)
 
 
 def give_back_stale_servers() -> list[int]:
@@ -365,7 +384,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -441,6 +460,28 @@ def report_pit(server_id: int, body: PitIn, sess: SessionDep) -> None:
         rc.report_pit(body.car_id, body.pit)
         if body.pit and rc.pace_car_in and body.car_id == rc.pace_car:
             auto_green(server_id, rc, body.car_id)   # (alone on the track the pace car IS the restart: its arrival in the pits brings the green)
+
+
+class DrsUseIn(BaseModel):
+    car_id: int = Field(ge=0, le=255)
+    name: str = Field(max_length=80)
+
+
+@state_router.post("/race-control/drs-use", status_code=204)
+def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
+    """The hub of a car says it is using DRS. Client evidence (like the cut counter): the manager decides with its own state (is DRS off now, was this driver already sanctioned in this period); 409 when that car is not that driver."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    car = inst.acsp.cars.get(body.car_id) if inst else None
+    if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
+        raise HTTPException(409, "that car is not that driver")
+    rc = state_of(server_id, True, inst.acsp.session)
+    verdict = rc.drs_use(body.car_id, str(car.get("driver_guid") or ""), time.time()) if rc else None
+    if verdict and verdict["penalty"] == "dt":
+        laps = verdict["laps"]
+        _say(rc, f"PENALIZACIÓN: DRS con el DRS inactivo · drive-through ({laps} vueltas)", "penalty", body.car_id)
+    elif verdict:
+        _say(rc, "AVISO: DRS con el DRS inactivo", "penalty", body.car_id)
 
 
 def _control(server_id: int, sess: SessionDep):
@@ -986,6 +1027,8 @@ async def monitor_forever() -> None:
                     await asyncio.to_thread(neutralization_rule, inst.server_id)
             for sid in flag_modes_stale_servers():
                 await asyncio.to_thread(flag_modes_of, sid)
+            for sid in drs_stale_servers():
+                await asyncio.to_thread(drs_rule_of, sid)
             for sid in give_back_stale_servers():
                 await asyncio.to_thread(give_back_rule_of, sid)   # (the league's rule, from the database, off the event loop)
             from app.league import cut_rule_stale
@@ -1018,6 +1061,7 @@ async def monitor_forever() -> None:
                     announce_neutral(n_save)
             except Exception:
                 log.exception("neutral: pending time penalties could not be saved; retained for retry")
+            drs_tick(now)
             _unsaved_dues.extend(give_back_tick(now))
             if len(_unsaved_dues) > MAX_UNSAVED_DUES:   # (a database that has been down for minutes: what does not fit is logged whole, never dropped silently)
                 log.error("give-back: too many penalties waiting to be saved, dropping the oldest: %s", _unsaved_dues[:-MAX_UNSAVED_DUES])

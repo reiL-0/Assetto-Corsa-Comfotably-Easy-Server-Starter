@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.live.nascar import MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.rulebook import CutRule, Rulebook
+from app.rulebook import CutRule, DrsRule, Rulebook
 
 Scalar = str | int | float | bool
 
@@ -141,6 +141,7 @@ class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
     cuts_rule: CutRule | None = None
+    drs_rule: DrsRule | None = None   # a manual session's DRS rules (app/live/drs.py); an event of a league uses the rulebook's
     name: str = Field(min_length=1, max_length=80)
     password: str = ""  # join password; "" = open
     admin_password: str | None = None  # None = keep the current one

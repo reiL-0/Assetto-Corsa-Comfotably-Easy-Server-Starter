@@ -75,6 +75,26 @@ class GiveBackRule(_Strict):
     window_s: int = Field(default=30, ge=10, le=120)
 
 
+class DrsRule(_Strict):
+    """DRS in a race (app/live/drs.py). Off by default (`detectors.drs` is None). DRS is not allowed for `start_laps_off` laps after the start, `restart_laps_off` after each restart, while it rains
+    (the weather signal, max of rain and wetness, went over `wet_on`; allowed again after `dry_confirm_s` seconds under `dry_below`) and under any caution. Using it then is sanctioned once per period:
+    `dt` = a drive-through (3 laps to serve it), `warn` = a notice to the driver and a line in the audit, nothing else."""
+
+    start_laps_off: int = Field(default=2, ge=0, le=20)
+    restart_laps_off: int = Field(default=2, ge=0, le=10)
+    penalty: Literal["dt", "warn"] = "dt"
+    rain_disables: bool = True
+    wet_on: float = Field(default=0.15, gt=0, le=1, allow_inf_nan=False)
+    dry_below: float = Field(default=0.05, ge=0, lt=1, allow_inf_nan=False)
+    dry_confirm_s: int = Field(default=30, ge=5, le=600)
+
+    @model_validator(mode="after")
+    def _hysteresis(self) -> DrsRule:
+        if self.dry_below >= self.wet_on:
+            raise ValueError("dry_below must be under wet_on")
+        return self
+
+
 class FlagsRule(_Strict):
     """The flags that need no director (app/live/autoflags.py). `shadow` (the default) decides and writes down, shows nothing; `live` shows it to the driver; `off` does not even decide."""
 
@@ -84,6 +104,7 @@ class FlagsRule(_Strict):
 
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
+    drs: DrsRule | None = None   # None = off
     flags: FlagsRule = Field(default_factory=FlagsRule)
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 

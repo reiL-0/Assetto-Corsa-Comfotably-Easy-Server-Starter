@@ -41,6 +41,7 @@ from app.live import (
 )
 from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
+from app.live.drs import Drs
 from app.live.giveback import GiveBack
 from app.live.incidents import MOVING_KMH, STOP_KMH, NeutralizationWatch, Watch
 from app.live.nopass import PassJudge
@@ -131,6 +132,7 @@ class RaceControl:
         self.neutralization_excluded: set[int] = set()
         self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
         self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
+        self.drs: Drs | None = None             # the DRS rules of the race (app/live/drs.py): set up by `drs_tick` while the league's rule is on
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
         self.gb_names: dict[int, str] = {}      # car -> the name the banner shows for it (set by the monitor from the cars on the server)
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
@@ -1329,6 +1331,35 @@ class RaceControl:
                 self.audit("cuts", car=car, count=book[car], added=n, from_client=from_client, executed=True)
                 self._bump()
 
+    def drs_tick(self, rule: dict | None, now: float, laps: int, signal: float | None) -> None:
+        """The DRS state of a race: `rule` is the cached rule (None = off, or not a race), `laps` the leader's completed laps, `signal` the weather's wetness 0..1 (None = unknown). Event loop, no database."""
+        with _lock:
+            if not rule or (self.session_ref or {}).get("session_type") != RACE_TYPE:
+                if self.drs:
+                    self.drs = None
+                    self._bump()
+                return
+            if self.drs is None:
+                self.drs = Drs(rule)
+                self._bump()
+            elif self.drs.rule != rule:
+                self.drs.rule = rule   # (the rule changed mid-session: the periods, the restart count and who was already sanctioned stay; the next step applies the new numbers)
+            if self.drs.step(now, laps, self.flag in ("green", "white"), signal):
+                self._bump()
+                self.audit("drs", state=self.drs.view(), window=self.drs.window, executed=True)
+
+    def drs_use(self, car: int, guid: str, now: float) -> dict | None:
+        """The hub of `car` saw it using DRS. None when nothing is owed (DRS is on, inside the grace, already sanctioned in this period, the pace car, no rule). Otherwise the rule's `penalty` and the reason
+        of the period: a drive-through is queued here ('dt'); a 'warn' only leaves its trace in the audit. The caller tells the driver."""
+        with _lock:
+            if not self.drs or car == self.pace_car or not self.drs.used(guid or f"car{car}", now):
+                return None
+            kind, why = self.drs.rule["penalty"], self.drs.why
+            if kind == "dt" and not any(c == car for c, _ in self.dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):   # (one drive-through per car at a time: a single pit pass serves it)
+                self.add_penalty(car, CUT_DT_LAPS)
+            self.audit("drs_use", car=car, driver=guid, window=self.drs.window, why=why, penalty=kind, executed=True)
+            return {"penalty": kind, "why": why, "laps": CUT_DT_LAPS}
+
     def give_back_view(self, now: float) -> dict:
         """What the hub and the panel read: the obligations that are open ({id, car, creditors, left_s}) and the cases left for the director."""
         with _lock:
@@ -1366,7 +1397,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:
@@ -1413,6 +1444,33 @@ def flag_modes_of(server_id: int) -> dict | None:
         return flag_modes(server_id)
     except Exception:   # noqa: BLE001
         log.warning("automatic-flag modes of server %s could not be read", server_id, exc_info=True)
+        return None
+
+
+def drs_rule_peek(server_id: int) -> dict | None:
+    """The DRS rule as it was last read (no database, no waiting): what the monitor uses on the event loop."""
+    try:
+        from app.league import drs_rule_cached   # (late: league imports servers, which imports this module)
+        return drs_rule_cached(server_id)
+    except Exception:   # noqa: BLE001 - never let this break the monitor
+        return None
+
+
+def drs_rule_stale(server_id: int) -> bool:
+    try:
+        from app.league import drs_rule_stale as stale
+        return stale(server_id)
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def drs_rule_of(server_id: int) -> dict | None:
+    """The same rule, read from the database when the cache is stale: only from a request thread or a worker."""
+    try:
+        from app.league import drs_rule
+        return drs_rule(server_id)
+    except Exception:   # noqa: BLE001
+        log.warning("DRS rule of server %s could not be read", server_id, exc_info=True)
         return None
 
 
