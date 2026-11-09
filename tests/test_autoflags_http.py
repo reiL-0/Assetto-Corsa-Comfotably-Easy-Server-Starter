@@ -76,7 +76,11 @@ def test_a_vsc_can_ask_for_the_delta_mode_and_without_a_reference_lap_it_runs_th
     assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "delta"}).status_code == 200
     view = _client("steward").get(f"{url}/autoflags").json()
     assert view["vsc_mode"] == "delta" and view["vsc_fallback"] is True and view["ref_models"] == [], view
+    texts = [n["text"] for n in _client("steward").get(f"{V}/servers/{sid}/race-state").json()["notices"]]
+    assert any("VIRTUAL SAFETY CAR: reduce el ritmo" in t and "km/h" not in t for t in texts), texts   # a VSC is time per sector: the notice asks for no speed
     assert _client("steward").post(url, json={"flag": "green"}).status_code == 200
     assert _client("steward").post(url, json={"flag": "fcy", "pace_kmh": 60}).status_code == 200   # no mode: delta is the default, for an FCY too
     assert _client("steward").get(f"{url}/autoflags").json()["vsc_mode"] == "delta"
+    texts = [n["text"] for n in _client("steward").get(f"{V}/servers/{sid}/race-state").json()["notices"]]
+    assert any("FULL COURSE YELLOW: baja a 60 km/h" in t for t in texts), texts   # an FCY does say its pace
     assert _client("steward").post(url, json={"flag": "green"}).status_code == 200

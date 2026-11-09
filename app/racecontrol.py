@@ -414,7 +414,10 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
         actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    if body.flag in ("vsc", "fcy"):
+    if body.flag == "vsc" and rc.vsc_mode == "delta":   # a VSC by delta is time per sector: it asks for no speed
+        pen = f" · si baja del límite: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
+        _say(rc, f"VIRTUAL SAFETY CAR: reduce el ritmo en {body.grace_s} s · mantén el delta positivo{pen}", "flag")
+    elif body.flag in ("vsc", "fcy"):
         pen = f" · si sigues por encima: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
         name = "VIRTUAL SAFETY CAR" if body.flag == "vsc" else "FULL COURSE YELLOW"
         _say(rc, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}", "flag")
