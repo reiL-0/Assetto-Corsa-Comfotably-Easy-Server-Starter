@@ -250,6 +250,25 @@ class DrsDue(SQLModel, table=True):
     state: str = "due"  # due | served | applied | expired (its race was counted without the driver)
 
 
+class FlagDue(SQLModel, table=True):
+    """A sanction for ignoring a flag (app/live/racecontrol.py, `kind`: blue). `seconds` is what the result charges: the ladder step, or the rule's `unserved_s` for a drive-through step. `dt` rows are marked `served`
+    by a pit-lane pass after them and then cost nothing; the first Race result counted after `ts` turns every still-due one into a time `Penalty` (app/stewards/auto.py `flag_penalties`). `seq` = the n-th offence of
+    that driver and kind in the session."""
+
+    __tablename__ = "flag_dues"
+    __table_args__ = (Index("ux_flag_dues_seq", "server_id", "session_key", "driver_guid", "kind", "seq", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    session_key: str
+    driver_guid: str
+    kind: str
+    seq: int
+    seconds: int
+    ts: float
+    state: str = "due"  # due | served | applied | expired (its race was counted without the driver)
+
+
 class GiveBackDue(SQLModel, table=True):
     """A driver who gained places off the track and did not give them back (app/live/giveback.py): written when the time to give them back is up, or when a steward sanctions it at once. The result of the race is
     not there yet while it happens, so the penalty waits here: the first Race result of the server counted after `ts` turns it into a time `Penalty` (app/stewards/auto.py `give_back_penalties`)."""

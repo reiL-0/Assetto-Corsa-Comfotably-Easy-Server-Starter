@@ -42,6 +42,7 @@ from app.live import (
 from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
 from app.live.drs import Drs
+from app.live.flagpace import Pace
 from app.live.giveback import GiveBack
 from app.live.incidents import MOVING_KMH, STOP_KMH, NeutralizationWatch, Watch
 from app.live.nopass import PassJudge
@@ -122,6 +123,15 @@ class RaceControl:
         self.passjudge = PassJudge()            # no overtaking under a VSC / FCY (app/live/nopass.py): give the place back or the flag's penalty
         self.pacejudge = PaceJudge()            # the continuous judge of a VSC / FCY's pace (app/live/pacejudge.py), SHADOW only for now: it writes down who it WOULD penalise; `evaluate` below still decides
         self.pacedelta = PaceDeltaJudge()       # the delta by speed of the cars with no reference lap (app/live/pacejudge.py): an FCY, or a VSC before its first clean lap
+        self.pace = Pace()                      # the pace of every car for the blue flag (app/live/flagpace.py), fed by `lap_done`
+        self.blue_rule: dict | None = None      # app/rulebook.py BlueRule as a dict: set by the monitor from its cache (None: the defaults)
+        self.blue_since: dict[tuple[int, int], float] = {}   # (car in front, quicker car behind) -> when this blue appeared (the field's clock): the time to let it through counts from here
+        self.blue_ignored: set[tuple[int, int]] = set()      # the pairs whose present blue already cost an offence: one per appearance
+        self.blue_count: dict[str, int] = {}                 # driver -> offences of this session (the n-th one picks the ladder step)
+        self.flag_dt_open: dict[tuple, tuple[int, float]] = {}   # blue drive-throughs not served yet: due key -> (car, issued at)
+        self.blue_new: list[dict] = []                       # offences waiting for the adapter to tell the driver (`take_blue_offences`)
+        self._neutral_end = 0.0                              # wall time the race was last not under green or white: a lap that began before it is not a clean lap
+        self._pace_gen: dict[int, int] = {}                  # slot -> generation seen: a slot that changes hands forgets its pace
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
         self.neutralization_watch = NeutralizationWatch()
@@ -785,6 +795,10 @@ class RaceControl:
                             self._manual_dt_keys.discard(key)
                         else:
                             _cut_served.add(key)
+                for key, (car, issued) in list(self.flag_dt_open.items()):   # (and a blue-flag one)
+                    if car == car_id and self._pit_seen[car_id] > issued:
+                        del self.flag_dt_open[key]
+                        _flag_served.add(key)
                 for key, (car, issued) in list(self.drs_dt_open.items()):   # (the same pit pass serves a DRS drive-through)
                     if car == car_id and self._pit_seen[car_id] > issued:
                         del self.drs_dt_open[key]
@@ -1029,6 +1043,17 @@ class RaceControl:
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
             self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
+            if self.nascar:
+                self.autoflags.modes["blue"] = "off"   # NASCAR: a lapped car need not give way
+            rule = self._blue_rule()
+            self.pace.configure(rule["pace_laps"], rule["pace_margin_pct"])
+            self.autoflags.pace_ok = self.pace.quicker
+            if self.flag not in ("green", "white"):
+                self._neutral_end = now
+            for c, smp in samples.items():   # (a slot that changed hands starts from no pace)
+                if self._pace_gen.get(c, smp.generation) != smp.generation:
+                    self.pace.forget(c)
+                self._pace_gen[c] = smp.generation
             previous = self.autoflags.sequence
             self.autoflags.step(mono, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit, length, racing)
 
@@ -1041,6 +1066,59 @@ class RaceControl:
                 self.audit("automatic_flag", event=event, flag_mode=flag_mode, speeds=speeds,
                            length_m=length, thresholds=raceaudit.thresholds(flag_rules),
                            executed=flag_mode == "live")
+            self._blue_judge(mono, now, racing and self.autoflags.modes.get("blue") == "live")
+
+    @fieldrec.capture(_lock)
+    def lap_done(self, car: int, ms: int, cuts: int, laps: int, now: float) -> None:
+        """A car completed a lap (ACSP): it feeds the pace of the blue flag when it is a CLEAN lap (not the first, no server cut, no pit-lane pass, begun under green or white, not the pace car)."""
+        with _lock:
+            clean = (laps >= 2 and not cuts and car not in self._pit_lap and car != self.pace_car and self.flag in ("green", "white")
+                     and now - ms / 1000.0 >= self._neutral_end and (self.session_ref or {}).get("session_type") == RACE_TYPE)
+            self.pace.lap(car, ms, clean)
+
+    def _blue_rule(self) -> dict:
+        return self.blue_rule or BLUE_DEFAULT
+
+    def _blue_judge(self, mono: float, now: float, live: bool) -> None:
+        """The blue flag's countdown and offences: a pair that has had its blue for `yield_s` seconds without it going away commits ONE offence of the car in front (per appearance of the flag). Under the lock."""
+        rule = self._blue_rule()
+        pairs = set(self.autoflags.blue)
+        for k in [k for k in self.blue_since if k not in pairs]:
+            del self.blue_since[k]; self.blue_ignored.discard(k)
+        for k in pairs:
+            self.blue_since.setdefault(k, mono)
+        if not (live and rule["ladder"]):
+            return
+        for (a, b), since in list(self.blue_since.items()):
+            if mono - since >= rule["yield_s"] and (a, b) not in self.blue_ignored:
+                self.blue_ignored.add((a, b))
+                self._blue_offence(a, b, rule, now)
+
+    def _blue_offence(self, car: int, by: int, rule: dict, now: float) -> None:
+        guid = str(self.audit_guids.get(car) or "")
+        n = self.blue_count.get(guid or f"car{car}", 0) + 1
+        self.blue_count[guid or f"car{car}"] = n
+        ladder = rule["ladder"]
+        step = ladder[min(n - 1, len(ladder) - 1)]
+        if step == 0 and not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) \
+                and not any(c == car for c, _ in self.flag_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
+            self.add_penalty(car, CUT_DT_LAPS)
+        if guid:
+            key = (self.server_id, self.cuts_session_key, guid, "blue", n)
+            if len(_flag_dues_pending) < MAX_FLAG_DUES_PENDING:
+                _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind="blue", seq=n, seconds=rule["unserved_s"] if step == 0 else step, ts=time.time())
+                if step == 0:
+                    self.flag_dt_open[key] = (car, self.clock.time())
+            else:
+                log.error("flags: pending ledger full; offence could not be queued: %s", key)
+        self.audit("blue_offence", car=car, by=by, driver=guid, seq=n, step=step, executed=True)
+        self.blue_new.append({"car": car, "seq": n, "step": step, "laps": CUT_DT_LAPS})
+        self._bump()
+
+    def take_blue_offences(self) -> list[dict]:
+        with _lock:
+            out, self.blue_new = self.blue_new, []
+            return out
 
     def auto_for(self, slot: int, generation: int, mono: float, fresh_modes: dict | None = None, model: str | None = None) -> dict | None:
         """What this driver's screen may show now: the automatic flags (blue / danger: only the types set to `live` in the monitor's reading AND in `fresh_modes`, the one the request has just made, and not
@@ -1052,6 +1130,12 @@ class RaceControl:
             res = None
             if live and self.flag in ("green", "white") and self.autoflags.last is not None and mono - self.autoflags.last <= AUTO_MAX_AGE_S:
                 res = self.autoflags.for_slot(slot, generation, mono, live)
+                if res and res.get("blue") and "blue" in live and self._blue_rule()["ladder"]:   # the counter next to the flag: seconds left to let him through, offences so far, the step of the next one
+                    rule, k = self._blue_rule(), (slot, res["blue"]["by"])
+                    guid = str(self.audit_guids.get(slot) or "")
+                    n = self.blue_count.get(guid or f"car{slot}", 0)
+                    ladder = rule["ladder"]
+                    res["blue"].update(left_s=max(0, math.ceil(rule["yield_s"] - (mono - self.blue_since.get(k, mono)))), n=n, step=ladder[min(n, len(ladder) - 1)], ignored=k in self.blue_ignored)
             if vsc is not None:
                 res = {**(res or {"blue": None, "danger": None, "age_ms": 0, "session": self.autoflags.uid}), "vsc": vsc}
             return res
@@ -1459,6 +1543,32 @@ def flag_modes_of(server_id: int) -> dict | None:
         return None
 
 
+def blue_rule_peek(server_id: int) -> dict | None:
+    try:
+        from app.league import blue_rule_cached   # (late: league imports servers, which imports this module)
+        return blue_rule_cached(server_id)
+    except Exception:   # noqa: BLE001 - never let this break the monitor
+        return None
+
+
+def blue_rule_stale(server_id: int) -> bool:
+    try:
+        from app.league import blue_rule_stale as stale
+        return stale(server_id)
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def blue_rule_of(server_id: int) -> dict | None:
+    """Read from the database when the cache is stale: only from a request thread or a worker."""
+    try:
+        from app.league import blue_rule
+        return blue_rule(server_id)
+    except Exception:   # noqa: BLE001
+        log.warning("blue rule of server %s could not be read", server_id, exc_info=True)
+        return None
+
+
 def drs_rule_peek(server_id: int) -> dict | None:
     """The DRS rule as it was last read (no database, no waiting): what the monitor uses on the event loop."""
     try:
@@ -1562,6 +1672,31 @@ _cut_dues_pending: dict[tuple, dict] = {}   # protected by _lock, retained acros
 def pending_cut_dues() -> list[dict]:
     with _lock:
         return [dict(row) for row in _cut_dues_pending.values()]
+
+
+from app.rulebook import BlueRule   # noqa: E402  (after the module's own names: rulebook imports nothing of this module)
+
+BLUE_DEFAULT = BlueRule().model_dump()   # what a server with no applied rulebook uses for the blue flag
+MAX_FLAG_DUES_PENDING = 2000
+_flag_dues_pending: dict[tuple, dict] = {}   # sanctions for ignored flags waiting to be written (protected by _lock, retained across session changes)
+_flag_served: set[tuple] = set()   # keys of flag drive-throughs served, waiting to be written
+
+
+def pending_flag_dues() -> list[dict]:
+    with _lock:
+        return [dict(row) for row in _flag_dues_pending.values()]
+
+
+def pending_flag_served() -> set[tuple]:
+    with _lock:
+        return set(_flag_served)
+
+
+def acknowledge_flag(rows: list[dict], served: set[tuple]) -> None:
+    with _lock:
+        for row in rows:
+            _flag_dues_pending.pop((row["server_id"], row["session_key"], row["driver_guid"], row["kind"], row["seq"]), None)
+        _flag_served.difference_update(served)
 
 
 MAX_DRS_DUES_PENDING = 2000

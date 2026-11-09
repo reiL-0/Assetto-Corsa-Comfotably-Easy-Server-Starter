@@ -15,6 +15,13 @@ def run(af, cars, speeds=None, now=100.0, pit=(), length=L, racing=True):
     af.step(now, {c: smp(m, now) for c, m in cars.items()}, speeds if speeds is not None else {c: 150.0 for c in cars}, set(pit), length, racing)
 
 
+
+def _pace(rc, *cars):
+    """The blue flag needs to know the pace of both cars (app/live/flagpace.py): the higher car number is the quicker one here."""
+    for c in cars:
+        for _ in range(3):
+            rc.pace.lap(c, 100000 - c * 1000, True)
+
 def test_blue_for_the_car_a_leader_is_about_to_lap_with_hysteresis_and_end_on_pass():
     af = AutoFlags()
     # car 2 is a lap ahead of car 1 in progress and 120 m behind it on the track
@@ -88,6 +95,7 @@ def test_the_registry_runs_it_in_a_race_only():
     from app.live.racecontrol import RACE_TYPE, RaceControl
 
     rc = RaceControl({"session_type": RACE_TYPE})
+    _pace(rc, 1, 2)
     cars = {1: smp(4000.0, 100.0), 2: smp(6880.0, 100.0)}
     rc.autoflags_tick(cars, {1: 150.0, 2: 150.0}, L, 100.0, 1000.0)
     assert rc.autoflags.view()["blue"] == [{"car": 1, "by": 2, "m": 120}]
@@ -117,6 +125,7 @@ def _live_rc(**modes):
 
     rc = RaceControl({"session_type": RACE_TYPE})
     rc.flag_modes = {"blue": "shadow", "danger": "shadow", **modes}
+    _pace(rc, 1, 2)
     cars = {1: smp(4000.0, 100.0), 2: smp(6880.0, 100.0)}
     rc.autoflags_tick(cars, {1: 150.0, 2: 150.0}, L, 100.0, 1000.0)
     return rc
@@ -125,7 +134,7 @@ def _live_rc(**modes):
 def test_a_screen_gets_only_live_types_from_a_fresh_look_for_its_own_slot():
     assert _live_rc().auto_for(1, 0, 100.5) is None, "shadow: nothing reaches the screen"
     rc = _live_rc(blue="live")
-    assert rc.auto_for(1, 0, 100.5) == {"blue": {"by": 2, "m": 120}, "danger": None, "age_ms": 500, "session": rc.autoflags.uid}
+    assert rc.auto_for(1, 0, 100.5) == {"blue": {"by": 2, "m": 120, "left_s": 15, "n": 0, "step": 0, "ignored": False}, "danger": None, "age_ms": 500, "session": rc.autoflags.uid}
     assert rc.auto_for(2, 0, 100.5) is None, "the faster car has no flag"
     assert rc.auto_for(1, 1, 100.5) is None, "the slot changed hands since the look"
     assert rc.auto_for(1, 0, 104.0) is None, "a look older than 3 s is not served"

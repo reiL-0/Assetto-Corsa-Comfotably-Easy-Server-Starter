@@ -96,6 +96,19 @@ class DrsRule(_Strict):
         return self
 
 
+class BlueRule(_Strict):
+    """The blue flag as a rule (app/live/flagpace.py, RaceControl.autoflags_tick). It shows only when the car behind has more PACE than the one it is about to lap (the median of its last `pace_laps` clean laps is at
+    least `pace_margin_pct` % better; with no pace known there is no blue), and not in NASCAR. A driver who has not let it through after `yield_s` seconds commits one offence per appearance of the flag: the
+    `ladder` gives the sanction of the n-th offence (0 = a drive-through, N = N seconds on the result; the last step repeats; empty = no sanction), and a drive-through nobody served costs `unserved_s` seconds.
+    Only sanctions when the league set the blue flag to `live` (FlagsRule)."""
+
+    yield_s: int = Field(default=15, ge=3, le=120)
+    pace_margin_pct: float = Field(default=0.7, ge=0, le=10, allow_inf_nan=False)
+    pace_laps: int = Field(default=3, ge=2, le=10)
+    ladder: list[Annotated[int, Field(ge=0, le=600)]] = Field(default_factory=lambda: [0, 5], max_length=10)
+    unserved_s: int = Field(default=10, ge=1, le=60)
+
+
 class FlagsRule(_Strict):
     """The flags that need no director (app/live/autoflags.py). `shadow` (the default) decides and writes down, shows nothing; `live` shows it to the driver; `off` does not even decide."""
 
@@ -106,6 +119,7 @@ class FlagsRule(_Strict):
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
     drs: DrsRule | None = None   # None = off
+    blue: BlueRule = Field(default_factory=BlueRule)
     flags: FlagsRule = Field(default_factory=FlagsRule)
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 

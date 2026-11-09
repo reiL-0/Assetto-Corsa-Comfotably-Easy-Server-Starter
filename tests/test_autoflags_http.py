@@ -13,6 +13,9 @@ def _ready(live, mode="live"):
     client.length.configured = 3000.0
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.flag_modes = {"blue": mode, "danger": "shadow"}
+    for c in (3, 4):   # (the blue flag needs a pace: Beto, the car behind, is the quicker one)
+        for _ in range(3):
+            rc.pace.lap(c, 100000 - c * 1000, True)
     now = time.monotonic()
     client.field.update(3, 0.30, 1, now=now - 5)   # Ana, 1000 m into lap 1
     client.field.update(4, 0.30, 2, now=now - 5)   # Beto a lap ahead and on the same spot: 0 m behind her
@@ -28,7 +31,7 @@ def test_only_the_asking_driver_gets_his_flag_and_a_wrong_name_is_refused(live, 
     from app.live.field import Sample
     rc.autoflags_tick({3: Sample(1.34, 1, 0, now, now - 10), 4: Sample(2.30, 1, 0, now, now - 10)}, {3: 150.0, 4: 150.0}, 3000.0, now, time.time())
     r = _client("reporter").get(f"{V}/servers/{sid}/race-state/auto", params={"slot": 3, "name": "ana"})
-    assert r.status_code == 200 and r.json()["auto"]["blue"] == {"by": 4, "m": 120}, r.text
+    assert r.status_code == 200 and r.json()["auto"]["blue"] == {"by": 4, "m": 120, "left_s": 15, "n": 0, "step": 0, "ignored": False}, r.text   # (with the counter of the blue rule: 15 s to let him through, no offence yet, the first step is a drive-through)
     assert _client("reporter").get(f"{V}/servers/{sid}/race-state/auto", params={"slot": 4, "name": "Beto"}).json()["auto"] is None, "the car in front has no flag"
     assert _client("reporter").get(f"{V}/servers/{sid}/race-state/auto", params={"slot": 3, "name": "Beto"}).status_code == 409, "somebody else's name"
     assert _client("reporter").get(f"{V}/servers/{sid}/race-state/auto", params={"slot": 9, "name": "Ana"}).status_code == 409, "an empty slot"

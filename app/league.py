@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, give_back_penalties, neutral_penalties
+from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, flag_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -241,6 +241,7 @@ _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it 
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
 _DRS_RULES: dict[int, tuple[float, dict | None]] = {}
+_BLUE_RULES: dict[int, tuple[float, dict]] = {}
 _FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
@@ -249,7 +250,7 @@ CUT_RULE_TTL = 30.0
 def invalidate_rule_cache(server_id: int) -> None:
     """An applied session has a new snapshot; discard the previous session's rules."""
     with _cut_rule_lock:
-        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES):
+        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES, _BLUE_RULES):
             cache.pop(server_id, None)
 
 
@@ -342,6 +343,40 @@ def drs_rule(server_id: int) -> dict | None:
             _DRS_RULES.clear()
         _DRS_RULES[server_id] = (time.time(), rule)
         return rule
+
+
+def blue_rule(server_id: int) -> dict:
+    """The blue-flag rule (app/rulebook.py `BlueRule`, as a dict) of the league event running on this server; the defaults when no rulebook applies. Cached like `drs_rule`: from a request thread or a worker."""
+    hit = _BLUE_RULES.get(server_id)
+    if hit and time.time() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    with _cut_rule_lock:
+        hit = _BLUE_RULES.get(server_id)
+        if hit and time.time() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        from app.rulebook import BlueRule
+        rule = BlueRule().model_dump()
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            rb = _applied_rulebook(s, server_id, c, ev)
+            if rb:
+                rule = rb.detectors.blue.model_dump()
+        if len(_BLUE_RULES) > 64:
+            _BLUE_RULES.clear()
+        _BLUE_RULES[server_id] = (time.time(), rule)
+        return rule
+
+
+def blue_rule_cached(server_id: int) -> dict | None:
+    hit = _BLUE_RULES.get(server_id)
+    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
+
+
+def blue_rule_stale(server_id: int) -> bool:
+    hit = _BLUE_RULES.get(server_id)
+    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
 
 
 def drs_rule_cached(server_id: int) -> dict | None:
@@ -519,6 +554,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             cut_notices(sess, c, sc.server_id, f.name, parsed)
             cut_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             drs_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
+            flag_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             neutral_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             last_end = f.stat().st_mtime

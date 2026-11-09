@@ -436,6 +436,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             pace = rc0.pace_car if rc0 else None   # (the pace car runs laps too: it is not the leader of anything)
             leader_laps = max((row["laps"] for row in event["leaderboard"] if row["car_id"] != pace), default=0)
             rc, actions = on_lap(self.server_id, leader_laps, event["car_id"])
+            rcb = state_of(self.server_id, True, self.session, create=(self.session or {}).get("session_type") == 3)   # (a race always has its state: the blue flag needs the pace)
+            if rcb:   # the pace of the blue flag: this lap, before the pit marker closes
+                rcb.lap_done(event["car_id"], event["laptime_ms"], event.get("cuts") or 0, next((r["laps"] for r in event["leaderboard"] if r["car_id"] == event["car_id"]), 0), time.time())
             from app.live.racecontrol import on_cuts
             on_cuts(self.server_id, self.session, event["car_id"], event.get("cuts") or 0, False)   # Always close the lap pit marker, including laps without server cuts.
             if actions:
