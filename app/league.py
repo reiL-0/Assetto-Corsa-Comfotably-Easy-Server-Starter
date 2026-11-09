@@ -404,7 +404,7 @@ def flag_modes(server_id: int) -> dict:
         hit = _FLAG_MODES.get(server_id)
         if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
             return hit[1]
-        modes = {"blue": "shadow", "danger": "shadow", "yellow": "shadow", "meatball": "shadow", "black": "shadow", "red": "shadow"}
+        modes = {k: settings.flag_modes_default for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # (no applied rulebook: the server's default, "shadow" unless the deployment says otherwise)
         with Session(engine) as s:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
