@@ -287,7 +287,7 @@ def test_a_flag_shown_by_hand_is_a_notice_for_one_driver_or_for_everybody(live):
     assert steward.post(url, json={"kind": "blue", "car_id": 3}).status_code == 200
     assert steward.post(url, json={"kind": "red"}).status_code == 200, "the red is for everybody"
     n = {x["text"]: x for x in steward.get(f"{V}/servers/{sid}/race-state").json()["notices"]}
-    assert n["BANDERA AZUL: deja pasar al más rápido"]["to"] == 3 and n["BANDERA ROJA: carrera detenida"]["to"] == -1
+    assert n["BANDERA AZUL: deja pasar al más rápido"]["to"] == 3 and n["BANDERA ROJA: vuelve a boxes"]["to"] == -1
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "green" and steward.get(f"{V}/servers/{sid}/race-state").json()["penalties"] == [], "only a notice: no rule changes"
 
 

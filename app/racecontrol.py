@@ -55,7 +55,7 @@ SAY = {"green": "BANDERA VERDE: se reanuda la carrera", "yellow": "BANDERA AMARI
 # the flags a director shows by hand to one driver (`car_id`) or to everybody: only a notice on the hub's screen, they change no rule or penalty (the website gives each its banner by text: OPR WP/banner_i18n.py)
 FLAG_NOTICES = {"blue": "BANDERA AZUL: deja pasar al más rápido", "bw-warning": "BANDERA NEGRA Y BLANCA: advertencia de conducta",
                 "meatball": "BANDERA NEGRA CON DISCO NARANJA: problema mecánico, entra a boxes", "black": "BANDERA NEGRA: entra a boxes",
-                "yellow-double": "DOBLE AMARILLA: peligro en pista, prepárate para parar", "red": "BANDERA ROJA: carrera detenida",
+                "yellow-double": "DOBLE AMARILLA: peligro en pista, prepárate para parar", "red": "BANDERA ROJA: vuelve a boxes",
                 "track-limits": "LÍMITES DE PISTA: aviso por salirte de la pista"}
 PER_DRIVER = ("blue", "bw-warning", "meatball", "black", "track-limits")   # these are for somebody: a flag to everybody would be a mistake
 MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
