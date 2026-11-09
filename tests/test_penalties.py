@@ -387,3 +387,41 @@ def test_result_rules_belong_to_its_league(same_league):
             sess.flush()
             assert sess.exec(select(Notice).where(Notice.server_id == sid)).one().value == 7000
             assert sess.exec(select(Penalty).where(Penalty.server_id == sid)).one().value == 7000
+
+
+def test_neutral_dues_become_one_capped_time_penalty_per_driver_and_are_saved_once():
+    from sqlmodel import select
+
+    from app.models import Championship, NeutralDue, Server
+    from app.racecontrol import save_neutral_dues
+    from app.stewards.auto import neutral_penalties
+    sid, filename = _sid_and_file("neutral-dues.json")
+    parsed = parse_result_file(_result(sid, filename))
+    row = {"server_id": sid, "flag_id": 1, "driver_guid": A, "driver_name": "A", "ts": 100.0, "kind": "vsc", "level": 2, "seconds": 10, "reason": "VSC: sectores en rojo tras 2 avisos"}
+    save_neutral_dues([row])
+    save_neutral_dues([row])   # (the same row again, as after a retry: left as it is)
+    with Session(engine) as sess:
+        assert len(sess.exec(select(NeutralDue).where(NeutralDue.server_id == sid)).all()) == 1, "saving it twice writes it once"
+        server = sess.get(Server, sid)
+        server.session = {**(server.session or {}), "rulebook_snapshot": {"neutralization": {"max_auto_time_penalty_s": 15}}}
+        sess.add(server)
+        league = Championship(name="neutral dues", rulebook={})
+        sess.add(league)
+        sess.flush()
+        server.session = {**server.session, "rulebook_league_id": league.id}
+        sess.add(server)
+        sess.add(ChampionshipEvent(championship_id=league.id, server_id=sid, filename=filename, rulebook_snapshot=server.session["rulebook_snapshot"]))
+        sess.add(NeutralDue(server_id=sid, flag_id=2, driver_guid=A, ts=150, kind="fcy", level=0, seconds=10, reason="FCY: delta total -1.20 s al volver a verde"))
+        sess.add(NeutralDue(server_id=sid, flag_id=1, driver_guid=B, ts=100, kind="vsc", level=2, seconds=10, reason="VSC: sectores en rojo tras 2 avisos"))
+        sess.add(NeutralDue(server_id=sid, flag_id=1, driver_guid="999", ts=100, kind="vsc", level=2, seconds=10, reason="not in the race"))
+        sess.add(NeutralDue(server_id=sid, flag_id=3, driver_guid=B, ts=900, kind="vsc", level=2, seconds=10, reason="after this race"))
+        sess.commit()
+        assert neutral_penalties(sess, league, sid, filename, parsed, 200, 0) == 2
+        sess.commit()
+        pens = {p.driver_guid: p for p in sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.auto_key.like("neutral:%"))).all()}
+        assert pens[A].kind == "time" and pens[A].value == 15000 and pens[A].created_by == "auto", "the dues of a driver are added (20 s) and limited once by the applied cap (15 s), straight onto the result"
+        assert "recortada de 20 a 15 s" in pens[A].reason and "VSC" in pens[A].reason and "FCY" in pens[A].reason
+        assert pens[B].value == 10000 and "999" not in pens
+        states = {(d.driver_guid, d.flag_id): d.state for d in sess.exec(select(NeutralDue).where(NeutralDue.server_id == sid)).all()}
+        assert states[(A, 1)] == states[(A, 2)] == states[(B, 1)] == "applied" and states[("999", 1)] == "expired" and states[(B, 3)] == "due", states
+        assert neutral_penalties(sess, league, sid, filename, parsed, 200, 0) == 0, "each due is counted once"

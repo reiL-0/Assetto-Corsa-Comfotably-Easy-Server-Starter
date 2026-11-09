@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import _event_rules, cut_notices, cut_penalties, give_back_penalties
+from app.stewards.auto import _event_rules, cut_notices, cut_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -450,6 +450,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             cut_notices(sess, c, sc.server_id, f.name, parsed)
             cut_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
+            neutral_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             last_end = f.stat().st_mtime
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)

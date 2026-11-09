@@ -39,7 +39,7 @@ from app import supervisor
 from app.auth import CurrentUser, require, require_any
 from app.config import settings
 from app.db import SessionDep, engine
-from app.models import GiveBackDue, LeagueMember, Server
+from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
@@ -64,6 +64,8 @@ MONITOR_EVERY = 0.25   # s; ACSP positions arrive about every 0.2 s
 class PenaltyCfg(BaseModel):
     kind: Literal["none", "pits"] = "pits"
     laps: int = Field(default=3, ge=1, le=LAPS_MAX)
+    warnings: int = Field(default=2, ge=1, le=5)      # a VSC by sectors: red sectors in a row that make a breach (the first one: the drive-through; as many more: the severe level)
+    severe_s: int = Field(default=10, ge=0, le=60)    # the severe penalty in seconds added to the race result (a proposal for the director); 0 = none. The FCY uses it for who did not respect the delta when the green comes
 
 
 class FlagIn(BaseModel):
@@ -186,6 +188,49 @@ def save_dues(rows: list[dict]) -> None:
         raceaudit.record(row["server_id"], "give_back_due_saved", due=row, executed=True)
 
 
+def neutral_rows_to_save() -> tuple[list[dict], list[dict]]:
+    """(the VSC / FCY time penalties that can be written now, those that never can). Runs in the event loop (it reads the live cars): a due is written for the driver in the slot NOW only if the slot has the
+    generation it had when the due was made; if the slot changed hands (or the server is gone) the due is dropped: it is never put on somebody else."""
+    from app.live.racecontrol import pending_neutral_dues
+
+    live = {i.server_id: i for i in supervisor.live()}
+    save, drop = [], []
+    for r in pending_neutral_dues():
+        inst = live.get(r["server_id"])
+        info = (inst.acsp.cars.get(r["car"]) or {}) if inst else {}
+        guid = str(info.get("driver_guid") or "")
+        if inst and guid and inst.acsp.field.generation.get(r["car"], 0) == r["generation"]:
+            save.append({**r, "driver_guid": guid, "driver_name": info.get("driver_name") or ""})
+        else:
+            drop.append(r)
+    return save, drop
+
+
+def announce_neutral(rows: list[dict]) -> None:
+    """On the screens, once each (after the row is saved): what the severe level of a VSC / FCY costs, seconds that go straight onto the race result."""
+    for r in rows:
+        inst = next((i for i in supervisor.live() if i.server_id == r["server_id"]), None)
+        rc = state_of(r["server_id"], True, inst.acsp.session) if inst else None
+        if not rc:
+            continue
+        who = _name(inst, r["car"])
+        why = "sectores en rojo bajo VSC" if r["kind"] == "vsc" else "delta de FCY no respetado al volver a verde"
+        _say(rc, f"{who}: {why} · +{r['seconds']} s al resultado", "penalty")
+        _say(rc, f"SANCIÓN: +{r['seconds']} s al resultado · {why}", "penalty", r["car"])
+
+
+def save_neutral_dues(rows: list[dict]) -> None:
+    """The time penalties of VSC / FCY written to the database (a worker thread: never the event loop). A row that is already there (same server, flag, driver and level) is left as it is."""
+    with Session(engine) as s:
+        for r in rows:
+            if s.exec(select(NeutralDue.id).where(NeutralDue.server_id == r["server_id"], NeutralDue.flag_id == r["flag_id"], NeutralDue.driver_guid == r["driver_guid"], NeutralDue.level == r["level"])).first():
+                continue
+            s.add(NeutralDue(server_id=r["server_id"], flag_id=r["flag_id"], driver_guid=r["driver_guid"], driver_name=r["driver_name"], ts=r["ts"], kind=r["kind"], level=r["level"], seconds=r["seconds"], reason=r["reason"]))
+        s.commit()
+    for r in rows:
+        raceaudit.record(r["server_id"], "neutral_due_saved", due=r, executed=True)
+
+
 def save_cut_dues() -> None:
     from app.live.racecontrol import pending_cut_dues, acknowledge_cut_dues, pending_cut_served, acknowledge_cut_served
     from app.stewards.auto import stage_cut_dues
@@ -292,6 +337,8 @@ def autoflags_tick(now: float) -> None:
                 if pen["kind"] == "pits":
                     _say(rc, f"PENALIZACIÓN: adelantar bajo {d['flag'].upper()} · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
         for d in rc.pace_tick(samples, speeds, mono, now, models):
+            if d.get("level") == 2:
+                continue   # (the severe level is a time penalty: announced when it is saved, `announce_neutral`)
             if d["applied"]:   # (what the judge did, as it was when it did it: not re-read after the lock)
                 pen = d["pen"]
                 what = f"el delta ({d['delta_s']:+.2f} s)" if d["kind"] == "delta" else f"el ritmo ({d['speed_kmh']} km/h)"
@@ -955,6 +1002,18 @@ async def monitor_forever() -> None:
                 await asyncio.to_thread(save_cut_dues)
             except Exception:
                 log.exception("cuts: pending rounds could not be saved; retained for retry")
+            try:
+                from app.live.racecontrol import acknowledge_neutral_dues
+                n_save, n_drop = neutral_rows_to_save()
+                if n_drop:
+                    log.warning("neutral: %s time penalties dropped (the slot changed hands or the server stopped): %s", len(n_drop), n_drop)
+                    acknowledge_neutral_dues(n_drop)
+                if n_save:
+                    await asyncio.to_thread(save_neutral_dues, n_save)
+                    acknowledge_neutral_dues(n_save)   # (only after the commit: a failure keeps them for the next look)
+                    announce_neutral(n_save)
+            except Exception:
+                log.exception("neutral: pending time penalties could not be saved; retained for retry")
             _unsaved_dues.extend(give_back_tick(now))
             if len(_unsaved_dues) > MAX_UNSAVED_DUES:   # (a database that has been down for minutes: what does not fit is logged whole, never dropped silently)
                 log.error("give-back: too many penalties waiting to be saved, dropping the oldest: %s", _unsaved_dues[:-MAX_UNSAVED_DUES])

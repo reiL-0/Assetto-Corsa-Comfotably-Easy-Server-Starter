@@ -85,6 +85,10 @@ class PaceDeltaJudge:
         c = self._car.get(car)
         return None if c is None else {"delta": round(c["delta"], 2)}
 
+    def totals(self) -> dict[int, tuple[int, float]]:
+        """car -> (slot generation, the delta of the whole flag without the credit limit) of the cars being judged now: what the car has gained (negative) or lost over the virtual car since the judging started."""
+        return {car: (c["generation"], c["real"]) for car, c in self._car.items()}
+
     def step(self, now: float, flag_id: int, active: bool, pace: float, band: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int]) -> list[dict]:
         """`active`: a VSC/FCY whose grace is over. `pace` and `band`: the pace and the tolerance, km/h. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""
         if not active or not pace or pace <= 0:
@@ -103,12 +107,14 @@ class PaceDeltaJudge:
                 continue
             st = self._car.get(car)
             if st is None or st["epoch"] != s.epoch or st["generation"] != s.generation or s.stamp - st["t"] > MAX_GAP_S:
-                self._car[car] = {"epoch": s.epoch, "generation": s.generation, "t": s.stamp, "delta": 0.0}   # the virtual car starts level with this one
+                self._car[car] = {"epoch": s.epoch, "generation": s.generation, "t": s.stamp, "delta": 0.0, "real": 0.0}   # the virtual car starts level with this one
                 continue
             if s.stamp <= st["t"]:
                 continue   # the same packet again
             eff = v if v <= pace else pace if v <= pace + band else v - band   # (the dead band: pace .. pace + band counts as the pace)
-            st["delta"] = min(self.credit_s, st["delta"] + (s.stamp - st["t"]) * (1.0 - eff / pace))
+            step_s = (s.stamp - st["t"]) * (1.0 - eff / pace)
+            st["delta"] = min(self.credit_s, st["delta"] + step_s)
+            st["real"] += step_s   # (no credit limit: what the car has gained or lost over the whole flag)
             st["t"] = s.stamp
             key = (flag_id, car, s.generation)
             if st["delta"] < -self.tol_s and key not in self._judged:

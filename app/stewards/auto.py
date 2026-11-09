@@ -13,7 +13,7 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.live.raceaudit import record
-from app.models import Championship, ChampionshipEvent, CutDue, Event, GiveBackDue, Notice, Penalty, ResultClose, Server
+from app.models import Championship, ChampionshipEvent, CutDue, Event, GiveBackDue, NeutralDue, Notice, Penalty, ResultClose, Server
 from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
 
@@ -117,6 +117,36 @@ def give_back_penalties(sess: Session, c: Championship, server_id: int, filename
             made += 1
         due.state = "applied"
         sess.add(due)
+    return made
+
+
+def neutral_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
+    """The time penalties of the VSC / FCY of this Race (`NeutralDue`, written while it ran: `since` is the start of the schedule, `finished_at` the end of this Race) written straight onto the result: ONE time
+    `Penalty` per driver (`auto_key` = neutral:<guid>) whose seconds are the sum of his dues, limited once by the applied cap (`neutralization.max_auto_time_penalty_s`), the reasons kept; the director can
+    remove it in the Sancionar panel like any other. A driver who is not in the classification expires his dues. Does not commit; returns how many penalties were made."""
+    rb = _applied_rules(sess, c, server_id, filename)
+    if parsed["type"] != "Race" or sess.get(ResultClose, (server_id, filename)):
+        return 0
+    racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
+    by_driver: dict[str, list[NeutralDue]] = {}
+    for due in sess.exec(select(NeutralDue).where(NeutralDue.server_id == server_id, NeutralDue.state == "due", NeutralDue.ts >= since, NeutralDue.ts <= finished_at).order_by(NeutralDue.ts)).all():
+        if due.driver_guid not in racing:
+            due.state = "expired"
+            sess.add(due)
+            continue
+        by_driver.setdefault(due.driver_guid, []).append(due)
+    made = 0
+    for guid, dues in by_driver.items():
+        total = sum(d.seconds for d in dues)
+        seconds, reason = capped_auto_time(total, rb.neutralization.max_auto_time_penalty_s, "; ".join(d.reason for d in dues if d.reason) or "VSC / FCY: delta no respetado")
+        key = f"neutral:{guid}"
+        if not sess.exec(select(Penalty.id).where(Penalty.server_id == server_id, Penalty.filename == filename, Penalty.driver_guid == guid, Penalty.auto_key == key)).first():
+            sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=guid, kind="time", value=seconds * 1000, created_by="auto", auto_key=key, reason=reason))
+            _audit_proposal(sess, server_id, "neutral_penalty", rb, driver_guid=guid, filename=filename, original_seconds=total, final_seconds=seconds, cap=rb.neutralization.max_auto_time_penalty_s)
+            made += 1
+        for d in dues:
+            d.state = "applied"
+            sess.add(d)
     return made
 
 

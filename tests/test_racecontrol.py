@@ -236,7 +236,7 @@ def test_the_vsc_through_the_api_and_the_pit_report(live):
     steward, hub = _client("steward"), _client("reporter")
     body = {"flag": "vsc", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
     r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
-    assert r.status_code == 200 and r.json()["flag"] == "vsc" and r.json()["pace_kmh"] == 60 and r.json()["grace_left"] in (4, 5) and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 2}
+    assert r.status_code == 200 and r.json()["flag"] == "vsc" and r.json()["pace_kmh"] == 60 and r.json()["grace_left"] in (4, 5) and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 2, "warnings": 2, "severe_s": 10}
     assert _notices(sid) and sent == []
     pit = f"{V}/servers/{sid}/race-control/pit"
     assert hub.post(pit, json={"car_id": 3, "name": "ana", "pit": False}).status_code == 204
