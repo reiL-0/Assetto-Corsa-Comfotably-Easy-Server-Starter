@@ -96,16 +96,81 @@ class DrsRule(_Strict):
         return self
 
 
+class BlueRule(_Strict):
+    """The blue flag as a rule (app/live/flagpace.py, RaceControl.autoflags_tick). It shows only when the car behind has more PACE than the one it is about to lap (the median of its last `pace_laps` clean laps is at
+    least `pace_margin_pct` % better; with no pace known there is no blue), and not in NASCAR. A driver who has not let it through after `yield_s` seconds commits one offence per appearance of the flag: the
+    `ladder` gives the sanction of the n-th offence (0 = a drive-through, N = N seconds on the result; the last step repeats; empty = no sanction), and a drive-through nobody served costs `unserved_s` seconds.
+    Only sanctions when the league set the blue flag to `live` (FlagsRule)."""
+
+    yield_s: int = Field(default=15, ge=3, le=120)
+    pace_margin_pct: float = Field(default=0.7, ge=0, le=10, allow_inf_nan=False)
+    pace_laps: int = Field(default=3, ge=2, le=10)
+    ladder: list[Annotated[int, Field(ge=0, le=600)]] = Field(default_factory=lambda: [0, 5], max_length=10)
+    unserved_s: int = Field(default=10, ge=1, le=60)
+
+
+_Ladder = list[Annotated[int, Field(ge=0, le=600)]]   # a sanction ladder: 0 = a drive-through, N = N seconds on the result; the last step repeats; empty = no sanction
+
+
+class YellowRule(_Strict):
+    """A yellow flag: no overtaking. Whoever passes owes the place for `window_s` seconds (app/live/nopass.py, the judge of the VSC/FCY); one who does not give it back commits an offence."""
+
+    window_s: int = Field(default=15, ge=5, le=60)
+    ladder: _Ladder = Field(default_factory=lambda: [0, 5], max_length=10)
+    unserved_s: int = Field(default=10, ge=1, le=60)
+
+
+class MeatballRule(_Strict):
+    """ORANGE DISC: a car with mechanical damage of `damage_pct` % or more (read by the driver's own game and reported to the manager) must come into the pits within `pit_laps` laps, or it gets the black flag.
+    `use_speed` adds the speed test (off by default): a car running under `slow_pct` % of the speed of the cars around it for `sustained_s` seconds counts too."""
+
+    damage_pct: int = Field(default=60, ge=5, le=100)
+    pit_laps: int = Field(default=2, ge=1, le=10)
+    use_speed: bool = False
+    slow_pct: int = Field(default=40, ge=10, le=80)
+    sustained_s: int = Field(default=20, ge=5, le=120)
+
+
+class BlackRule(_Strict):
+    """BLACK AND WHITE then BLACK. Every sanction a driver earns in the race (from the flags, DRS, the cuts ladder) is a conduct offence: at `bw_at` of them the black-and-white flag warns him (no sanction), at `black_at` he
+    gets the BLACK flag (also from an orange disc or a red flag that was not obeyed): he must come into the pits within `pit_laps` laps (the counter starts again) or he is DISQUALIFIED from the race."""
+
+    bw_at: int = Field(default=3, ge=1, le=20)
+    black_at: int = Field(default=6, ge=2, le=40)
+    pit_laps: int = Field(default=3, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def _order(self) -> BlackRule:
+        if self.black_at <= self.bw_at:
+            raise ValueError("black_at must be over bw_at")
+        return self
+
+
+class RedRule(_Strict):
+    """RED flag: the director shows it and every car must come into the pit lane before it completes `laps` more lap(s) (by default: when it finishes the lap it is on); one that does not gets the BLACK flag."""
+
+    laps: int = Field(default=1, ge=1, le=3)
+
+
 class FlagsRule(_Strict):
     """The flags that need no director (app/live/autoflags.py). `shadow` (the default) decides and writes down, shows nothing; `live` shows it to the driver; `off` does not even decide."""
 
     blue: Literal["off", "shadow", "live"] = "shadow"
     danger: Literal["off", "shadow", "live"] = "shadow"
+    yellow: Literal["off", "shadow", "live"] = "shadow"
+    meatball: Literal["off", "shadow", "live"] = "shadow"
+    black: Literal["off", "shadow", "live"] = "shadow"   # (black and white and black: one switch)
+    red: Literal["off", "shadow", "live"] = "shadow"
 
 
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
     drs: DrsRule | None = None   # None = off
+    blue: BlueRule = Field(default_factory=BlueRule)
+    yellow: YellowRule = Field(default_factory=YellowRule)
+    meatball: MeatballRule = Field(default_factory=MeatballRule)
+    black: BlackRule = Field(default_factory=BlackRule)
+    red: RedRule = Field(default_factory=RedRule)
     flags: FlagsRule = Field(default_factory=FlagsRule)
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
 

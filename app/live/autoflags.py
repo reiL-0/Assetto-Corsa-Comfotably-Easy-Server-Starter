@@ -39,6 +39,7 @@ class AutoFlags:
         self.modes = {"blue": "shadow", "danger": "shadow"}   # `off` types are not decided at all
         self.last: float | None = None                   # monotonic time of the last look (the age of what is served)
         self.gen: dict[int, int] = {}                    # slot -> generation of the slot at the last look
+        self.pace_ok = None                              # callable(behind, ahead, open_already) -> bool: the blue only shows when the car behind has the pace to catch the other (app/live/flagpace.py); None = no gate
 
     def reset(self) -> None:
         self.blue.clear(); self.danger.clear(); self._moved.clear(); self._still.clear(); self._gen.clear(); self.unknown_length = False
@@ -93,7 +94,7 @@ class AutoFlags:
                 if lead < 1.0 - BLUE_OFF_M / length:
                     continue
                 on = (a, b) in self.blue
-                if behind_m <= (BLUE_OFF_M if on else BLUE_ON_M):
+                if behind_m <= (BLUE_OFF_M if on else BLUE_ON_M) and (self.pace_ok is None or self.pace_ok(b, a, on)):
                     blue[(a, b)] = behind_m
         danger: dict[tuple[int, int], int] = {}
         for s in stopped & ok.keys():

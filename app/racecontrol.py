@@ -43,7 +43,7 @@ from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, flag_rules_of, flag_rules_peek, flag_rules_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -127,6 +127,49 @@ def _due_notices(inst, rc, car: int, seconds: int) -> None:
 
 _unsaved_dues: list[dict] = []   # penalties that fell due and could not be written yet: tried again at every tick
 MAX_UNSAVED_DUES = 1000
+
+
+def _flag_messages(inst, rc) -> None:
+    """Tell the drivers what the flags cost them (offences) and who they must give a place back to (a yellow). The discs, the black and the red flags are not notices: the hub draws them from its own state."""
+    for o in rc.take_flag_messages():
+        car, kind, step = o["car"], o.get("kind"), o.get("step")
+        if o["msg"] == "yellow_open" and o["live"]:
+            names = ", ".join(_name(inst, c) for c in o["passed"])
+            secs = o["seconds"]
+            _say(rc, f"ADELANTASTE BAJO AMARILLA: devuelve la posición a {names} · {secs} s", "flag", car)
+        elif o["msg"] != "offence":
+            continue
+        elif kind == "blue" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "blue":
+            _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · +{step} s", "penalty", car)
+        elif kind == "yellow" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "yellow":
+            _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
+        elif kind == "black":
+            _say(rc, "DESCALIFICADO: ignoraste la bandera negra", "penalty", car)
+
+
+def blue_stale_servers() -> list[int]:
+    """Servers in a race whose cached blue-flag rule has to be read again (a worker thread does it: never the event loop)."""
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and flag_rules_stale(i.server_id)]
+
+
+def save_flag_dues() -> None:
+    from app.live.racecontrol import acknowledge_flag, pending_flag_dues, pending_flag_served
+    from app.stewards.auto import stage_flag_dues
+    served, rows = pending_flag_served(), pending_flag_dues()   # (served first: its row was queued before it, so the rows read next hold it unless it is already saved)
+    if not rows and not served:
+        return
+    with Session(engine) as s:
+        stage_flag_dues(s, rows, served)
+        s.commit()
+    acknowledge_flag(rows, served)
+    for row in rows:
+        raceaudit.record(row["server_id"], "flag_due_saved", due=row, executed=True)
 
 
 def drs_stale_servers() -> list[int]:
@@ -341,18 +384,22 @@ def autoflags_tick(now: float) -> None:
     for inst in supervisor.live():
         if (inst.acsp.session or {}).get("session_type") != RACE_TYPE:
             continue
-        rc = state_of(inst.server_id, True, inst.acsp.session)
+        rc = state_of(inst.server_id, True, inst.acsp.session, create=True)   # (a race always has its state: the blue flag needs the pace of its cars)
         if not rc:
             continue
+        rc.rules = flag_rules_peek(inst.server_id)
+        rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}   # (who is in each slot NOW: a sanction needs a name, not only a number)
         out = _non_racing_guids(now)
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
-        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}
+        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow", "yellow": "shadow", "meatball": "shadow", "black": "shadow", "red": "shadow"}
         if rc.flag_modes != modes:
             rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
+        rc.yellow_tick(samples, speeds, mono, now)
+        _flag_messages(inst, rc)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
         for d in rc.pass_tick(samples, speeds, mono, now):
             if not d["applied"]:
@@ -496,6 +543,25 @@ def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
         _say(rc, f"PENALIZACIÓN: DRS con el DRS inactivo · drive-through ({laps} vueltas)", "penalty", body.car_id)
 
 
+class DamageIn(BaseModel):
+    car_id: int = Field(ge=0, le=255)
+    name: str = Field(max_length=80)
+    level: int = Field(ge=0, le=100)
+
+
+@state_router.post("/race-control/damage", status_code=204)
+def report_damage(server_id: int, body: DamageIn, sess: SessionDep) -> None:
+    """The hub of a car says how damaged it is (0-100 %, read by its own game): client evidence for the orange disc (rule `meatball`). 409 when that car is not that driver, like the other hub reports."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    car = inst.acsp.cars.get(body.car_id) if inst else None
+    if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
+        raise HTTPException(409, "that car is not that driver")
+    rc = state_of(server_id, True, inst.acsp.session)
+    if rc:
+        rc.damage_report(body.car_id, body.level, time.time())
+
+
 def _control(server_id: int, sess: SessionDep):
     server = _get(sess, server_id)
     inst = _live(server_id)
@@ -543,6 +609,8 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
     if body.kind in PER_DRIVER and body.car_id is None:
         raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
     _, rc = _control(server_id, sess)
+    if body.kind == "red":
+        rc.set_red(True)   # (the cars have `pit_s` seconds to be in the pit lane; the next flag withdraws it)
     _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
     log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()
@@ -1039,6 +1107,8 @@ async def monitor_forever() -> None:
                     await asyncio.to_thread(neutralization_rule, inst.server_id)
             for sid in flag_modes_stale_servers():
                 await asyncio.to_thread(flag_modes_of, sid)
+            for sid in blue_stale_servers():
+                await asyncio.to_thread(flag_rules_of, sid)
             for sid in drs_stale_servers():
                 await asyncio.to_thread(drs_rule_of, sid)
             for sid in give_back_stale_servers():
@@ -1061,6 +1131,10 @@ async def monitor_forever() -> None:
                 await asyncio.to_thread(save_cut_dues)
             except Exception:
                 log.exception("cuts: pending rounds could not be saved; retained for retry")
+            try:
+                await asyncio.to_thread(save_flag_dues)
+            except Exception:
+                log.exception("flags: pending sanctions could not be saved; retained for retry")
             try:
                 await asyncio.to_thread(save_drs_dues)
             except Exception:

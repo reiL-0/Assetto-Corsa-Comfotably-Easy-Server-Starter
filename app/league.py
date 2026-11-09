@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, give_back_penalties, neutral_penalties
+from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, flag_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -241,6 +241,7 @@ _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it 
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
 _DRS_RULES: dict[int, tuple[float, dict | None]] = {}
+_FLAG_RULES: dict[int, tuple[float, dict]] = {}
 _FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
@@ -249,7 +250,7 @@ CUT_RULE_TTL = 30.0
 def invalidate_rule_cache(server_id: int) -> None:
     """An applied session has a new snapshot; discard the previous session's rules."""
     with _cut_rule_lock:
-        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES):
+        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES, _FLAG_RULES):
             cache.pop(server_id, None)
 
 
@@ -344,6 +345,45 @@ def drs_rule(server_id: int) -> dict | None:
         return rule
 
 
+FLAG_RULE_KINDS = ("blue", "yellow", "meatball", "black", "red")
+
+
+def flag_rules(server_id: int) -> dict:
+    """The rules of the flags (app/rulebook.py: BlueRule, YellowRule, MeatballRule, BlackRule, RedRule, each as a dict) of the league event running on this server; the defaults when no rulebook applies.
+    Cached like `drs_rule`: from a request thread or a worker, never the event loop."""
+    hit = _FLAG_RULES.get(server_id)
+    if hit and time.time() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    with _cut_rule_lock:
+        hit = _FLAG_RULES.get(server_id)
+        if hit and time.time() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        from app.rulebook import Detectors
+        det = Detectors()
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            rb = _applied_rulebook(s, server_id, c, ev)
+            if rb:
+                det = rb.detectors
+        rules = {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}
+        if len(_FLAG_RULES) > 64:
+            _FLAG_RULES.clear()
+        _FLAG_RULES[server_id] = (time.time(), rules)
+        return rules
+
+
+def flag_rules_cached(server_id: int) -> dict | None:
+    hit = _FLAG_RULES.get(server_id)
+    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
+
+
+def flag_rules_stale(server_id: int) -> bool:
+    hit = _FLAG_RULES.get(server_id)
+    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
+
+
 def drs_rule_cached(server_id: int) -> dict | None:
     """What `drs_rule` read last (no database, no waiting): for the monitor, which runs on the event loop."""
     hit = _DRS_RULES.get(server_id)
@@ -364,7 +404,7 @@ def flag_modes(server_id: int) -> dict:
         hit = _FLAG_MODES.get(server_id)
         if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
             return hit[1]
-        modes = {"blue": "shadow", "danger": "shadow"}
+        modes = {"blue": "shadow", "danger": "shadow", "yellow": "shadow", "meatball": "shadow", "black": "shadow", "red": "shadow"}
         with Session(engine) as s:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
@@ -519,6 +559,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             cut_notices(sess, c, sc.server_id, f.name, parsed)
             cut_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             drs_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
+            flag_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             neutral_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             last_end = f.stat().st_mtime

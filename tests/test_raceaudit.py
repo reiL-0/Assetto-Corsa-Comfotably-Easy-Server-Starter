@@ -191,6 +191,9 @@ def test_276_automatic_decisions_in_one_step_are_accounted():
 
     rc = RaceControl({"session_type": 3})
     rc.server_id = 987657
+    for car in range(24):   # (the blue flag needs a pace: the higher number is the quicker car)
+        for _ in range(3):
+            rc.pace.lap(car, 100000 - car * 1000, True)
     samples = {car: Sample(car + .125, 0, 0, 10, 0) for car in range(24)}
     rc.autoflags_tick(samples, {car: 100 for car in samples}, 5000, 10, 1000)
     assert raceaudit.flush()

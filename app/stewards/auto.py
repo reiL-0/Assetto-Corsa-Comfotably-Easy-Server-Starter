@@ -13,7 +13,7 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.live.raceaudit import record
-from app.models import Championship, ChampionshipEvent, CutDue, DrsDue, Event, GiveBackDue, NeutralDue, Notice, Penalty, ResultClose, Server
+from app.models import Championship, ChampionshipEvent, CutDue, DrsDue, Event, FlagDue, GiveBackDue, NeutralDue, Notice, Penalty, ResultClose, Server
 from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
 
@@ -188,6 +188,49 @@ def stage_drs_dues(sess: Session, rows: list[dict], served: set[tuple] = frozens
         sess.execute(insert(DrsDue).values(**row, state="due").on_conflict_do_nothing(index_elements=["server_id", "session_key", "driver_guid", "period"]))
     for server_id, session_key, guid, period in served:
         sess.execute(update(DrsDue).where(DrsDue.server_id == server_id, DrsDue.session_key == session_key, DrsDue.driver_guid == guid, DrsDue.period == period, DrsDue.state == "due").values(state="served"))
+
+
+def stage_flag_dues(sess: Session, rows: list[dict], served: set[tuple] = frozenset()) -> None:
+    """Idempotent inserts of the sanctions for ignored flags, then the drive-throughs served (a `due` one becomes `served`, never back); the caller owns the transaction and acknowledges after commit."""
+    from sqlalchemy.dialects.sqlite import insert
+    for row in rows:
+        sess.execute(insert(FlagDue).values(**row, state="due").on_conflict_do_nothing(index_elements=["server_id", "session_key", "driver_guid", "kind", "seq"]))
+    for server_id, session_key, guid, kind, seq in served:
+        sess.execute(update(FlagDue).where(FlagDue.server_id == server_id, FlagDue.session_key == session_key, FlagDue.driver_guid == guid, FlagDue.kind == kind,
+                                           FlagDue.seq == seq, FlagDue.state == "due").values(state="served"))
+
+
+FLAG_REASONS = {"blue": "No cedió el paso a la bandera azul", "yellow": "Adelantó bajo bandera amarilla", "black": "Ignoró la bandera negra"}
+
+
+def flag_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
+    """Sanctions for ignored flags (`FlagDue`, app/live/racecontrol.py): every one of this server that fell due while this schedule ran (`since` up to the end of this Race) and is still due becomes a time `Penalty`
+    on this result, once (`auto_key` = flag:<id>); a drive-through that was served only closes; a `black` one (the black flag not obeyed) is a disqualification (`dsq`). The seconds are the ones the rule's ladder gave (or `unserved_s` for a drive-through nobody served); a driver who is not
+    in the result: `expired`. Does not commit; returns how many penalties were made."""
+    rb = _applied_rules(sess, c, server_id, filename)
+    if parsed["type"] != "Race" or sess.get(ResultClose, (server_id, filename)):
+        return 0
+    from app.live.racecontrol import pending_flag_dues, pending_flag_served
+    stage_flag_dues(sess, [r for r in pending_flag_dues() if r["server_id"] == server_id], {k for k in pending_flag_served() if k[0] == server_id})   # (the last ones, even if the monitor has not written them yet)
+    racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
+    made = 0
+    for due in sess.exec(select(FlagDue).where(FlagDue.server_id == server_id, FlagDue.state.in_(("due", "served")), FlagDue.ts >= since, FlagDue.ts <= finished_at).order_by(FlagDue.ts)).all():
+        if due.driver_guid not in racing:
+            due.state = "expired"
+        else:
+            if due.state == "due":
+                key = f"flag:{due.id}"
+                if not sess.exec(select(Penalty.id).where(Penalty.auto_key == key)).first():
+                    if due.kind == "black":   # the black flag not obeyed: disqualified
+                        sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="dsq", value=0, auto_key=key, created_by="auto", reason=FLAG_REASONS["black"]))
+                    else:
+                        sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="time", value=due.seconds * 1000, auto_key=key, created_by="auto",
+                                         reason=f"{FLAG_REASONS.get(due.kind, due.kind)} (infracción {due.seq})"))
+                    _audit_proposal(sess, server_id, "flag_penalty", rb, driver_guid=due.driver_guid, filename=filename, flag=due.kind, seq=due.seq, final_seconds=due.seconds, source="auto")
+                    made += 1
+            due.state = "applied"
+        sess.add(due)
+    return made
 
 
 def drs_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
