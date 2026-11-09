@@ -132,7 +132,9 @@ def test_red_flag_sends_the_black_flag_to_whoever_does_not_come_in_before_the_la
     rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")   # car 1 finished its lap on the track: the black flag
     rc.lap_done(2, 100000, 0, 5, 1050.0, "G2")   # car 2 had come in: it obeyed
     assert "G1" in rc.black and "G2" not in rc.black
-    rc.set_flag("green")
+    rc.set_flag("checkered"); rc.set_flag("green")
+    assert rc.red_since is not None and "red" in (rc.auto_for(3, 0, 1.0) or {}), "the red flag goes with any track flag"
+    rc.set_red(False)
     assert rc.red_since is None and "red" not in (rc.auto_for(3, 0, 1.0) or {})
     rcmod._flag_dues_pending.clear()
 

@@ -133,7 +133,7 @@ class RaceControl:
         self.black: dict[str, dict] = {}                     # driver -> {car, laps}: the black flag, and the laps he has left to come into the pits
         self.meatball: dict[str, dict] = {}                  # driver -> {car, laps}: the orange disc, and the laps he has left to come into the pits
         self._slow_since: dict[int, float] = {}              # car -> since when it runs far below the speed of the cars around it
-        self.red_since: float | None = None                  # wall time the director showed the red flag (cleared by the next flag)
+        self.red_since: float | None = None                  # wall time the director showed the red flag (independent of the track flag: it goes with the chequered, white or green one; only `set_red(False)` withdraws it)
         self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.yellowjudge = PassJudge(15.0)                   # no overtaking under a plain yellow (the same judge as the VSC/FCY one, its own instance)
@@ -188,6 +188,7 @@ class RaceControl:
         self.caution_notified = False      # the director was told that the track did not clear: the 'to go' is theirs
         self.stage_log: dict[int, list[str]] = {}   # NASCAR: stage number -> the steam ids in the order of the field when it ended (app/racecontrol.py `_record_stage`)
         self.finish_wait: set[int] | None = None
+        self.last_lap_orig: dict | None = None               # the session's own laps/time_min before the director's white flag cut it to the last lap (put back if the race goes on: yellow or green)
         self.finish_deadline = 0.0
         self.next_at: float | None = None
         self.next_delay_s = NEXT_SESSION_DELAY
@@ -263,8 +264,6 @@ class RaceControl:
                 raise ValueError("the mode of a VSC is fixed or delta")
             pen = self._clean_penalty(penalty or DEFAULT_PENALTY)
         with _lock:
-            if self.red_since is not None:   # (any new flag withdraws the red one)
-                self.red_since = None; self.red_laps = {}
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
                 self.flag = "green"

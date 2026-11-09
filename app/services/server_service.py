@@ -230,8 +230,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     if body.admin_password is not None:
         srv["ADMIN_PASSWORD"] = body.admin_password
     srv.update(LOOP_MODE=int(body.loop), REVERSED_GRID_RACE_POSITIONS=body.reversed_grid)
-    for key, value in (("SLEEP_TIME", 1), ("REGISTER_TO_LOBBY", 0)):
-        srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics
+    for key, value in (("SLEEP_TIME", 1), ("REGISTER_TO_LOBBY", 0), ("RACE_OVER_TIME", 180)):
+        srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics; RACE_OVER_TIME written out (stock value): the rest of the grid gets time to cross the line after the winner
     for sec in ("PRACTICE", "QUALIFY", "RACE"):
         cfg.pop(sec, None)
     if body.practice_min:

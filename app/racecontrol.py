@@ -573,6 +573,57 @@ def _control(server_id: int, sess: SessionDep):
     return inst, rc
 
 
+def last_lap_bytes(session: dict, leader_laps: int, elapsed_ms: int, restore: dict | None = None) -> tuple[bytes, dict] | None:
+    """The director's white flag is the last lap, in a laps race or a timed one: acServer is told (SET_SESSION_INFO) to end the race after the lap the leader is on. A laps race: the distance becomes
+    the leader's laps + 1; a timed one: the time is cut to what has elapsed (the leader's next crossing is then the chequered). Returns (packet, what to put back); `restore` = the originals: the packet
+    that gives them back (yellow or green after the white flag). None when the session is not a race or has nothing to cut."""
+    if session.get("session_type") != RACE_TYPE or session.get("session_index") is None:
+        return None
+    laps, minutes = int(session.get("laps") or 0), int(session.get("time_min") or 0)
+    if restore is not None:
+        laps, minutes = restore["laps"], restore["time_min"]
+    elif laps:
+        if leader_laps + 1 >= laps:
+            return None   # (already the last lap)
+        laps = leader_laps + 1
+    elif minutes:
+        minutes = max(1, elapsed_ms // 60000)
+    else:
+        return None
+    pkt = acsp.encode_set_session_info(session["session_index"], session.get("name", ""), RACE_TYPE, laps, minutes, int(session.get("wait_time") or 0))
+    return pkt, {"laps": int(session.get("laps") or 0), "time_min": int(session.get("time_min") or 0)}
+
+
+def apply_last_lap(inst, rc, flag: str) -> None:
+    """A director's flag: white = this is the last lap (any race); yellow/green/VSC/FCY after it = the race goes on, the original distance or time is given back. NASCAR moves its own distance."""
+    ses = inst.acsp.session or {}
+    if ses.get("session_type") != RACE_TYPE:
+        return
+    leader = max(0, rc.leader_laps_seen - rc.lap_base)
+    if rc.nascar:
+        if flag == "white" and rc.last_lap_orig is None and rc.nascar.phase == "racing" and rc.nascar.laps + 1 < rc.nascar.total:
+            total = rc.nascar.total
+            try:
+                rc.nascar.set_total(max(2, rc.nascar.laps + 1))
+                rc.last_lap_orig = {"total": total}   # (only if the distance moved: explicit stage ends refuse it and the engine keeps its own white flag)
+            except ValueError:
+                log.info("white flag: this NASCAR race has explicit stage ends, its distance stays")
+        elif flag != "white" and rc.last_lap_orig and flag != "checkered":
+            total, rc.last_lap_orig = rc.last_lap_orig["total"], None
+            rc.nascar.set_total(total)
+        return
+    if flag == "white" and rc.last_lap_orig is None:
+        out = last_lap_bytes(ses, leader, inst.acsp.board.elapsed_ms())
+        if out:
+            rc.last_lap_orig = out[1]
+            inst.acsp.send(out[0])
+    elif flag in ("yellow", "green", "vsc", "fcy") and rc.last_lap_orig:
+        out = last_lap_bytes(ses, leader, 0, restore=rc.last_lap_orig)
+        rc.last_lap_orig = None
+        if out:
+            inst.acsp.send(out[0])
+
+
 @control_router.post("")
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
@@ -593,6 +644,8 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
         laps = max(0, rc.leader_laps_seen - (rc.lap_base if rc.nascar else 0))
         if laps > 0:
             _mark_finish(server_id, laps)
+    with _lock:
+        apply_last_lap(inst, rc, body.flag)
     nascar_actions(server_id, rc, actions)   # (after the director's own notice: a white flag the engine adds comes last)
     return rc.snapshot()
 
@@ -600,6 +653,7 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
 class FlagNoticeIn(BaseModel):
     kind: Literal["blue", "bw-warning", "meatball", "black", "yellow-double", "red", "track-limits"]
     car_id: int | None = Field(default=None, ge=0, le=255)   # None = every driver (yellow-double and red only)
+    on: bool = True   # red only: False withdraws it (the red flag lives next to the track flag, no flag withdraws it)
 
 
 @control_router.post("/flag-notice")
@@ -610,7 +664,9 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
         raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
     _, rc = _control(server_id, sess)
     if body.kind == "red":
-        rc.set_red(True)   # (the cars have `pit_s` seconds to be in the pit lane; the next flag withdraws it)
+        rc.set_red(body.on)   # (the cars have `pit_s` seconds to be in the pit lane; it stays beside any track flag until withdrawn)
+        if not body.on:
+            return rc.snapshot()
     _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
     log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()
