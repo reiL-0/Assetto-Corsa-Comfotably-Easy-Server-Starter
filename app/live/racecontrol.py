@@ -1339,9 +1339,11 @@ class RaceControl:
                     self.drs = None
                     self._bump()
                 return
-            if self.drs is None or self.drs.rule != rule:
+            if self.drs is None:
                 self.drs = Drs(rule)
                 self._bump()
+            elif self.drs.rule != rule:
+                self.drs.rule = rule   # (the rule changed mid-session: the periods, the restart count and who was already sanctioned stay; the next step applies the new numbers)
             if self.drs.step(now, laps, self.flag in ("green", "white"), signal):
                 self._bump()
                 self.audit("drs", state=self.drs.view(), window=self.drs.window, executed=True)
