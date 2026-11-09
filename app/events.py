@@ -13,7 +13,7 @@ from app.db import SessionDep
 from app.league import session_for, settle_metrics
 from app.leaguelock import serialized
 from app.models import Championship, Event
-from app.rulebook import CutRule
+from app.rulebook import CutRule, DrsRule
 from app.servers import AppliedOut, SessionIn, _get, apply_to_server
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -28,6 +28,7 @@ class EventIn(BaseModel):
     count_only_league_id: int | None = None  # a practice: its result is listed in this league's results with no points; the entry list stays open
     cuts_rule: CutRule | None = None  # omitted keeps the saved choice on PUT; explicit null remains accepted for compatibility and uses the live-only default
     inherit_cuts_rule: bool = False  # true removes an override so the event inherits league rulebook
+    drs_rule: DrsRule | None = None  # the event's own DRS rules (app/live/drs.py); omitted keeps the saved ones on PUT, null removes them (the event inherits the league's rulebook, or has no DRS rules)
 
     @model_validator(mode="after")
     def _cut_choice(self) -> EventIn:
@@ -62,6 +63,7 @@ class EventOut(BaseModel):
     league_id: int | None
     count_only_league_id: int | None = None
     cuts_rule: CutRule | None = None
+    drs_rule: DrsRule | None = None
     updated_at: datetime
 
 
@@ -73,7 +75,7 @@ class RunIn(BaseModel):
 def _out(e: Event) -> EventOut:
     return EventOut(id=e.id, title=e.title, notes=e.notes, session=SessionIn(**e.data), is_default=e.is_default,
                     derived=e.derived, league_id=e.league_id, count_only_league_id=e.count_only_league_id,
-                    updated_at=e.updated_at, **({"cuts_rule": e.data["cuts_rule"]} if "cuts_rule" in e.data else {}))
+                    updated_at=e.updated_at, **({"cuts_rule": e.data["cuts_rule"]} if "cuts_rule" in e.data else {}), **({"drs_rule": e.data["drs_rule"]} if e.data.get("drs_rule") else {}))
 
 
 def _check_league(sess: SessionDep, league_id: int | None) -> None:
@@ -106,9 +108,11 @@ def create_event(body: EventIn, sess: SessionDep) -> EventOut:
     if body.league_id is not None and body.count_only_league_id is not None:
         raise HTTPException(422, "league_id and count_only_league_id are not used together")
     # Only the event-level field selects its cuts rule.
-    data = body.session.model_dump(exclude={"cuts_rule"})
+    data = body.session.model_dump(exclude={"cuts_rule", "drs_rule"})
     if "cuts_rule" in body.model_fields_set:
         data["cuts_rule"] = body.cuts_rule.model_dump() if body.cuts_rule else None
+    if body.drs_rule:
+        data["drs_rule"] = body.drs_rule.model_dump()
     e = Event(title=body.title, notes=body.notes, data=data, derived=body.derived, league_id=body.league_id, count_only_league_id=body.count_only_league_id)
     sess.add(e)
     sess.commit()
@@ -130,11 +134,16 @@ def update_event(event_id: int, body: EventIn, sess: SessionDep) -> EventOut:
     if body.league_id is not None and body.count_only_league_id is not None:
         raise HTTPException(422, "league_id and count_only_league_id are not used together")
     # Only the event-level field selects its cuts rule.
-    data = body.session.model_dump(exclude={"cuts_rule"})
+    data = body.session.model_dump(exclude={"cuts_rule", "drs_rule"})
     if "cuts_rule" in body.model_fields_set:
         data["cuts_rule"] = body.cuts_rule.model_dump() if body.cuts_rule else None
     elif not body.inherit_cuts_rule and "cuts_rule" in e.data:  # omission keeps an older client's saved choice; explicit inherit clears it
         data["cuts_rule"] = e.data["cuts_rule"]
+    if "drs_rule" in body.model_fields_set:   # (null removes them)
+        if body.drs_rule:
+            data["drs_rule"] = body.drs_rule.model_dump()
+    elif e.data.get("drs_rule"):   # omission keeps the saved DRS rules
+        data["drs_rule"] = e.data["drs_rule"]
     e.title, e.notes, e.data, e.league_id = body.title, body.notes, data, body.league_id
     if "count_only_league_id" in body.model_fields_set:   # an older client does not send it: the saved one stays, unless it names a roster league (then the two cannot both be set)
         e.count_only_league_id = body.count_only_league_id

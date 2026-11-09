@@ -140,15 +140,16 @@ def remove_member(championship_id: int, guid: str, sess: SessionDep) -> None:
 def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     """The event's session as it must be loaded at `at` (unix s): for a league event, the roster's eligible drivers as a locked
     entry list; for any other event, the saved session untouched. 409 when nobody is eligible or the roster does not fit."""
-    s = SessionIn(**{k: v for k, v in ev.data.items() if k != "cuts_rule"})
-    from app.rulebook import CutRule
+    s = SessionIn(**{k: v for k, v in ev.data.items() if k not in ("cuts_rule", "drs_rule")})
+    from app.rulebook import CutRule, DrsRule
     c = sess.get(Championship, ev.league_id) if ev.league_id else None
     if not c:
-        if "cuts_rule" not in ev.data:
+        if "cuts_rule" not in ev.data and not ev.data.get("drs_rule"):
             return s
         from app.rulebook import Rulebook
         snapshot = Rulebook()
-        snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data["cuts_rule"] is not None else None
+        snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data.get("cuts_rule") is not None else None
+        snapshot.detectors.drs = DrsRule.model_validate(ev.data["drs_rule"]) if ev.data.get("drs_rule") else None
         snapshot.detectors.give_back.enabled = False
         return s.model_copy(update={"rulebook_league_id": None, "rulebook_event_id": ev.id, "rulebook_snapshot": snapshot,
                                     "rulebook_revision": hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()})
@@ -184,6 +185,8 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     snapshot = effective(c).model_copy(deep=True)
     if "cuts_rule" in ev.data:
         snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data["cuts_rule"] is not None else None
+    if ev.data.get("drs_rule"):   # the event's own DRS rules win over the league's
+        snapshot.detectors.drs = DrsRule.model_validate(ev.data["drs_rule"])
     revision = hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()
     return s.model_copy(update={"rulebook_revision": revision, "rulebook_league_id": c.id, "rulebook_event_id": ev.id, "rulebook_snapshot": snapshot, "entries": entries, "locked": True, "pickup": False, "cars": cars})
 
@@ -231,6 +234,7 @@ DEFAULT_CUT_RULE = {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5, 
 _CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
 _GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
 _NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
+_DRS_RULES: dict[int, tuple[float, dict | None]] = {}
 _FLAG_MODES: dict[int, tuple[float, dict]] = {}
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
@@ -239,7 +243,7 @@ CUT_RULE_TTL = 30.0
 def invalidate_rule_cache(server_id: int) -> None:
     """An applied session has a new snapshot; discard the previous session's rules."""
     with _cut_rule_lock:
-        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES):
+        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES):
             cache.pop(server_id, None)
 
 
@@ -302,6 +306,47 @@ def give_back_rule(server_id: int) -> dict | None:
             _GIVE_BACK_RULES.clear()
         _GIVE_BACK_RULES[server_id] = (time.time(), rule)
         return rule
+
+
+def drs_rule(server_id: int) -> dict | None:
+    """The DRS rule (app/rulebook.py `DrsRule`, as a dict) of the league event running on this server, or of the manual session's own `drs_rule`; None = no DRS rules. Cached like `give_back_rule`:
+    from a request thread or a worker, never from the event loop."""
+    hit = _DRS_RULES.get(server_id)
+    if hit and time.time() - hit[0] < CUT_RULE_TTL:
+        return hit[1]
+    with _cut_rule_lock:
+        hit = _DRS_RULES.get(server_id)
+        if hit and time.time() - hit[0] < CUT_RULE_TTL:
+            return hit[1]
+        rule = None
+        with Session(engine) as s:
+            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+            ev = s.get(Event, sc.event_id) if sc else None
+            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
+            rb = _applied_rulebook(s, server_id, c, ev)
+            drs = rb.detectors.drs if rb else None
+            if sc is None:   # a manual session (no schedule): the rule the panel put in its own settings
+                from app.rulebook import DrsRule
+                server = s.get(Server, server_id)
+                raw = (server.session or {}).get("drs_rule") if server else None
+                drs = DrsRule.model_validate(raw) if raw is not None else None
+            if drs:
+                rule = drs.model_dump()
+        if len(_DRS_RULES) > 64:
+            _DRS_RULES.clear()
+        _DRS_RULES[server_id] = (time.time(), rule)
+        return rule
+
+
+def drs_rule_cached(server_id: int) -> dict | None:
+    """What `drs_rule` read last (no database, no waiting): for the monitor, which runs on the event loop."""
+    hit = _DRS_RULES.get(server_id)
+    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
+
+
+def drs_rule_stale(server_id: int) -> bool:
+    hit = _DRS_RULES.get(server_id)
+    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
 
 
 def flag_modes(server_id: int) -> dict:

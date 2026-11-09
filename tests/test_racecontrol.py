@@ -444,3 +444,23 @@ def test_applied_rulebook_cannot_be_replaced_during_a_race(live, monkeypatch):
         asyncio.run(server_service.apply(s, server, body))
         assert sid not in league._FLAG_MODES
         assert server.session["rulebook_snapshot"]["neutralization"]["green_after_laps"] == 6
+
+
+def test_drs_use_while_off_is_sanctioned_once_per_period(live):
+    from app.rulebook import DrsRule
+    sid, c, _sent = live
+    hub = _client("reporter")
+    use = f"{V}/servers/{sid}/race-control/drs-use"
+    rc = state_of(sid, True, c.session, create=True)
+    rule = DrsRule(start_laps_off=2).model_dump()
+    rc.drs_tick(rule, 1000.0, 0, None)
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["drs"] == {"on": False, "why": "start", "until": 2}
+    assert hub.post(use, json={"car_id": 3, "name": "Beto"}).status_code == 409, "the name must be the driver's"
+    assert hub.post(use, json={"car_id": 3, "name": "Ana"}).status_code == 204
+    assert [p["car_id"] for p in rc.penalties] == [3] and any("PENALIZACIÓN: DRS" in t for t in _notices(sid))
+    n = len(_notices(sid))
+    assert hub.post(use, json={"car_id": 3, "name": "Ana"}).status_code == 204 and len(_notices(sid)) == n and len(rc.penalties) == 1, "once per period"
+    rc.drs_tick(rule, 1100.0, 2, None)
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["drs"]["on"] is True
+    rc.drs_tick(None, 1101.0, 2, None)
+    assert api.get(f"{V}/servers/{sid}/race-state").json()["drs"] is None, "no rule, no DRS state"
