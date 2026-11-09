@@ -137,10 +137,9 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3", 4: "lmp"}
     rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
-    assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, waiting for a profile"
-    assert rc.delta_block("gt3") is None and rc.auto_live() == ["vsc"], "no reference lap and the track's length unknown: no delta invented, the fixed pace judges meanwhile"
-    rc.autoflags_tick({}, {}, 4000.0, 0.0, 1001.0)   # the look at the field brings the length
-    assert rc.delta_block("gt3") is not None and rc.delta_block("gt3")["min_ms"] == [round(4000 / 20 / (80 / 3.6) * 1000)] * 20, "and the flag that is running passes to the delta of the pace"
+    assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, the cars are judged by the delta of their speed"
+    blk0 = rc.delta_block("gt3")
+    assert blk0 is not None and "min_ms" not in blk0 and blk0["limit_kmh"] == 80 + rc.tolerance_kmh and blk0["credit"] == 3.0 and rc.auto_live() == ["vsc"], "no reference lap: a virtual car at the limit speed, no track length needed"
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
@@ -149,10 +148,10 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     frozen = {k: list(v) for k, v in rc.vsc_profiles.items()}
     blk = rc.delta_block("gt3")
     assert blk["mode"] == "delta" and blk["min_ms"] == frozen["gt3"] and blk["tol"] == 0.2
-    assert rc.delta_block("lmp") is not None and len(rc.delta_block("lmp")["min_ms"]) == 20   # lmp gets synthetic default profile
-    assert rc.delta_block(None) is not None and len(rc.delta_block(None)["min_ms"]) == 20
+    assert "min_ms" not in rc.delta_block("lmp") and rc.delta_block("lmp")["limit_kmh"] == 80 + rc.tolerance_kmh   # lmp has no reference lap: the delta of its speed
+    assert rc.delta_block(None)["limit_kmh"] == 85
     assert rc.auto_live() == ["vsc"] and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
-    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, default profile) drives at 120 km/h > 80 km/h
+    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference lap: the delta of its speed) drives at 120 km/h > 85 km/h
     bad = {1: lambda p: speed(p) / 1.10, 3: lambda p: speed(p) / 1.60, 4: lambda p: 120 / 3.6}
     out, p = _field(rc, bad, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.30, 3: 0.30, 4: 0.30})   # the grace (5 s)
     assert out == [], "nobody is judged during the grace"
@@ -164,9 +163,9 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1, 4}
     rc.set_flag("fcy", 80, grace_s=5, mode="delta", now=2000.0)
     assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
-    assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: the pace itself is its reference, even with reference laps known"
-    assert rc.delta_block("gt3")["min_ms"] == rc.delta_block("lmp")["min_ms"] == [round(4000 / 20 / (80 / 3.6) * 1000)] * 20, "the same time in every sector, for every model: the pace over the sector"
-    assert rc.delta_block("gt3")["credit"] == 3.0, "the credit that can be banked is 3 s"
+    assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: its reference is the speed, even with reference laps known"
+    fb1, fb2 = rc.delta_block("gt3"), rc.delta_block("lmp")
+    assert fb1 == fb2 and "min_ms" not in fb1 and fb1["limit_kmh"] == 80 + rc.tolerance_kmh and fb1["credit"] == 3.0, "the same for every model: a virtual car at the limit speed"
     rc.set_flag("fcy", 80, grace_s=5, mode="fixed", now=2100.0)
     assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY with mode=fixed is fixed pace"
     import pytest
@@ -237,19 +236,40 @@ def test_the_start_of_the_judging_is_latched_once_and_a_green_drops_partial_laps
     assert 1 not in rc.reflaps._cross, "no partial lap is kept while the flag is not green"
 
 
-def test_an_fcy_with_an_unknown_track_length_is_judged_by_the_fixed_pace_until_the_length_is_known():
+def test_an_fcy_is_judged_by_the_delta_of_its_speed_without_a_reference_lap_or_the_length_of_the_track():
     from app.live.racecontrol import RACE_TYPE, RaceControl
 
     rc = RaceControl({"session_type": RACE_TYPE})
-    models = {1: "gt3"}
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)
-    assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is None and rc.vsc_default_profile is None, "no length: no profile (a 4 km guess would punish or forgive the wrong cars)"
-    fast = {1: lambda p: 120 / 3.6}
-    _, p = _field(rc, fast, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3})   # the grace
-    out, _ = _field(rc, fast, 5.0, 30.0, models, wall0=1006.0, p0=p)
-    assert {d["kind"] for d in out} == {"pace"}, "at 120 km/h under a 60 km/h FCY the fixed-pace judge has him, not a delta of an invented length"
-    rc.autoflags_tick({}, {}, 7004.0, 0.0, 1040.0)
-    assert rc.delta_block("gt3")["min_ms"] == [round(7004 / 20 / (60 / 3.6) * 1000)] * 20 == [21012] * 20, "the length is known now: the pace over a twentieth of Spa"
-    rc.set_flag("green")
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=2000.0, track_length_m=7004.0)
-    assert rc.delta_block("gt3")["min_ms"] == [21012] * 20, "a length that came with the flag counts from the first second"
+    models = {1: "gt3", 2: "gt3", 3: "gt3"}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)   # limit = 60 + the tolerance
+    limit = 60 + rc.tolerance_kmh
+    assert rc.delta_block("gt3")["limit_kmh"] == limit and rc.delta_block("gt3").get("min_ms") is None
+    cars = {1: lambda p: (limit + 55) / 3.6, 2: lambda p: (limit - 1) / 3.6, 3: lambda p: 30 / 3.6}
+    _, p = _field(rc, cars, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3, 3: 0.3})   # the grace
+    out, _ = _field(rc, cars, 5.0, 40.0, models, wall0=1006.0, p0=p)
+    assert {(d["car"], d["kind"]) for d in out} == {(1, "delta")}, "55 km/h over the limit is a breach; just under it, or crawling, is nothing: " + str(out)
+    assert sorted(x["car_id"] for x in rc.violations) == [1] and [x["car"] for x in rc.autoflags_view()["delta"]] == [1]
+
+
+def test_the_delta_of_a_speed_banks_at_most_the_credit():
+    from app.live.field import Sample
+    from app.live.pacejudge import PaceDeltaJudge
+
+    def drive(j, v, t0, secs):
+        out, t = [], t0
+        for _ in range(round(secs * 5)):
+            t += 0.2
+            out += j.step(t, 1, True, 65.0, {1: Sample(0.5, 1, 0, t, 0.0)}, {1: v}, set())
+        return t, out
+
+    j = PaceDeltaJudge()
+    t, out = drive(j, 20.0, 0.0, 30.0)   # crawling for 30 s would bank 20 s if it could
+    assert out == [] and j.state(1)["delta"] == 3.0, "the credit that can be banked is 3 s"
+    t, out = drive(j, 130.0, t, 2.0)   # twice the limit: a second of delta lost for every second
+    assert out == [] and abs(j.state(1)["delta"] - 1.0) < 0.1
+    t, out = drive(j, 130.0, t, 2.0)
+    assert len(out) == 1 and out[0]["car"] == 1 and out[0]["delta_s"] <= -0.2, "after 3.2 s over, the credit is spent and he is in breach, once"
+    assert drive(j, 130.0, t, 5.0)[1] == [], "once per flag, car and slot generation"
+    unlimited = PaceDeltaJudge(credit_s=1e9)
+    t2, _ = drive(unlimited, 20.0, 0.0, 30.0)
+    assert drive(unlimited, 130.0, t2, 4.0)[1] == [], "(without the limit the same car would not have been judged: the cap is what is tested)"
