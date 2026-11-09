@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # The CSP hub script (opr_hub.lua, served by the website): added to the extra options of every server unless its checkbox in Control AC is off (`Server.csp_off`, app/csp.py `extra_for`).
     # `csp_hub_version` goes in the script URL: CSP caches a script by URL, so it is raised whenever the script changes. ACM_CSP_HUB=false turns it off everywhere.
     csp_hub: bool = True
+    # The game draws flags of its own (blue, yellow, its black one) next to the hub's banners. With every flag a rule of ours they are redundant: `NO_NATIVE_FLAGS = 1` in the hub's section asks the game for no flag
+    # (physics.overrideRacingFlag(None), NOT yet checked in a real client: off until it is). Env: ACM_CSP_HIDE_NATIVE_FLAGS
+    csp_hide_native_flags: bool = False
     # CSP is MANDATORY on a hosted client's servers (the owner's decision, 2026-11-02: all its drivers use it, build 3898 = 0.3.0): the hub script is marked REQUIRED (CSP closes the game of whoever cannot load
     # it) and the server's TRACK carries the minimum build (`csp/<build>/../<track>`, CSP's own mechanism: cup.acstuff.club/docs/csp/misc/server-extra-options). None = the profile's default
     # (client: required, build 3898; the league: neither); 0 turns the minimum build off. Env: ACM_CSP_HUB_REQUIRED, ACM_CSP_MIN_BUILD

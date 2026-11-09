@@ -118,3 +118,13 @@ def test_both_places_that_write_the_servers_file_carry_the_minimum_build(monkeyp
         plain = servers.render_server_cfg(no_hub)
     assert "TRACK=csp/3898/../spa" in shown and "TRACK=csp/3898/../spa" in written, (shown, written)
     assert "TRACK=spa" in plain and "csp/" not in plain, "a server with no hub was made CSP-only"
+
+
+def test_the_games_own_flags_are_hidden_only_when_asked(monkeypatch):
+    from app import csp
+    from app.config import settings
+    monkeypatch.setattr(settings, "csp_hub", True)
+    monkeypatch.setattr(settings, "csp_hide_native_flags", False)
+    assert "NO_NATIVE_FLAGS" not in csp.extra_for(1, "")
+    monkeypatch.setattr(settings, "csp_hide_native_flags", True)
+    assert "NO_NATIVE_FLAGS = 1" in csp.extra_for(1, "")

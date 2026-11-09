@@ -76,8 +76,9 @@ def extra_for(server_id: int, extra: str, csp_off: str = "", session: dict | Non
     off = scripts_off(csp_off)
     scripts = []   # (switch of the checkbox, ACM_CSP_*_SERVERS selector, script URL, extra lines)
     nascar = "NASCAR = 1\n" if nascar_requested(session) and "nascar" not in off else ""   # (the NASCAR banners of the hub: loaded only when the session asks for stages, and the admin has not switched them off)
+    native = "NO_NATIVE_FLAGS = 1\n" if settings.csp_hide_native_flags else ""   # (the game's own flags hidden: see app/config.py)
     required = "REQUIRED = 1\n" if settings.csp_hub_required else ""   # (CSP closes the game of a driver whose CSP cannot load the script: no CSP, no race)
-    scripts.append(("hub", "*", f"{settings.csp_hub_url}?v={settings.csp_hub_version}", f"SERVER = {server_id}\n{required}{nascar}"))
+    scripts.append(("hub", "*", f"{settings.csp_hub_url}?v={settings.csp_hub_version}", f"SERVER = {server_id}\n{required}{nascar}{native}"))
     scripts.append(("probe", settings.csp_probe_servers, settings.csp_probe_url, ""))
     scripts.append(("trainer", settings.csp_trainer_servers, f"{settings.csp_trainer_url}?v={settings.csp_trainer_version}", ""))
     out, n = [], 100
