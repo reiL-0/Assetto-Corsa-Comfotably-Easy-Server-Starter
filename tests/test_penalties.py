@@ -501,15 +501,16 @@ def test_flag_sanctions_become_time_penalties_unless_the_drive_through_was_serve
         sess.add(ChampionshipEvent(championship_id=league.id, server_id=sid, filename=filename, rulebook_snapshot={}))
         rows = [dict(server_id=sid, session_key="k", driver_guid=A, kind="blue", seq=1, seconds=10, ts=100.0),   # a drive-through nobody served: its unserved seconds
                 dict(server_id=sid, session_key="k", driver_guid=B, kind="blue", seq=1, seconds=10, ts=100.0),   # a drive-through that was served
-                dict(server_id=sid, session_key="k", driver_guid=A, kind="blue", seq=2, seconds=5, ts=110.0)]    # a ladder step of 5 s
+                dict(server_id=sid, session_key="k", driver_guid=A, kind="blue", seq=2, seconds=5, ts=110.0),    # a ladder step of 5 s
+                dict(server_id=sid, session_key="k", driver_guid=B, kind="black", seq=1, seconds=0, ts=120.0)]   # a black flag not obeyed: disqualified
         stage_flag_dues(sess, rows)
         stage_flag_dues(sess, rows)   # idempotent
         stage_flag_dues(sess, [], {(sid, "k", B, "blue", 1)})
         sess.commit()
-        assert len(sess.exec(select(FlagDue).where(FlagDue.server_id == sid)).all()) == 3
-        assert flag_penalties(sess, league, sid, filename, parsed, 200, 0) == 2
+        assert len(sess.exec(select(FlagDue).where(FlagDue.server_id == sid)).all()) == 4
+        assert flag_penalties(sess, league, sid, filename, parsed, 200, 0) == 3
         sess.commit()
         got = sorted(p.value for p in sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.driver_guid == A)).all())
         assert got == [5000, 10000] and all(p.auto_key.startswith("flag:") for p in sess.exec(select(Penalty).where(Penalty.server_id == sid)).all())
-        assert not sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.driver_guid == B)).all()
+        assert [(p.kind, p.value) for p in sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.driver_guid == B)).all()] == [("dsq", 0)], "B served his drive-through: only the disqualification"
         assert flag_penalties(sess, league, sid, filename, parsed, 200, 0) == 0, "once"

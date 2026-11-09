@@ -43,6 +43,7 @@ EXCLUDED = {
     "clear_penalty": "Manual drive-through ledger, not detector state",
     "add_cuts": "Separate cuts counter, not consumed by field judges",
     "take_flag_messages": "Drains notices for the adapter; not detector input",
+    "damage_report": "Client-reported damage for the orange disc: evidence from the driver's game, not field data",
     "set_red": "The director's red flag: a manual input, not field data",
     "conduct_add": "Conduct counter fed by sanctions already decided elsewhere; not detector input",
     "drs_tick": "DRS window from laps, flag and weather; no field judge reads it (app/live/drs.py)",

@@ -345,11 +345,11 @@ def drs_rule(server_id: int) -> dict | None:
         return rule
 
 
-FLAG_RULE_KINDS = ("blue", "danger", "yellow", "meatball", "black", "red")
+FLAG_RULE_KINDS = ("blue", "yellow", "meatball", "black", "red")
 
 
 def flag_rules(server_id: int) -> dict:
-    """The rules of the flags (app/rulebook.py: BlueRule, DangerRule, YellowRule, MeatballRule, BlackRule, RedRule, each as a dict) of the league event running on this server; the defaults when no rulebook applies.
+    """The rules of the flags (app/rulebook.py: BlueRule, YellowRule, MeatballRule, BlackRule, RedRule, each as a dict) of the league event running on this server; the defaults when no rulebook applies.
     Cached like `drs_rule`: from a request thread or a worker, never the event loop."""
     hit = _FLAG_RULES.get(server_id)
     if hit and time.time() - hit[0] < CUT_RULE_TTL:

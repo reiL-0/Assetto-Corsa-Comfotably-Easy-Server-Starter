@@ -112,15 +112,6 @@ class BlueRule(_Strict):
 _Ladder = list[Annotated[int, Field(ge=0, le=600)]]   # a sanction ladder: 0 = a drive-through, N = N seconds on the result; the last step repeats; empty = no sanction
 
 
-class DangerRule(_Strict):
-    """DANGER ahead (a stopped car): a driver who passes the stopped car within `zone_m` metres at more than `max_kmh` commits one offence per stopped car. No ladder by default: only the warning shows until the numbers are calibrated."""
-
-    zone_m: int = Field(default=80, ge=20, le=400)
-    max_kmh: int = Field(default=120, ge=30, le=300)
-    ladder: _Ladder = Field(default_factory=list, max_length=10)
-    unserved_s: int = Field(default=10, ge=1, le=60)
-
-
 class YellowRule(_Strict):
     """A yellow flag: no overtaking. Whoever passes owes the place for `window_s` seconds (app/live/nopass.py, the judge of the VSC/FCY); one who does not give it back commits an offence."""
 
@@ -130,21 +121,23 @@ class YellowRule(_Strict):
 
 
 class MeatballRule(_Strict):
-    """ORANGE DISC: a car running under `slow_pct` % of the speed of the cars around it for `sustained_s` seconds (not in the pit lane) must come into the pits within `pit_laps` laps, or it gets the black flag."""
+    """ORANGE DISC: a car with mechanical damage of `damage_pct` % or more (read by the driver's own game and reported to the manager) must come into the pits within `pit_laps` laps, or it gets the black flag.
+    `use_speed` adds the speed test (off by default): a car running under `slow_pct` % of the speed of the cars around it for `sustained_s` seconds counts too."""
 
+    damage_pct: int = Field(default=60, ge=5, le=100)
+    pit_laps: int = Field(default=2, ge=1, le=10)
+    use_speed: bool = False
     slow_pct: int = Field(default=40, ge=10, le=80)
     sustained_s: int = Field(default=20, ge=5, le=120)
-    pit_laps: int = Field(default=2, ge=1, le=10)
 
 
 class BlackRule(_Strict):
     """BLACK AND WHITE then BLACK. Every sanction a driver earns in the race (from the flags, DRS, the cuts ladder) is a conduct offence: at `bw_at` of them the black-and-white flag warns him (no sanction), at `black_at` he
-    gets the BLACK flag: he must come into the pits within `pit_laps` laps (the counter starts again) or `seconds` seconds go on the result."""
+    gets the BLACK flag (also from an orange disc or a red flag that was not obeyed): he must come into the pits within `pit_laps` laps (the counter starts again) or he is DISQUALIFIED from the race."""
 
     bw_at: int = Field(default=3, ge=1, le=20)
     black_at: int = Field(default=6, ge=2, le=40)
     pit_laps: int = Field(default=3, ge=1, le=10)
-    seconds: int = Field(default=30, ge=1, le=300)
 
     @model_validator(mode="after")
     def _order(self) -> BlackRule:
@@ -154,11 +147,9 @@ class BlackRule(_Strict):
 
 
 class RedRule(_Strict):
-    """RED flag: every car must be in the pit lane within `pit_s` seconds of it. Nothing is sanctioned by default (empty ladder)."""
+    """RED flag: the director shows it and every car must come into the pit lane before it completes `laps` more lap(s) (by default: when it finishes the lap it is on); one that does not gets the BLACK flag."""
 
-    pit_s: int = Field(default=60, ge=10, le=300)
-    ladder: _Ladder = Field(default_factory=list, max_length=10)
-    unserved_s: int = Field(default=10, ge=1, le=60)
+    laps: int = Field(default=1, ge=1, le=3)
 
 
 class FlagsRule(_Strict):
@@ -176,7 +167,6 @@ class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
     drs: DrsRule | None = None   # None = off
     blue: BlueRule = Field(default_factory=BlueRule)
-    danger: DangerRule = Field(default_factory=DangerRule)
     yellow: YellowRule = Field(default_factory=YellowRule)
     meatball: MeatballRule = Field(default_factory=MeatballRule)
     black: BlackRule = Field(default_factory=BlackRule)

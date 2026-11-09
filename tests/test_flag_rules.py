@@ -31,28 +31,6 @@ def offences(rc):
     return [m for m in rc.take_flag_messages() if m["msg"] == "offence"]
 
 
-def test_danger_is_one_offence_per_stopped_car_and_only_with_a_ladder():
-    rcmod._flag_dues_pending.clear()
-    rc = rc_with(); rules(rc, danger={"ladder": [0, 5], "zone_m": 80, "max_kmh": 120})
-    for t in (0.0, 1.0):   # the stopped car (2) was moving, then stops for 3+ s
-        rc.autoflags_tick({1: sm(0.40, t), 2: sm(0.5, t)}, {1: 150.0, 2: 100.0 if t == 0 else 0.0}, L, t, 1000.0 + t)
-    for t in (2.0, 3.0, 4.0, 5.0):
-        rc.autoflags_tick({1: sm(0.40, t), 2: sm(0.5, t)}, {1: 150.0, 2: 0.0}, L, t, 1000.0 + t)
-    assert (1, 2) in rc.autoflags.danger, "the detector sees the stopped car"
-    rc.autoflags_tick({1: sm(0.5 - 60 / L, 6.0), 2: sm(0.5, 6.0)}, {1: 100.0, 2: 0.0}, L, 6.0, 1006.0)
-    assert not offences(rc), "slow enough inside the zone: nothing"
-    rc.autoflags_tick({1: sm(0.5 - 60 / L, 7.0), 2: sm(0.5, 7.0)}, {1: 160.0, 2: 0.0}, L, 7.0, 1007.0)
-    [o] = offences(rc)
-    assert (o["kind"], o["car"], o["step"]) == ("danger", 1, 0) and [p["car_id"] for p in rc.penalties] == [1]
-    rc.autoflags_tick({1: sm(0.5 - 40 / L, 8.0), 2: sm(0.5, 8.0)}, {1: 170.0, 2: 0.0}, L, 8.0, 1008.0)
-    assert not offences(rc), "once per stopped car"
-    rc2 = rc_with()   # the default has no ladder: the warning only
-    for t in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
-        rc2.autoflags_tick({1: sm(0.40, t), 2: sm(0.5, t)}, {1: 150.0, 2: 100.0 if t == 0 else 0.0}, L, t, 1000.0 + t)
-    rc2.autoflags_tick({1: sm(0.5 - 60 / L, 6.0), 2: sm(0.5, 6.0)}, {1: 200.0, 2: 0.0}, L, 6.0, 1006.0)
-    assert not offences(rc2) and not rc2.penalties
-
-
 def test_yellow_open_and_due_go_through_the_ladder_in_live_only():
     rcmod._flag_dues_pending.clear()
     rc = rc_with(); rc.flag = "yellow"
@@ -76,30 +54,45 @@ def test_yellow_open_and_due_go_through_the_ladder_in_live_only():
     assert seen == [False], "a NASCAR caution has its own rules"
 
 
-def test_a_crawling_car_gets_the_disc_then_the_black_flag_then_seconds():
+def test_a_damaged_car_gets_the_disc_then_the_black_flag_then_the_disqualification():
     rcmod._flag_dues_pending.clear()
-    rc = rc_with(); rules(rc, meatball={"sustained_s": 20, "pit_laps": 2}, black={"pit_laps": 2, "seconds": 30})
-    speeds = {1: 200.0, 2: 205.0, 3: 198.0, 4: 202.0, 5: 60.0}   # car 5 runs at 30 % of the cars around it
-    for t in range(0, 22):
-        rc.autoflags_tick({c: sm(0.1 * c, float(t)) for c in speeds}, speeds, L, float(t), 1000.0 + t)
+    rc = rc_with(); rules(rc, meatball={"damage_pct": 60, "pit_laps": 2}, black={"pit_laps": 2})
+    sp = {1: 200.0, 5: 120.0}
+    rc.damage_report(5, 40, 1000.0)
+    rc.autoflags_tick({c: sm(0.1 * c, 1.0) for c in sp}, sp, L, 1.0, 1001.0)
+    assert not rc.meatball, "40 % is under the limit"
+    rc.damage_report(5, 75, 1002.0)
+    rc.autoflags_tick({c: sm(0.1 * c, 2.0) for c in sp}, sp, L, 2.0, 1003.0)
     assert {k: v for k, v in rc.meatball["G5"].items() if k != "since"} == {"car": 5, "laps": 2}
-    assert rc.auto_for(5, 0, 21.0)["meatball"] == {"laps": 2}, "the driver's screen gets it"
+    assert rc.auto_for(5, 0, 2.0)["meatball"] == {"laps": 2}, "the driver's screen gets it"
     rc.lap_done(5, 100000, 0, 5, 1030.0, "G5")
     assert rc.meatball["G5"]["laps"] == 1
     rc.lap_done(5, 100000, 0, 6, 1130.0, "G5")
     assert "G5" not in rc.meatball and rc.black["G5"]["laps"] == 2, "two laps without the pits: the black flag"
-    assert rc.auto_for(5, 0, 21.0)["black"] == {"laps": 2}
     rc.lap_done(5, 100000, 0, 7, 1230.0, "G5")
     rc.lap_done(5, 100000, 0, 8, 1330.0, "G5")
     [o] = offences(rc)
-    assert (o["kind"], o["step"]) == ("black", 30) and [r["seconds"] for r in rcmod.pending_flag_dues()] == [30], "ignored: the seconds, no drive-through"
+    assert (o["kind"], o["step"]) == ("black", "dsq") and [(r["kind"], r["seconds"]) for r in rcmod.pending_flag_dues()] == [("black", 0)], "a black flag not obeyed: disqualified"
+    assert not rc.penalties, "no drive-through for it"
     rcmod._flag_dues_pending.clear()
-    rc = rc_with(); rules(rc, meatball={"sustained_s": 5})   # serving it: a pit-lane pass
-    for t in range(0, 8):
-        rc.autoflags_tick({c: sm(0.1 * c, float(t)) for c in speeds}, speeds, L, float(t), 1000.0 + t)
+    rc = rc_with(); rules(rc)   # serving it: a pit-lane pass; and a stale report is no report
+    rc.damage_report(5, 90, 1000.0)
+    rc.autoflags_tick({c: sm(0.1 * c, 1.0) for c in sp}, sp, L, 1.0, 1001.0)
     assert "G5" in rc.meatball
     rc.report_pit(5, True, now=rc.clock.time() + 1)
     assert "G5" not in rc.meatball
+    rc = rc_with(); rc.damage_report(5, 90, 1000.0)
+    rc.autoflags_tick({c: sm(0.1 * c, 1.0) for c in sp}, sp, L, 1.0, 1100.0)
+    assert not rc.meatball and 5 not in rc.damage, "a report older than DAMAGE_FRESH_S is dropped"
+
+
+def test_the_speed_test_of_the_disc_is_off_unless_asked():
+    sp = {1: 200.0, 2: 205.0, 3: 198.0, 4: 202.0, 5: 60.0}
+    for use, expected in ((False, False), (True, True)):
+        rc = rc_with(); rules(rc, meatball={"use_speed": use, "sustained_s": 20})
+        for t in range(0, 22):
+            rc.autoflags_tick({c: sm(0.1 * c, float(t)) for c in sp}, sp, L, float(t), 1000.0 + t)
+        assert ("G5" in rc.meatball) is expected
 
 
 def test_conduct_builds_to_black_and_white_then_black_and_a_pit_visit_starts_it_again():
@@ -128,31 +121,32 @@ def test_a_sanction_of_any_rule_counts_as_conduct():
     rcmod._flag_dues_pending.clear()
 
 
-def test_red_flag_gives_pit_s_seconds_and_the_next_flag_withdraws_it():
+def test_red_flag_sends_the_black_flag_to_whoever_does_not_come_in_before_the_lap_ends():
     rcmod._flag_dues_pending.clear()
-    rc = rc_with(); rules(rc, red={"pit_s": 30, "ladder": [0, 5]})
+    rc = rc_with(); rules(rc, red={"laps": 1})
     rc.set_red(True, now=1000.0)
-    assert rc.auto_for(1, 0, 1.0)["red"]["pit"] is False
-    rc.report_pit(2, True, now=1010.0)   # car 2 made it to the pit lane
-    sp = {1: 200.0, 2: 20.0, 3: 180.0}
-    rc.autoflags_tick({c: sm(0.1 * c, 5.0) for c in sp}, sp, L, 5.0, 1025.0)
-    assert not offences(rc), "inside the time"
-    rc.autoflags_tick({c: sm(0.1 * c, 40.0) for c in sp}, sp, L, 40.0, 1040.0)
-    assert sorted(m["car"] for m in offences(rc)) == [1, 3], "the cars not in the pits are sanctioned once; car 2 is not"
-    rc.autoflags_tick({c: sm(0.1 * c, 41.0) for c in sp}, sp, L, 41.0, 1041.0)
-    assert not offences(rc), "once per red flag"
+    a = rc.auto_for(1, 0, 1.0)["red"]
+    assert a == {"laps": 1, "pit": False}
+    rc.report_pit(2, True, now=1010.0)   # car 2 came into the pit lane
+    assert rc.auto_for(2, 0, 1.0)["red"] == {"laps": 1, "pit": True}
+    rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")   # car 1 finished its lap on the track: the black flag
+    rc.lap_done(2, 100000, 0, 5, 1050.0, "G2")   # car 2 had come in: it obeyed
+    assert "G1" in rc.black and "G2" not in rc.black
     rc.set_flag("green")
-    assert rc.red_since is None and "red" not in (rc.auto_for(1, 0, 1.0) or {})
+    assert rc.red_since is None and "red" not in (rc.auto_for(3, 0, 1.0) or {})
     rcmod._flag_dues_pending.clear()
 
 
 def test_nothing_is_sanctioned_in_shadow():
     rcmod._flag_dues_pending.clear()
-    rc = rc_with(red="shadow", meatball="shadow", black="shadow"); rules(rc, red={"pit_s": 10, "ladder": [0]})
+    rc = rc_with(red="shadow", meatball="shadow", black="shadow")
     rc.set_red(True, now=1000.0)
-    rc.autoflags_tick({1: sm(0.1, 20.0)}, {1: 200.0}, L, 20.0, 1020.0)
+    rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")
     assert not offences(rc) and not rc.penalties and not rcmod.pending_flag_dues()
-    assert "red" not in (rc.auto_for(1, 0, 1.0) or {}), "shadow shows nothing"
+    assert "red" not in (rc.auto_for(1, 0, 1.0) or {}) and "black" not in (rc.auto_for(1, 0, 1.0) or {}), "shadow shows nothing"
+    rc.black["G1"] = {"car": 1, "laps": 1, "since": 0.0}
+    rc.lap_done(1, 100000, 0, 6, 1150.0, "G1")
+    assert not rcmod.pending_flag_dues(), "and does not disqualify anybody"
 
 
 def test_a_flag_is_served_only_by_a_pit_visit_after_it_was_given_and_a_full_ledger_sanctions_nobody():

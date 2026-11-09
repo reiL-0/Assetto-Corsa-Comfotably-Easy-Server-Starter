@@ -466,3 +466,14 @@ def test_drs_use_while_off_is_sanctioned_once_per_period(live):
     assert api.get(f"{V}/servers/{sid}/race-state").json()["drs"]["on"] is True
     rc.drs_tick(None, 1101.0, 2, None)
     assert api.get(f"{V}/servers/{sid}/race-state").json()["drs"] is None, "no rule, no DRS state"
+
+
+def test_damage_report_goes_to_the_rc_state_and_is_checked_against_the_driver(live):
+    sid, c, _sent = live
+    hub = _client("reporter")
+    url = f"{V}/servers/{sid}/race-control/damage"
+    rc = state_of(sid, True, c.session, create=True)
+    assert hub.post(url, json={"car_id": 3, "name": "Beto", "level": 80}).status_code == 409, "the name must be the driver's"
+    assert hub.post(url, json={"car_id": 3, "name": "Ana", "level": 101}).status_code == 422
+    assert hub.post(url, json={"car_id": 3, "name": "Ana", "level": 80}).status_code == 204
+    assert rc.damage[3][0] == 80

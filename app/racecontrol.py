@@ -144,23 +144,13 @@ def _flag_messages(inst, rc) -> None:
             _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · drive-through ({laps} vueltas)", "penalty", car)
         elif kind == "blue":
             _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · +{step} s", "penalty", car)
-        elif kind == "danger" and step == 0:
-            laps = o["laps"]
-            _say(rc, f"PENALIZACIÓN: pasaste un coche parado a demasiada velocidad · drive-through ({laps} vueltas)", "penalty", car)
-        elif kind == "danger":
-            _say(rc, f"PENALIZACIÓN: pasaste un coche parado a demasiada velocidad · +{step} s", "penalty", car)
         elif kind == "yellow" and step == 0:
             laps = o["laps"]
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · drive-through ({laps} vueltas)", "penalty", car)
         elif kind == "yellow":
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
-        elif kind == "red" and step == 0:
-            laps = o["laps"]
-            _say(rc, f"PENALIZACIÓN: no entraste a boxes con la bandera roja · drive-through ({laps} vueltas)", "penalty", car)
-        elif kind == "red":
-            _say(rc, f"PENALIZACIÓN: no entraste a boxes con la bandera roja · +{step} s", "penalty", car)
         elif kind == "black":
-            _say(rc, f"PENALIZACIÓN: ignoraste la bandera negra · +{step} s", "penalty", car)
+            _say(rc, "DESCALIFICADO: ignoraste la bandera negra", "penalty", car)
 
 
 def blue_stale_servers() -> list[int]:
@@ -551,6 +541,25 @@ def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
     if verdict:
         laps = verdict["laps"]
         _say(rc, f"PENALIZACIÓN: DRS con el DRS inactivo · drive-through ({laps} vueltas)", "penalty", body.car_id)
+
+
+class DamageIn(BaseModel):
+    car_id: int = Field(ge=0, le=255)
+    name: str = Field(max_length=80)
+    level: int = Field(ge=0, le=100)
+
+
+@state_router.post("/race-control/damage", status_code=204)
+def report_damage(server_id: int, body: DamageIn, sess: SessionDep) -> None:
+    """The hub of a car says how damaged it is (0-100 %, read by its own game): client evidence for the orange disc (rule `meatball`). 409 when that car is not that driver, like the other hub reports."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    car = inst.acsp.cars.get(body.car_id) if inst else None
+    if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
+        raise HTTPException(409, "that car is not that driver")
+    rc = state_of(server_id, True, inst.acsp.session)
+    if rc:
+        rc.damage_report(body.car_id, body.level, time.time())
 
 
 def _control(server_id: int, sess: SessionDep):

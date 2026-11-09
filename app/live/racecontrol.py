@@ -134,8 +134,8 @@ class RaceControl:
         self.meatball: dict[str, dict] = {}                  # driver -> {car, laps}: the orange disc, and the laps he has left to come into the pits
         self._slow_since: dict[int, float] = {}              # car -> since when it runs far below the speed of the cars around it
         self.red_since: float | None = None                  # wall time the director showed the red flag (cleared by the next flag)
-        self.red_ignored: set[int] = set()                   # cars already sanctioned for this red flag
-        self.danger_done: set[tuple[int, int]] = set()       # (driver, stopped car) pairs already sanctioned
+        self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
+        self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.yellowjudge = PassJudge(15.0)                   # no overtaking under a plain yellow (the same judge as the VSC/FCY one, its own instance)
         self._yellow_id = 0
         self._was_yellow = False
@@ -264,7 +264,7 @@ class RaceControl:
             pen = self._clean_penalty(penalty or DEFAULT_PENALTY)
         with _lock:
             if self.red_since is not None:   # (any new flag withdraws the red one)
-                self.red_since = None; self.red_ignored.clear()
+                self.red_since = None; self.red_laps = {}
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
                 self.flag = "green"
@@ -1188,31 +1188,64 @@ class RaceControl:
             del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
 
+    def _give_black(self, guid: str, car: int, why: str, live: bool) -> None:
+        rule = self._rule("black")
+        self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
+        self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
+        self.audit("black_flag", car=car, driver=guid, conduct=self.conduct.get(guid, 0), why=why, executed=live)
+        self._bump()
+
     def _flags_lap(self, car: int, in_pit_lap: bool, now: float) -> None:
-        """A car completed a lap: one lap fewer to come into the pits for the orange disc (then the black flag) and for the black flag (then the seconds)."""
+        """A car completed a lap: one lap fewer to come into the pits for the orange disc (then the black flag), for the red flag (then the black flag) and for the black flag (then the disqualification)."""
         guid = str(self.audit_guids.get(car) or "")
-        if not guid or in_pit_lap:
+        if not guid:
             return
         live = self.flag_modes.get("black") == "live" and "black" not in self.auto_off
+        if self.red_since is not None and car in self.red_laps and car != self.pace_car and guid not in self.black:
+            if self._pit_seen.get(car, 0.0) > self.red_since:
+                del self.red_laps[car]   # (it came into the pit lane after the red flag: obeyed)
+            else:
+                self.red_laps[car] -= 1
+                if self.red_laps[car] <= 0:
+                    del self.red_laps[car]
+                    self.meatball.pop(guid, None)
+                    self._give_black(guid, car, "red", live and self.flag_modes.get("red") == "live")
+        if in_pit_lap:
+            return
         if guid in self.meatball:
             self.meatball[guid]["laps"] -= 1
             if self.meatball[guid]["laps"] <= 0:
                 del self.meatball[guid]
-                rule = self._rule("black")
-                self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
-                self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
-                self.audit("black_flag", car=car, driver=guid, conduct=self.conduct.get(guid, 0), why="meatball", executed=live)
-                self._bump()
+                self._give_black(guid, car, "meatball", live)
         elif guid in self.black:
             self.black[guid]["laps"] -= 1
             if self.black[guid]["laps"] <= 0:
-                rule = self._rule("black")
                 del self.black[guid]
                 self.conduct[guid] = 0; self.bw_shown.discard(guid)
-                if live:
-                    self._flag_sanction("black", car, {"ladder": [rule["seconds"]]}, now, conduct=False)
-                else:
-                    self.audit("flag_offence", flag="black", car=car, driver=guid, step=rule["seconds"], executed=False)
+                self._disqualify(car, guid, live)
+
+    def _disqualify(self, car: int, guid: str, live: bool) -> None:
+        """The black flag was not obeyed: the driver is disqualified from the race (a `FlagDue` of kind black; the result turns it into a `dsq` penalty). Only when the black flag is live."""
+        if not live:
+            self.audit("flag_offence", flag="black", car=car, driver=guid, step="dsq", executed=False)
+            return
+        n = self.flag_count.get((guid, "black"), 0) + 1
+        key = (self.server_id, self.cuts_session_key, guid, "black", n)
+        if len(_flag_dues_pending) >= MAX_FLAG_DUES_PENDING:
+            log.error("flags: pending ledger full; disqualification dropped: car %s", car)
+            return
+        self.flag_count[(guid, "black")] = n
+        _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind="black", seq=n, seconds=0, ts=time.time())   # (0 s = the disqualification)
+        self.audit("flag_offence", flag="black", car=car, driver=guid, seq=n, step="dsq", executed=True)
+        self.flag_new.append({"msg": "offence", "kind": "black", "car": car, "seq": n, "step": "dsq", "laps": 0})
+        self._bump()
+
+    def damage_report(self, car: int, level: int, now: float) -> None:
+        """The driver's own game says how damaged its car is (0-100 %): client evidence for the orange disc. A repaired car (back under the level) loses the disc at once."""
+        with _lock:
+            if car == self.pace_car:
+                return
+            self.damage[car] = (max(0, min(100, level)), now)
 
     def take_flag_messages(self) -> list[dict]:
         with _lock:
@@ -1220,52 +1253,44 @@ class RaceControl:
             return out
 
     def set_red(self, on: bool, now: float | None = None) -> None:
-        """The director shows (or withdraws) the red flag: every car has `pit_s` seconds to come into the pit lane."""
+        """The director shows (or withdraws) the red flag: every car must come into the pit lane before it completes `laps` more lap(s), or it gets the black flag."""
         with _lock:
             self.red_since = (self.clock.time() if now is None else now) if on else None
-            self.red_ignored.clear()
+            self.red_laps = {c: self._rule("red")["laps"] for c in self.audit_guids if c != self.pace_car} if on else {}
             self.audit("red_flag", on=on, executed=True)
             self._bump()
 
     def _flag_judges(self, samples: dict, speeds: dict[int, float], mono: float, now: float, racing: bool, in_pit: set) -> None:
-        """Danger (a stopped car passed too fast), the orange disc (a car crawling) and the red flag (not in the pits in time). Under the lock, from `autoflags_tick`."""
+        """The orange disc: a car whose own game reports `damage_pct` % damage or more (and, with `use_speed`, one crawling far below the cars around it) must come into the pits; see `_flags_lap` for what follows."""
         pc = self.pace_car
-        # DANGER: passing the stopped car inside the zone faster than the limit: one offence per stopped car
-        rule = self._rule("danger")
-        for k in [k for k in self.danger_done if k not in self.autoflags.danger]:
-            self.danger_done.discard(k)
-        if racing and self.flag_modes.get("danger") == "live" and "danger" not in self.auto_off and rule["ladder"]:
-            for (d, s), m in self.autoflags.danger.items():
-                if (d, s) not in self.danger_done and m <= rule["zone_m"] and speeds.get(d, 0.0) > rule["max_kmh"]:
-                    self.danger_done.add((d, s))
-                    self._flag_sanction("danger", d, rule, now, stopped=s, m=m, kmh=round(speeds.get(d, 0.0)))
-        # ORANGE DISC: far below the speed of the cars around it for a while, outside the pit lane
         rule = self._rule("meatball")
         mode = self.flag_modes.get("meatball", "shadow")
-        if racing and mode != "off" and "meatball" not in self.auto_off:
+        if not (racing and mode != "off" and "meatball" not in self.auto_off):
+            return
+        wanted: dict[int, str] = {}   # car -> why
+        for c, (level, at) in list(self.damage.items()):
+            if now - at > DAMAGE_FRESH_S:
+                del self.damage[c]   # (a stale report is no report: a hub that went quiet does not keep a disc on)
+            elif level >= rule["damage_pct"] and c != pc and c not in in_pit:
+                wanted[c] = "damage"
+        if rule["use_speed"]:
             moving = sorted(v for c, v in speeds.items() if c != pc and c not in in_pit and v >= 30.0)
             ref = moving[len(moving) // 2] if len(moving) >= 3 else None
             for c, v in speeds.items():
                 if c == pc or c in in_pit or ref is None or not (5.0 < v < ref * rule["slow_pct"] / 100.0):
                     self._slow_since.pop(c, None)
                     continue
-                since = self._slow_since.setdefault(c, mono)
-                guid = str(self.audit_guids.get(c) or "")
-                if guid and mono - since >= rule["sustained_s"] and guid not in self.meatball and guid not in self.black:
-                    self.meatball[guid] = {"car": c, "laps": rule["pit_laps"], "since": self.clock.time()}
-                    self.flag_new.append({"msg": "meatball", "car": c, "laps": rule["pit_laps"]})
-                    self.audit("meatball_flag", car=c, driver=guid, kmh=round(v), ref_kmh=round(ref), executed=mode == "live")
-                    self._bump()
-        for c in list(self._slow_since):
-            if c not in speeds:
+                if mono - self._slow_since.setdefault(c, mono) >= rule["sustained_s"]:
+                    wanted.setdefault(c, "slow")
+            for c in [c for c in self._slow_since if c not in speeds]:
                 del self._slow_since[c]
-        # RED: every car must be in the pit lane `pit_s` seconds after the flag
-        rule = self._rule("red")
-        if self.red_since is not None and self.flag_modes.get("red") == "live" and "red" not in self.auto_off and now - self.red_since >= rule["pit_s"]:
-            for c in speeds:
-                if c != pc and c not in self.red_ignored and not (self._pit_seen.get(c, 0.0) > self.red_since):
-                    self.red_ignored.add(c)
-                    self._flag_sanction("red", c, rule, now)
+        for c, why in wanted.items():
+            guid = str(self.audit_guids.get(c) or "")
+            if guid and guid not in self.meatball and guid not in self.black:
+                self.meatball[guid] = {"car": c, "laps": rule["pit_laps"], "since": self.clock.time()}
+                self.flag_new.append({"msg": "meatball", "car": c, "laps": rule["pit_laps"]})
+                self.audit("meatball_flag", car=c, driver=guid, why=why, damage=self.damage.get(c, (None,))[0], executed=mode == "live")
+                self._bump()
 
     @fieldrec.capture(_lock)
     def yellow_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float) -> None:
@@ -1327,8 +1352,8 @@ class RaceControl:
                 out["bw"] = {"n": self.conduct.get(guid, 0)}
         if guid and live("meatball") and guid in self.meatball:
             out["meatball"] = {"laps": self.meatball[guid]["laps"]}
-        if self.red_since is not None and live("red") and slot != self.pace_car:
-            out["red"] = {"left_s": max(0, math.ceil(self._rule("red")["pit_s"] - (self.clock.time() - self.red_since))), "pit": self._pit_seen.get(slot, 0.0) > self.red_since}
+        if self.red_since is not None and live("red") and slot != self.pace_car and guid not in self.black:
+            out["red"] = {"laps": self.red_laps.get(slot, 0), "pit": self._pit_seen.get(slot, 0.0) > self.red_since}
         return out
 
     def auto_live(self, fresh_modes: dict | None = None) -> list[str]:
@@ -1870,8 +1895,9 @@ def pending_cut_dues() -> list[dict]:
 
 from app.rulebook import Detectors   # noqa: E402  (after the module's own names: rulebook imports nothing of this module)
 
-FLAG_DEFAULTS = {k: getattr(Detectors(), k).model_dump() for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # what a server with no applied rulebook uses
+FLAG_DEFAULTS = {k: getattr(Detectors(), k).model_dump() for k in ("blue", "yellow", "meatball", "black", "red")}   # what a server with no applied rulebook uses
 MAX_FLAG_DUES_PENDING = 2000
+DAMAGE_FRESH_S = 30.0   # s a damage report counts (the hub repeats it while the car is damaged)
 _flag_dues_pending: dict[tuple, dict] = {}   # sanctions for ignored flags waiting to be written (protected by _lock, retained across session changes)
 _flag_served: set[tuple] = set()   # keys of flag drive-throughs served, waiting to be written
 
