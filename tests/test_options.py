@@ -147,3 +147,9 @@ def test_csp_scripts_are_on_by_default_and_switch_off_per_server():
         assert r.json()["csp_scripts"] == {"hub": False, "trainer": True, "nascar": False}
     finally:
         settings.csp_hub = False
+
+
+def test_race_over_time_is_always_written_and_the_option_wins():
+    sid = _setup()
+    assert _apply(sid).json()["config"]["SERVER"]["RACE_OVER_TIME"] == 180   # not left to acServer's own default: the grid finishes after the winner
+    assert _apply(sid, race_over_time=240).json()["config"]["SERVER"]["RACE_OVER_TIME"] == 240

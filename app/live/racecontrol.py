@@ -102,6 +102,23 @@ class TrackClear(NamedTuple):
         return not self.stopped and not self.involved and not self.missing and not self.slow
 
 
+def red_reference(progress: dict[int, float], lap_times: dict[int, dict[int, float]]) -> dict | None:
+    """The F1 way to take the order after a red flag: not where each car was caught, but the order at the LAST LINE that every car of the leader's lap had crossed (if the leader has just crossed it and
+    the rest not yet, the line before). `progress` = laps + spline of every running car (app/live/field.py); `lap_times` = lap number -> {car: wall time it crossed}. The lead lap is whoever is
+    less than a lap behind the leader. Lapped cars keep their place after them (by progress): they do not get the lap back. None = no full lap run yet (the restart is a start)."""
+    if not progress:
+        return None
+    lead = max(progress.values())
+    group = [c for c, p in progress.items() if p > lead - 1.0]
+    lap = min(int(progress[c] // 1) for c in group)
+    if lap < 1:
+        return None
+    at = lap_times.get(lap, {})
+    front = sorted(group, key=lambda c: (at.get(c, math.inf), -progress[c]))   # (a car whose crossing was never seen falls back to its place on the track)
+    rest = sorted((c for c in progress if c not in group), key=lambda c: -progress[c])
+    return {"lap": lap, "order": front + rest}
+
+
 class RaceControl:
     def __init__(self, session_ref: object = None, clock=None) -> None:
         self.clock = clock or time
@@ -133,9 +150,12 @@ class RaceControl:
         self.black: dict[str, dict] = {}                     # driver -> {car, laps}: the black flag, and the laps he has left to come into the pits
         self.meatball: dict[str, dict] = {}                  # driver -> {car, laps}: the orange disc, and the laps he has left to come into the pits
         self._slow_since: dict[int, float] = {}              # car -> since when it runs far below the speed of the cars around it
-        self.red_since: float | None = None                  # wall time the director showed the red flag (cleared by the next flag)
+        self.red_since: float | None = None                  # wall time the director showed the red flag (independent of the track flag: it goes with the chequered, white or green one; only `set_red(False)` withdraws it)
         self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
+        self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
+        self.red_ref: dict | None = None                     # the F1 way: {"lap": n, "order": [cars]} = the last line every car of the leader's lap had crossed when the red flag came; the restart grid and the lap count come from it
+        self.red_near: set[int] = set()                      # cars that were about to cross the line when the red came: that crossing is not a lap they could use to come in
         self.yellowjudge = PassJudge(15.0)                   # no overtaking under a plain yellow (the same judge as the VSC/FCY one, its own instance)
         self._yellow_id = 0
         self._was_yellow = False
@@ -188,6 +208,7 @@ class RaceControl:
         self.caution_notified = False      # the director was told that the track did not clear: the 'to go' is theirs
         self.stage_log: dict[int, list[str]] = {}   # NASCAR: stage number -> the steam ids in the order of the field when it ended (app/racecontrol.py `_record_stage`)
         self.finish_wait: set[int] | None = None
+        self.last_lap_orig: dict | None = None               # the session's own laps/time_min before the director's white flag cut it to the last lap (put back if the race goes on: yellow or green)
         self.finish_deadline = 0.0
         self.next_at: float | None = None
         self.next_delay_s = NEXT_SESSION_DELAY
@@ -263,8 +284,6 @@ class RaceControl:
                 raise ValueError("the mode of a VSC is fixed or delta")
             pen = self._clean_penalty(penalty or DEFAULT_PENALTY)
         with _lock:
-            if self.red_since is not None:   # (any new flag withdraws the red one)
-                self.red_since = None; self.red_laps = {}
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
                 self.flag = "green"
@@ -1099,6 +1118,10 @@ class RaceControl:
             clean = (bool(guid) and laps >= 2 and not cuts and car not in self._pit_lap and car != self.pace_car and self.flag in ("green", "white")
                      and now - ms / 1000.0 >= self._neutral_end and (self.session_ref or {}).get("session_type") == RACE_TYPE)
             self.pace.lap(car, ms, clean)
+            if laps > 0 and car != self.pace_car:
+                self.lap_times.setdefault(laps, {})[car] = now
+                for old_lap in [n for n in self.lap_times if n < laps - 3]:
+                    del self.lap_times[old_lap]
             self._flags_lap(car, car in self._pit_lap, now)
 
     def _rule(self, kind: str) -> dict:
@@ -1204,6 +1227,8 @@ class RaceControl:
         if self.red_since is not None and car in self.red_laps and car != self.pace_car and guid not in self.black:
             if self._pit_seen.get(car, 0.0) > self.red_since:
                 del self.red_laps[car]   # (it came into the pit lane after the red flag: obeyed)
+            elif car in self.red_near:
+                self.red_near.discard(car)   # (it was about to cross the line when the red came: that crossing is not a lap it could come in)
             else:
                 self.red_laps[car] -= 1
                 if self.red_laps[car] <= 0:
@@ -1252,12 +1277,18 @@ class RaceControl:
             out, self.flag_new = self.flag_new, []
             return out
 
-    def set_red(self, on: bool, now: float | None = None) -> None:
-        """The director shows (or withdraws) the red flag: every car must come into the pit lane before it completes `laps` more lap(s), or it gets the black flag."""
+    def set_red(self, on: bool, now: float | None = None, field=None) -> None:
+        """The director shows (or withdraws) the red flag: every car must come into the pit lane before it completes `laps` more lap(s), or it gets the black flag. With the field it also takes the F1
+        reference (`red_reference`): the restart order and lap come from the last line the whole lead lap had crossed, not from where each car was caught; a car within 5 % of the line is excused its next crossing."""
         with _lock:
             self.red_since = (self.clock.time() if now is None else now) if on else None
             self.red_laps = {c: self._rule("red")["laps"] for c in self.audit_guids if c != self.pace_car} if on else {}
-            self.audit("red_flag", on=on, executed=True)
+            self.red_ref, self.red_near = None, set()
+            if on and field is not None and (self.session_ref or {}).get("session_type") == RACE_TYPE:
+                prog = {c: p for c, p in field.snapshot().items() if c != self.pace_car}   # (the copy that is safe from a request thread; `samples()` is for the event loop)
+                self.red_ref = red_reference(prog, self.lap_times)
+                self.red_near = {c for c, p in prog.items() if p % 1.0 >= 0.95}   # (on the grid the progress is negative: -0.02 is 0.98 of the lap, behind the line)
+            self.audit("red_flag", on=on, executed=True, ref=self.red_ref)
             self._bump()
 
     def _flag_judges(self, samples: dict, speeds: dict[int, float], mono: float, now: float, racing: bool, in_pit: set) -> None:
@@ -1708,7 +1739,7 @@ class RaceControl:
             at = self.clock.time() if now is None else now
             notices = [{"id": n["id"], "kind": n["kind"], "left_s": math.ceil(n["until"] - at), "text": n["text"], "to": n["to"]} for n in self.notices if n["until"] > at]
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
-            return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
+            return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "red_ref": self.red_ref, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,

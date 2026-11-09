@@ -477,3 +477,17 @@ def test_damage_report_goes_to_the_rc_state_and_is_checked_against_the_driver(li
     assert hub.post(url, json={"car_id": 3, "name": "Ana", "level": 101}).status_code == 422
     assert hub.post(url, json={"car_id": 3, "name": "Ana", "level": 80}).status_code == 204
     assert rc.damage[3][0] == 80
+
+
+def test_the_directors_white_flag_is_the_last_lap_in_a_laps_race_and_in_a_timed_one():
+    from app.live import acsp
+    from app.racecontrol import last_lap_bytes
+    laps_race = {"session_type": 3, "session_index": 2, "name": "Race", "laps": 20, "time_min": 0, "wait_time": 60}
+    pkt, orig = last_lap_bytes(laps_race, leader_laps=7, elapsed_ms=0)
+    assert pkt == acsp.encode_set_session_info(2, "Race", 3, 8, 0, 60) and orig == {"laps": 20, "time_min": 0}   # the leader's lap + 1
+    assert last_lap_bytes({**laps_race, "laps": 8}, 7, 0) is None   # (already the last lap)
+    assert last_lap_bytes(laps_race, 7, 0, restore=orig)[0] == acsp.encode_set_session_info(2, "Race", 3, 20, 0, 60)   # yellow or green: the distance comes back
+    timed = {**laps_race, "laps": 0, "time_min": 30}
+    pkt, orig = last_lap_bytes(timed, 7, 12 * 60000 + 5000)
+    assert pkt == acsp.encode_set_session_info(2, "Race", 3, 0, 12, 60) and orig == {"laps": 0, "time_min": 30}   # the time is up: the next crossing is the chequered
+    assert last_lap_bytes({**laps_race, "session_type": 2}, 7, 0) is None

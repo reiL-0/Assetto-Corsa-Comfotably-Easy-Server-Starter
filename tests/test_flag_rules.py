@@ -132,7 +132,9 @@ def test_red_flag_sends_the_black_flag_to_whoever_does_not_come_in_before_the_la
     rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")   # car 1 finished its lap on the track: the black flag
     rc.lap_done(2, 100000, 0, 5, 1050.0, "G2")   # car 2 had come in: it obeyed
     assert "G1" in rc.black and "G2" not in rc.black
-    rc.set_flag("green")
+    rc.set_flag("checkered"); rc.set_flag("green")
+    assert rc.red_since is not None and "red" in (rc.auto_for(3, 0, 1.0) or {}), "the red flag goes with any track flag"
+    rc.set_red(False)
     assert rc.red_since is None and "red" not in (rc.auto_for(3, 0, 1.0) or {})
     rcmod._flag_dues_pending.clear()
 
@@ -164,4 +166,36 @@ def test_a_flag_is_served_only_by_a_pit_visit_after_it_was_given_and_a_full_ledg
     rc = rc_with(); rules(rc, yellow={"ladder": [0]})
     assert rc._flag_sanction("yellow", 1, rc._rule("yellow"), 1000.0) is False
     assert not rc.penalties and not rc.conduct and rc.flag_count.get(("G1", "yellow"), 0) == 0, "nothing recorded, nobody sanctioned"
+    rcmod._flag_dues_pending.clear()
+
+
+def test_red_flag_order_is_the_last_line_the_whole_lead_lap_had_crossed():
+    from app.live.racecontrol import red_reference
+    times = {4: {1: 100.0, 2: 101.0, 3: 102.5}, 5: {1: 190.0}}   # the leader crossed lap 5; the others had not yet
+    prog = {1: 5.02, 2: 4.97, 3: 4.90, 4: 2.60}   # car 4 is lapped
+    ref = red_reference(prog, times)
+    assert ref == {"lap": 4, "order": [1, 2, 3, 4]}, "the line before: order of lap 4, the lapped car after the lead lap, no lap given back"
+    times[5].update({2: 191.0, 3: 192.0})
+    assert red_reference({1: 5.10, 2: 5.05, 3: 5.01, 4: 2.60}, times) == {"lap": 5, "order": [1, 2, 3, 4]}   # everyone crossed 5: that line
+    assert red_reference({1: 0.5, 2: 0.4}, {}) is None   # no full lap yet: a plain start
+    swapped = {4: {1: 100.0, 2: 99.0}}   # the order is the one of the crossings, not where they were caught
+    assert red_reference({1: 4.9, 2: 4.95}, swapped)["order"] == [2, 1]
+
+
+def test_the_car_about_to_cross_the_line_when_the_red_comes_is_excused_that_crossing():
+    class F:
+        def snapshot(self):
+            return {1: 3.97, 2: 3.40, 3: -0.02}   # (car 3 is on the grid, behind the line)
+    rcmod._flag_dues_pending.clear()
+    rc = rc_with(); rules(rc, red={"laps": 1})
+    rc.session_ref = {"session_type": 3}
+    rc.audit_guids = {1: "G1", 2: "G2"}
+    rc.set_red(True, now=1000.0, field=F())
+    assert rc.red_near == {1, 3}, "a car behind the line on the grid has its 0.98 too"
+    assert rc.red_ref["lap"] == 3
+    rc.lap_done(1, 100000, 0, 4, 1005.0, "G1")   # car 1 crossed the line under red, it could not have come in
+    rc.lap_done(2, 100000, 0, 3, 1050.0, "G2")   # car 2 had a whole lap: nothing came in -> black
+    assert "G1" not in rc.black and "G2" in rc.black
+    rc.lap_done(1, 100000, 0, 5, 1100.0, "G1")   # its next crossing counts
+    assert "G1" in rc.black
     rcmod._flag_dues_pending.clear()
