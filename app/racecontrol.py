@@ -72,7 +72,7 @@ class FlagIn(BaseModel):
     grace_s: int = Field(default=GRACE_DEFAULT, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves
     tolerance_kmh: int = Field(default=TOL_DEFAULT, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends
     penalty: PenaltyCfg = PenaltyCfg()                                        # a VSC: what whoever is still over gets
-    mode: Literal["fixed", "delta"] = "fixed"                                  # a VSC: a fixed pace, or the F1 delta (a minimum time per sector; falls back to the fixed pace until a clean lap exists)
+    mode: Literal["fixed", "delta"] = "delta"                                  # VSC and FCY are judged by delta (the default); `fixed` is only the old single pace limit, kept for an API client that asks for it
 
 
 class PenaltyIn(BaseModel):

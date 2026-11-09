@@ -163,6 +163,9 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1, 4}
     rc.set_flag("fcy", 80, grace_s=5, mode="delta", now=2000.0)
     assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
+    assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: the pace itself is its reference, even with reference laps known"
+    assert rc.delta_block("gt3")["min_ms"] == rc.delta_block("lmp")["min_ms"] == [round(4000 / 20 / (80 / 3.6) * 1000)] * 20, "the same time in every sector, for every model: the pace over the sector"
+    assert rc.delta_block("gt3")["credit"] == 3.0, "the credit that can be banked is 3 s"
     rc.set_flag("fcy", 80, grace_s=5, mode="fixed", now=2100.0)
     assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY with mode=fixed is fixed pace"
     import pytest
