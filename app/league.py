@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import _event_rules, cut_notices, cut_penalties, give_back_penalties, neutral_penalties
+from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -228,6 +228,12 @@ class _ManualCutRule(dict):
     live_only = True
 
 
+class _ManualDrsRule(dict):
+    """A manual session's DRS rule: the drive-through is live only (no result penalty), like its cuts."""
+
+    live_only = True
+
+
 DEFAULT_CUT_RULE = {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5, 5, 10]}
 
 
@@ -331,7 +337,7 @@ def drs_rule(server_id: int) -> dict | None:
                 raw = (server.session or {}).get("drs_rule") if server else None
                 drs = DrsRule.model_validate(raw) if raw is not None else None
             if drs:
-                rule = drs.model_dump()
+                rule = _ManualDrsRule(drs.model_dump()) if sc is None else drs.model_dump()
         if len(_DRS_RULES) > 64:
             _DRS_RULES.clear()
         _DRS_RULES[server_id] = (time.time(), rule)
@@ -512,6 +518,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             _race_served(sess, c, f.stat().st_mtime)
             cut_notices(sess, c, sc.server_id, f.name, parsed)
             cut_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
+            drs_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             give_back_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             neutral_penalties(sess, c, sc.server_id, f.name, parsed, f.stat().st_mtime, last_end)
             last_end = f.stat().st_mtime

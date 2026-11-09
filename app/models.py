@@ -233,6 +233,23 @@ class CutDue(SQLModel, table=True):
     state: str = "due"
 
 
+class DrsDue(SQLModel, table=True):
+    """DRS used while it was off (app/live/drs.py): the driver owes a drive-through; `seconds` is what the result charges when it was never served. Written when it happens (`state` due), marked `served` when a pit-lane
+    pass after it is seen; the first Race result counted after `ts` turns a still-due one into a time `Penalty` (app/stewards/auto.py `drs_penalties`). One per (server, session, driver, DRS-off period)."""
+
+    __tablename__ = "drs_dues"
+    __table_args__ = (Index("ux_drs_dues_period", "server_id", "session_key", "driver_guid", "period", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    session_key: str
+    driver_guid: str
+    period: int   # the DRS-off period (`Drs.window`): one offence per driver in each
+    seconds: int
+    ts: float
+    state: str = "due"  # due | served | applied | expired (its race was counted without the driver)
+
+
 class GiveBackDue(SQLModel, table=True):
     """A driver who gained places off the track and did not give them back (app/live/giveback.py): written when the time to give them back is up, or when a steward sanctions it at once. The result of the race is
     not there yet while it happens, so the penalty waits here: the first Race result of the server counted after `ts` turns it into a time `Penalty` (app/stewards/auto.py `give_back_penalties`)."""

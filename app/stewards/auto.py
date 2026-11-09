@@ -13,7 +13,7 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.live.raceaudit import record
-from app.models import Championship, ChampionshipEvent, CutDue, Event, GiveBackDue, NeutralDue, Notice, Penalty, ResultClose, Server
+from app.models import Championship, ChampionshipEvent, CutDue, DrsDue, Event, GiveBackDue, NeutralDue, Notice, Penalty, ResultClose, Server
 from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
 
@@ -179,6 +179,42 @@ def stage_cut_dues(sess: Session, rows: list[dict], served: set[tuple] = frozens
     for server_id, session_key, guid, round_no in served:
         sess.execute(update(CutDue).where(CutDue.server_id == server_id, CutDue.session_key == session_key, CutDue.driver_guid == guid,
                                           CutDue.round == round_no, CutDue.state == "due").values(state="served"))
+
+
+def stage_drs_dues(sess: Session, rows: list[dict], served: set[tuple] = frozenset()) -> None:
+    """Idempotent inserts of the DRS offences, then the drive-throughs served (a `due` one becomes `served`, never back); the caller owns the transaction and acknowledges after commit."""
+    from sqlalchemy.dialects.sqlite import insert
+    for row in rows:
+        sess.execute(insert(DrsDue).values(**row, state="due").on_conflict_do_nothing(index_elements=["server_id", "session_key", "driver_guid", "period"]))
+    for server_id, session_key, guid, period in served:
+        sess.execute(update(DrsDue).where(DrsDue.server_id == server_id, DrsDue.session_key == session_key, DrsDue.driver_guid == guid, DrsDue.period == period, DrsDue.state == "due").values(state="served"))
+
+
+def drs_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
+    """DRS used while it was off (app/live/drs.py): every `DrsDue` of this server that fell due while this schedule ran (`since` up to the end of this Race) and was never served becomes a time `Penalty` of the
+    rule's `unserved_s` seconds on this result, once (`auto_key` = drs:<id>); a served one only closes. Not capped by the rulebook's automatic limit: the seconds are the ones the admin chose for DRS.
+    A due of a driver who is not in the result is `expired`. Does not commit; returns how many penalties were made."""
+    rb = _applied_rules(sess, c, server_id, filename)
+    if parsed["type"] != "Race" or sess.get(ResultClose, (server_id, filename)):
+        return 0
+    from app.live.racecontrol import pending_drs_dues, pending_drs_served
+    stage_drs_dues(sess, [r for r in pending_drs_dues() if r["server_id"] == server_id], {k for k in pending_drs_served() if k[0] == server_id})   # (the last offences, even if the monitor has not written them yet)
+    racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, server_id, filename)
+    made = 0
+    for due in sess.exec(select(DrsDue).where(DrsDue.server_id == server_id, DrsDue.state.in_(("due", "served")), DrsDue.ts >= since, DrsDue.ts <= finished_at).order_by(DrsDue.ts)).all():
+        if due.driver_guid not in racing:
+            due.state = "expired"
+        else:
+            if due.state == "due":
+                key = f"drs:{due.id}"
+                if not sess.exec(select(Penalty.id).where(Penalty.auto_key == key)).first():
+                    sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=due.driver_guid, kind="time", value=due.seconds * 1000, auto_key=key, created_by="auto",
+                                     reason="DRS usado con el DRS inactivo, drive-through sin cumplir"))
+                    _audit_proposal(sess, server_id, "drs_penalty", rb, driver_guid=due.driver_guid, filename=filename, period=due.period, final_seconds=due.seconds, source="auto")
+                    made += 1
+            due.state = "applied"
+        sess.add(due)
+    return made
 
 
 def cut_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:
