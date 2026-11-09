@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     # The game draws flags of its own (blue, yellow, its black one) next to the hub's banners. With every flag a rule of ours they are redundant: `NO_NATIVE_FLAGS = 1` in the hub's section asks the game for no flag
     # (physics.overrideRacingFlag(None), NOT yet checked in a real client: off until it is). Env: ACM_CSP_HIDE_NATIVE_FLAGS
     csp_hide_native_flags: bool = False
+    # The mode of the automatic flags (blue, danger, yellow, orange disc, black, red) of a server whose session has NO applied rulebook (a manual session, a test server): off | shadow | live. A league's rulebook
+    # always decides for its own events; "shadow" (decide and write down, show and sanction nothing) is what production keeps, a staging server for testing sets "live". Env: ACM_FLAG_MODES_DEFAULT
+    flag_modes_default: Literal["off", "shadow", "live"] = "shadow"
     # CSP is MANDATORY on a hosted client's servers (the owner's decision, 2026-11-02: all its drivers use it, build 3898 = 0.3.0): the hub script is marked REQUIRED (CSP closes the game of whoever cannot load
     # it) and the server's TRACK carries the minimum build (`csp/<build>/../<track>`, CSP's own mechanism: cup.acstuff.club/docs/csp/misc/server-extra-options). None = the profile's default
     # (client: required, build 3898; the league: neither); 0 turns the minimum build off. Env: ACM_CSP_HUB_REQUIRED, ACM_CSP_MIN_BUILD

@@ -161,3 +161,13 @@ def test_a_failed_or_changed_reading_of_the_league_takes_a_live_flag_away():
     assert rc.auto_for(1, 0, 100.5, {"blue": "live", "danger": "shadow"})
     assert rc.auto_for(1, 0, 100.5, {}) is None, "the reading failed"
     assert rc.auto_for(1, 0, 100.5, {"blue": "shadow", "danger": "shadow"}) is None, "the league changed it to shadow"
+
+
+def test_a_server_with_no_rulebook_takes_its_default_modes_from_the_deployment(monkeypatch):
+    from app import league
+    from app.config import settings
+    for default in ("shadow", "live"):
+        monkeypatch.setattr(settings, "flag_modes_default", default)
+        league._FLAG_MODES.clear()
+        assert set(league.flag_modes(987001).values()) == {default}, default
+    league._FLAG_MODES.clear()
