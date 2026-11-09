@@ -44,7 +44,7 @@ from app.live.caution import Caution
 from app.live.giveback import GiveBack
 from app.live.incidents import MOVING_KMH, STOP_KMH, NeutralizationWatch, Watch
 from app.live.nopass import PassJudge
-from app.live.pacejudge import PaceJudge
+from app.live.pacejudge import PaceDeltaJudge, PaceJudge
 from app.live.sectors import DeltaJudge, RefLaps, SectorClock
 from app.live.nascar import BREAK, CAUTION, Nascar, STAGES_DEFAULT
 
@@ -112,13 +112,13 @@ class RaceControl:
         self.rev, self.ts = 0, self.clock.time()
         self.cuts_session_key = uuid.uuid4().hex
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
-        self.track_length_m: float | None = None   # what the manager knows of the track's length (the director's flag and the field's look both bring it); None = not known yet
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
         self.sectorclock, self.reflaps, self.deltajudge = SectorClock(), RefLaps(), DeltaJudge()   # the F1-style VSC (app/live/sectors.py): sector crossings, the best clean lap per car model, the delta judge
         self._seen: dict[int, float] = {}       # car -> stamp of the last packet fed to the sector clock (the monitor looks 4 times a second, the packets come 5)
         self.passjudge = PassJudge()            # no overtaking under a VSC / FCY (app/live/nopass.py): give the place back or the flag's penalty
         self.pacejudge = PaceJudge()            # the continuous judge of a VSC / FCY's pace (app/live/pacejudge.py), SHADOW only for now: it writes down who it WOULD penalise; `evaluate` below still decides
+        self.pacedelta = PaceDeltaJudge()       # the delta by speed of the cars with no reference lap (app/live/pacejudge.py): an FCY, or a VSC before its first clean lap
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
         self.neutralization_watch = NeutralizationWatch()
@@ -166,18 +166,10 @@ class RaceControl:
         self.next_delay_s = NEXT_SESSION_DELAY
         self._clear_vsc()
 
-    def _pace_profile(self) -> list[int] | None:
-        """The minimum ms of each of the 20 sectors for a car with no reference lap of its own: the time the pace needs for a twentieth of the track. None while the length of the track is not known: with a guessed
-        length the cars would be punished or forgiven for the wrong reasons, so they stay with the fixed-pace judge until it is."""
-        L, pace = self.track_length_m, self.pace_kmh
-        if not L or L < 100 or not pace:
-            return None
-        return [round((L / 20.0) / (pace / 3.6) * 1000)] * 20
-
     def _clear_vsc(self) -> None:
         self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0}
         self.evaluated, self.violations, self.exempt = True, [], []
-        self.vsc_mode, self.vsc_profiles, self.vsc_fallback, self.vsc_default_profile = "fixed", {}, False, None   # `delta` only for a VSC/FCY that started with at least one reference lap or fallback; vsc_profiles: car model -> minimum ms of the 20 sectors, frozen at the start
+        self.vsc_mode, self.vsc_profiles, self.vsc_fallback = "fixed", {}, False   # `delta` only for a VSC/FCY that started with at least one reference lap or fallback; vsc_profiles: car model -> minimum ms of the 20 sectors, frozen at the start
         self._since: float | None = None   # the instant (clock of the samples) the grace of a delta VSC ended: latched ONCE, never recomputed from the wall clock
         self._pen_cars: set[tuple[int, int]] = set()   # (car, slot generation) already penalised in this flag, by whichever judge: one penalty per car and flag
         self._green_clear_since = self._green_last_look = None
@@ -214,7 +206,7 @@ class RaceControl:
         self.ts = self.clock.time()
 
     @fieldrec.capture(_lock)
-    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None, mode: str = "fixed", track_length_m: float | None = None) -> list[tuple]:
+    def set_flag(self, flag: str, pace_kmh: int | None = None, grace_s: int = GRACE_DEFAULT, tolerance_kmh: int = TOL_DEFAULT, penalty: dict | None = None, now: float | None = None, source: str = "director", field=None, mode: str = "fixed") -> list[tuple]:
         """Return NASCAR actions for the caller to execute after releasing the lock."""
         if flag not in FLAGS:
             raise ValueError(f"flag must be one of {', '.join(FLAGS)}")
@@ -254,16 +246,13 @@ class RaceControl:
                 self.caution = None
                 self.notices = [x for x in self.notices if not x.get("hold") or x.get("hold") == "winner"]   # (the caution is over: what was held on the screen goes with it, but the winner stays until the session restarts)
             if flag in SLOWING:
-                if track_length_m:
-                    self.track_length_m = track_length_m
                 self.pace_kmh, self.tolerance_kmh, self.vsc_penalty = pace_kmh, tolerance_kmh, pen
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
                 self.legacy = "pace" in self.auto_off
                 delta_wanted = mode == "delta" and flag in SLOWING and not self.legacy
                 self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if (delta_wanted and flag == "vsc") else {}   # a VSC: the minimum time of every sector from the car's own best clean lap; an FCY has no reference lap: the pace itself is the reference (the default profile below)
-                self.vsc_default_profile = self._pace_profile() if delta_wanted else None   # (None while the track's length is unknown: autoflags_tick fills it in as soon as it is)
                 self.vsc_mode = "delta" if delta_wanted else "fixed"
-                self.vsc_fallback = delta_wanted and flag == "vsc" and not bool(self.vsc_profiles)   # a VSC asked for reference laps and there are none yet: its sectors take the pace's time
+                self.vsc_fallback = delta_wanted and flag == "vsc" and not bool(self.vsc_profiles)   # a VSC asked for reference laps and there are none yet: its cars are judged by the speed delta until they have one
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 samples = field.samples() if hasattr(field, "samples") and callable(field.samples) else None
@@ -1015,10 +1004,6 @@ class RaceControl:
     def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
         """One look for the blue flag and the danger warning (shadow). `mono`: self.clock.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
         with _lock:
-            if length:
-                self.track_length_m = length
-            if self.vsc_mode == "delta" and self.vsc_default_profile is None and self.flag in SLOWING:
-                self.vsc_default_profile = self._pace_profile()   # the length became known while the flag runs: the cars with no reference lap pass from the fixed pace to the delta
             racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
@@ -1090,13 +1075,15 @@ class RaceControl:
                     self.reflaps.feed(car, models.get(car), events, car in in_pit)
                 else:
                     self.reflaps.forget(car)   # (a lap that was running when the green went away is not a reference: its partial times are dropped)
-                prof = (self.vsc_profiles.get(models.get(car)) or self.vsc_default_profile) if self.vsc_mode == "delta" else None
+                prof = self.vsc_profiles.get(models.get(car)) if self.vsc_mode == "delta" else None   # (a model with a reference lap: its sectors; any other car: its speed, below)
                 if prof is not None:
                     for d in self.deltajudge.feed(mono, self.vsc_id, delta_on, since, car, s.generation, prof, events, car in in_pit):
                         found.append({**d, "kind": "delta", "speed_kmh": round(speeds.get(car) or 0)})
-            if self.vsc_mode == "delta":
-                covered = {c for c in samples if (self.vsc_profiles.get(models.get(c)) or self.vsc_default_profile) is not None}
             active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
+            if self.vsc_mode == "delta":
+                covered = {c for c in samples if c != pc}   # every car is judged by a delta: by sectors when its model has a reference lap, else by its own speed against a virtual car at the limit
+                nolap = {c: s for c, s in samples.items() if c != pc and self.vsc_profiles.get(models.get(c)) is None}
+                found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit)]
             fixed = self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc and c not in covered},
                                         {c: v for c, v in speeds.items() if c != pc and c not in covered}, in_pit)
             found += [{**d, "kind": "pace"} for d in fixed]
@@ -1149,10 +1136,13 @@ class RaceControl:
             return out
 
     def delta_block(self, model: str | None) -> dict | None:
-        """What a screen of a car of this model needs to show the delta of the VSC/FCY being run: the frozen minimum ms per sector and the judge's numbers. None if this is not a delta flag for it."""
+        """What a screen of a car of this model needs to show the delta of the VSC/FCY being run: the frozen minimum ms per sector (a model with a reference lap) or the limit speed (any other car), and the judge numbers. None if this is not a delta flag."""
         with _lock:
-            prof = (self.vsc_profiles.get(model) or self.vsc_default_profile) if (self.flag in SLOWING and self.vsc_mode == "delta") else None
-            return None if prof is None else {"mode": "delta", "min_ms": list(prof), "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
+            if self.flag not in SLOWING or self.vsc_mode != "delta":
+                return None
+            base = {"mode": "delta", "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
+            prof = self.vsc_profiles.get(model)
+            return {**base, "min_ms": list(prof)} if prof is not None else {**base, "limit_kmh": round((self.pace_kmh or 0) + self.tolerance_kmh)}   # (no reference lap: a virtual car at the limit speed, by the car's own speed)
 
     @fieldrec.capture(_lock)
     def set_pace_config(self, tolerance_kmh: int | None = None, penalty: dict | None = None) -> None:
@@ -1172,7 +1162,7 @@ class RaceControl:
 
     def autoflags_view(self) -> dict:
         with _lock:
-            return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:], "delta": list(self.deltajudge.log)[-30:], "auto_off": sorted(self.auto_off),
+            return {**self.autoflags.view(), "pace": list(self.pacejudge.log)[-30:], "delta": sorted([*self.deltajudge.log, *self.pacedelta.log], key=lambda x: x["t"])[-30:], "auto_off": sorted(self.auto_off),
                     "vsc_mode": self.vsc_mode, "vsc_fallback": self.vsc_fallback, "ref_models": sorted(self.reflaps.best)}
 
     @fieldrec.capture(_lock)
