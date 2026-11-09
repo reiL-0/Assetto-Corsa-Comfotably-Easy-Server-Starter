@@ -85,9 +85,10 @@ class PaceDeltaJudge:
         c = self._car.get(car)
         return None if c is None else {"delta": round(c["delta"], 2)}
 
-    def totals(self) -> dict[int, tuple[int, float]]:
-        """car -> (slot generation, the delta of the whole flag without the credit limit) of the cars being judged now: what the car has gained (negative) or lost over the virtual car since the judging started."""
-        return {car: (c["generation"], c["real"]) for car, c in self._car.items()}
+    def totals(self, flag_id: int) -> dict[int, tuple[int, float]]:
+        """car -> (slot generation, the delta of the whole flag without the credit limit) of the cars being judged now in flag `flag_id`: what the car has gained (negative) or lost over the virtual car since the
+        judging started. Empty when the judge has not looked at that flag yet (a flag that ended before the first look must not inherit what the one before left)."""
+        return {} if flag_id != self._flag else {car: (c["generation"], c["real"]) for car, c in self._car.items()}
 
     def step(self, now: float, flag_id: int, active: bool, pace: float, band: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int]) -> list[dict]:
         """`active`: a VSC/FCY whose grace is over. `pace` and `band`: the pace and the tolerance, km/h. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""

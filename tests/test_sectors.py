@@ -368,3 +368,20 @@ def test_an_fcy_proposes_the_severe_penalty_when_the_green_comes_if_the_delta_is
     rc.set_flag("green", now=1061.0)
     assert _dues() == [("fcy", 0, 1, 10)], "a second green does not queue it again"
     rcmod._neutral_dues_pending.clear()
+
+
+def test_an_fcy_that_ends_before_the_judge_looked_at_it_does_not_inherit_the_totals_of_the_one_before():
+    from app.live import racecontrol as rcmod
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rcmod._neutral_dues_pending.clear()
+    rc = RaceControl({"session_type": RACE_TYPE})
+    models = {1: "gt3"}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)
+    stay = {1: lambda p: 120 / 3.6}
+    _, p = _field(rc, stay, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3})
+    _field(rc, stay, 5.0, 20.0, models, wall0=1006.0, p0=p)   # the judge holds a negative total of this FCY
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1100.0)   # a new FCY out and over before the judge looks at it
+    rc.set_flag("green", now=1101.0)
+    assert _dues() == [], "nothing is queued for the second FCY: nobody was judged in it"
+    rcmod._neutral_dues_pending.clear()

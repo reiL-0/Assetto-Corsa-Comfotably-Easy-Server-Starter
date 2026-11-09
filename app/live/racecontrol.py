@@ -1061,7 +1061,7 @@ class RaceControl:
         severe_s = self.vsc_penalty.get("severe_s", 0)
         if severe_s <= 0 or not self._is_race() or not self.judging_continuously() or self.vsc_mode != "delta":
             return
-        for car, (generation, real) in self.pacedelta.totals().items():
+        for car, (generation, real) in self.pacedelta.totals(self.vsc_id).items():
             if real < -self.pacedelta.tol_s:
                 self._queue_neutral_due(car, generation, "fcy", 0, severe_s, now, f"FCY: delta total {real:+.2f} s al volver a verde")
 
