@@ -1083,7 +1083,7 @@ class RaceControl:
             if self.vsc_mode == "delta":
                 covered = {c for c in samples if c != pc}   # every car is judged by a delta: by sectors when its model has a reference lap, else by its own speed against a virtual car at the limit
                 nolap = {c: s for c, s in samples.items() if c != pc and self.vsc_profiles.get(models.get(c)) is None}
-                found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit)]
+                found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, self.pace_kmh or 0, self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit)]
             fixed = self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc and c not in covered},
                                         {c: v for c, v in speeds.items() if c != pc and c not in covered}, in_pit)
             found += [{**d, "kind": "pace"} for d in fixed]
@@ -1136,13 +1136,13 @@ class RaceControl:
             return out
 
     def delta_block(self, model: str | None) -> dict | None:
-        """What a screen of a car of this model needs to show the delta of the VSC/FCY being run: the frozen minimum ms per sector (a model with a reference lap) or the limit speed (any other car), and the judge numbers. None if this is not a delta flag."""
+        """What a screen of a car of this model needs to show the delta of the VSC/FCY being run: the frozen minimum ms per sector (a model with a reference lap) or the pace and its tolerance (any other car), and the judge numbers. None if this is not a delta flag."""
         with _lock:
             if self.flag not in SLOWING or self.vsc_mode != "delta":
                 return None
             base = {"mode": "delta", "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
             prof = self.vsc_profiles.get(model)
-            return {**base, "min_ms": list(prof)} if prof is not None else {**base, "limit_kmh": round((self.pace_kmh or 0) + self.tolerance_kmh)}   # (no reference lap: a virtual car at the limit speed, by the car's own speed)
+            return {**base, "min_ms": list(prof)} if prof is not None else {**base, "pace_kmh": self.pace_kmh or 0, "band_kmh": self.tolerance_kmh}   # (no reference lap: a virtual car at the pace, by the car's own speed; the tolerance is a dead band)
 
     @fieldrec.capture(_lock)
     def set_pace_config(self, tolerance_kmh: int | None = None, penalty: dict | None = None) -> None:
