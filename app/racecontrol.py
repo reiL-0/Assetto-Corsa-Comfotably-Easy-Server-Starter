@@ -43,7 +43,7 @@ from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, blue_rule_of, blue_rule_peek, blue_rule_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, flag_rules_of, flag_rules_peek, flag_rules_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -129,9 +129,43 @@ _unsaved_dues: list[dict] = []   # penalties that fell due and could not be writ
 MAX_UNSAVED_DUES = 1000
 
 
+def _flag_messages(inst, rc) -> None:
+    """Tell the drivers what the flags cost them (offences) and who they must give a place back to (a yellow). The discs, the black and the red flags are not notices: the hub draws them from its own state."""
+    for o in rc.take_flag_messages():
+        car, kind, step = o["car"], o.get("kind"), o.get("step")
+        if o["msg"] == "yellow_open" and o["live"]:
+            names = ", ".join(_name(inst, c) for c in o["passed"])
+            secs = o["seconds"]
+            _say(rc, f"ADELANTASTE BAJO AMARILLA: devuelve la posición a {names} · {secs} s", "flag", car)
+        elif o["msg"] != "offence":
+            continue
+        elif kind == "blue" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "blue":
+            _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · +{step} s", "penalty", car)
+        elif kind == "danger" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: pasaste un coche parado a demasiada velocidad · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "danger":
+            _say(rc, f"PENALIZACIÓN: pasaste un coche parado a demasiada velocidad · +{step} s", "penalty", car)
+        elif kind == "yellow" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "yellow":
+            _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
+        elif kind == "red" and step == 0:
+            laps = o["laps"]
+            _say(rc, f"PENALIZACIÓN: no entraste a boxes con la bandera roja · drive-through ({laps} vueltas)", "penalty", car)
+        elif kind == "red":
+            _say(rc, f"PENALIZACIÓN: no entraste a boxes con la bandera roja · +{step} s", "penalty", car)
+        elif kind == "black":
+            _say(rc, f"PENALIZACIÓN: ignoraste la bandera negra · +{step} s", "penalty", car)
+
+
 def blue_stale_servers() -> list[int]:
     """Servers in a race whose cached blue-flag rule has to be read again (a worker thread does it: never the event loop)."""
-    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and blue_rule_stale(i.server_id)]
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and flag_rules_stale(i.server_id)]
 
 
 def save_flag_dues() -> None:
@@ -363,24 +397,19 @@ def autoflags_tick(now: float) -> None:
         rc = state_of(inst.server_id, True, inst.acsp.session, create=True)   # (a race always has its state: the blue flag needs the pace of its cars)
         if not rc:
             continue
-        rc.blue_rule = blue_rule_peek(inst.server_id)
+        rc.rules = flag_rules_peek(inst.server_id)
         rc.audit_guids = {i: c.get("driver_guid") for i, c in inst.acsp.cars.items()}   # (who is in each slot NOW: a sanction needs a name, not only a number)
         out = _non_racing_guids(now)
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
-        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow"}
+        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow", "yellow": "shadow", "meatball": "shadow", "black": "shadow", "red": "shadow"}
         if rc.flag_modes != modes:
             rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
-        for o in rc.take_blue_offences():   # the driver is told what the blue flag cost him
-            if o["step"] == 0:
-                laps = o["laps"]
-                _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · drive-through ({laps} vueltas)", "penalty", o["car"])
-            else:
-                secs = o["step"]
-                _say(rc, f"PENALIZACIÓN: no cediste el paso a la bandera azul · +{secs} s", "penalty", o["car"])
+        rc.yellow_tick(samples, speeds, mono, now)
+        _flag_messages(inst, rc)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
         for d in rc.pass_tick(samples, speeds, mono, now):
             if not d["applied"]:
@@ -571,6 +600,8 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
     if body.kind in PER_DRIVER and body.car_id is None:
         raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
     _, rc = _control(server_id, sess)
+    if body.kind == "red":
+        rc.set_red(True)   # (the cars have `pit_s` seconds to be in the pit lane; the next flag withdraws it)
     _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
     log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()
@@ -1068,7 +1099,7 @@ async def monitor_forever() -> None:
             for sid in flag_modes_stale_servers():
                 await asyncio.to_thread(flag_modes_of, sid)
             for sid in blue_stale_servers():
-                await asyncio.to_thread(blue_rule_of, sid)
+                await asyncio.to_thread(flag_rules_of, sid)
             for sid in drs_stale_servers():
                 await asyncio.to_thread(drs_rule_of, sid)
             for sid in give_back_stale_servers():

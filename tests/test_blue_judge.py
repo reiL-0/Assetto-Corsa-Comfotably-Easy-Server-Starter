@@ -6,6 +6,10 @@ from app.live.racecontrol import RaceControl
 L = 4000.0   # track length, m
 
 
+def offences(rc):
+    return [o for o in rc.take_flag_messages() if o["msg"] == "offence"]
+
+
 def rc_live(laps_a=90000, laps_b=89000):
     rc = RaceControl(session_ref={"session_type": 3})
     rc.server_id = 7
@@ -44,19 +48,19 @@ def test_the_offence_comes_after_yield_s_once_per_appearance_and_follows_the_lad
     tick(rc, 10.0)
     assert rc.auto_for(1, 0, 10.0)["blue"]["left_s"] == 15
     tick(rc, 20.0)
-    assert rc.auto_for(1, 0, 20.0)["blue"]["left_s"] == 5 and not rc.penalties and not rc.take_blue_offences()
+    assert rc.auto_for(1, 0, 20.0)["blue"]["left_s"] == 5 and not rc.penalties and not offences(rc)
     tick(rc, 26.0)   # 16 s since it appeared: he did not let him through
-    [o] = rc.take_blue_offences()
+    [o] = offences(rc)
     assert (o["car"], o["seq"], o["step"]) == (1, 1, 0) and [p["car_id"] for p in rc.penalties] == [1], "step 0 of the ladder: a drive-through"
     [row] = rcmod.pending_flag_dues()
     assert (row["driver_guid"], row["kind"], row["seq"], row["seconds"]) == ("GA", "blue", 1, 10), "unserved costs unserved_s"
     assert rc.auto_for(1, 0, 26.0)["blue"]["ignored"] is True and rc.auto_for(1, 0, 26.0)["blue"]["n"] == 1
     tick(rc, 40.0)
-    assert not rc.take_blue_offences(), "one offence per appearance of the flag"
+    assert not offences(rc), "one offence per appearance of the flag"
     tick(rc, 41.0, behind_m=900.0)   # he got past or went away: the blue is gone
     assert not rc.autoflags.blue and not rc.blue_since
     tick(rc, 50.0); tick(rc, 66.0)   # it appears again and is ignored again
-    [o2] = rc.take_blue_offences()
+    [o2] = offences(rc)
     assert (o2["seq"], o2["step"]) == (2, 5) and len(rc.penalties) == 1, "step 1 of the ladder: 5 s on the result, no second drive-through"
     assert sorted(r["seconds"] for r in rcmod.pending_flag_dues()) == [5, 10]
     rc.report_pit(1, True, now=rc.clock.time() + 5)   # a pit-lane pass serves the drive-through only
@@ -69,9 +73,9 @@ def test_shadow_nascar_and_a_rule_without_ladder_never_sanction():
         rc = rc_live()
         rc.flag_modes = {"blue": mode, "danger": "shadow"}
         rc.nascar = object() if nascar else None
-        rc.blue_rule = {**rcmod.BLUE_DEFAULT, "ladder": ladder}
+        rc.rules = {**rcmod.FLAG_DEFAULTS, "blue": {**rcmod.FLAG_DEFAULTS["blue"], "ladder": ladder}}
         tick(rc, 10.0); tick(rc, 40.0)
-        assert not rc.take_blue_offences() and not rc.penalties, (mode, nascar, ladder)
+        assert not offences(rc) and not rc.penalties, (mode, nascar, ladder)
     rc = rc_live(); rc.nascar = object()
     tick(rc, 10.0)
     assert not rc.autoflags.blue, "NASCAR: a lapped car need not give way: no blue at all"
@@ -81,15 +85,15 @@ def test_an_unknown_driver_is_never_sanctioned_and_a_neutralisation_restarts_the
     rcmod._flag_dues_pending.clear()
     rc = rc_live(); rc.audit_guids = {}
     tick(rc, 10.0); tick(rc, 40.0)
-    assert not rc.take_blue_offences() and not rc.penalties and not rcmod.pending_flag_dues(), "a car that cannot be named is not sanctioned"
+    assert not offences(rc) and not rc.penalties and not rcmod.pending_flag_dues(), "a car that cannot be named is not sanctioned"
     rc = rc_live()
     tick(rc, 10.0); tick(rc, 20.0)
     rc.flag = "yellow"; tick(rc, 21.0); tick(rc, 40.0)   # a caution: the flag is gone and so is the countdown
     assert not rc.autoflags.blue and not rc.blue_since and not rc.blue_ignored
     rc.flag = "green"; tick(rc, 50.0); tick(rc, 51.0)
-    assert not rc.take_blue_offences(), "back to green the seconds start again: no instant offence with the time accumulated before"
+    assert not offences(rc), "back to green the seconds start again: no instant offence with the time accumulated before"
     tick(rc, 66.0)
-    assert [o["seq"] for o in rc.take_blue_offences()] == [1]
+    assert [o["seq"] for o in offences(rc)] == [1]
 
 
 def test_a_second_drive_through_is_not_added_but_the_one_pit_pass_serves_both():
@@ -97,7 +101,7 @@ def test_a_second_drive_through_is_not_added_but_the_one_pit_pass_serves_both():
     rc = rc_live()
     rc.add_penalty(1, 3)   # the car already owes a drive-through
     tick(rc, 10.0); tick(rc, 26.0)
-    assert len(rc.penalties) == 1 and [o["step"] for o in rc.take_blue_offences()] == [0]
+    assert len(rc.penalties) == 1 and [o["step"] for o in offences(rc)] == [0]
     rc.report_pit(1, True, now=rc.clock.time() + 5)
     assert rcmod.pending_flag_served() == {(7, rc.cuts_session_key, "GA", "blue", 1)}, "its due is closed by the same pass"
     rcmod._flag_dues_pending.clear(); rcmod._flag_served.clear()

@@ -200,7 +200,7 @@ def stage_flag_dues(sess: Session, rows: list[dict], served: set[tuple] = frozen
                                            FlagDue.seq == seq, FlagDue.state == "due").values(state="served"))
 
 
-FLAG_REASONS = {"blue": "No cedió el paso a la bandera azul"}
+FLAG_REASONS = {"blue": "No cedió el paso a la bandera azul", "danger": "Pasó un coche parado a demasiada velocidad", "yellow": "Adelantó bajo bandera amarilla", "red": "No entró a boxes con la bandera roja", "black": "Ignoró la bandera negra"}
 
 
 def flag_penalties(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict, finished_at: float, since: float) -> int:

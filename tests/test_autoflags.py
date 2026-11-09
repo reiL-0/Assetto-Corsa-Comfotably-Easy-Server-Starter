@@ -149,7 +149,7 @@ def test_a_screen_gets_only_live_types_from_a_fresh_look_for_its_own_slot():
 def test_the_rulebook_defaults_to_shadow_and_a_new_session_keeps_the_directors_switch():
     from app.rulebook import Rulebook
 
-    assert Rulebook().detectors.flags.model_dump() == {"blue": "shadow", "danger": "shadow"}
+    assert Rulebook().detectors.flags.model_dump() == {k: "shadow" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}, "every flag rule is born in shadow"
     assert Rulebook.model_validate({"detectors": {"flags": {"blue": "live"}}}).detectors.flags.danger == "shadow"
     import pytest
     with pytest.raises(Exception):
