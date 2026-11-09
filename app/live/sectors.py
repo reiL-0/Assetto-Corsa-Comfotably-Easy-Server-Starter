@@ -98,16 +98,21 @@ class DeltaJudge:
         c = self._car.get(car)
         return None if c is None else {"delta": round(c["delta"], 2), "strikes": c["strikes"]}
 
-    def feed(self, now: float, flag_id: int, active: bool, since: float, car: int, generation: int, profile: list[int] | None, events: list[tuple], in_pit: bool) -> list[dict]:
+    def feed(self, now: float, flag_id: int, active: bool, since: float, car: int, generation: int, profile: list[int] | None, events: list[tuple], in_pit: bool, need: int | None = None) -> list[dict]:
         """`active`: a VSC whose grace is over. `since`: the instant (same clock as the crossings) from which sectors count. `profile`: the minimum ms per sector of this car's model, None = not judged here.
-        -> the NEW breaches [{car, generation, delta_s, strikes}]."""
+        `need`: the warnings (sectors under the limit in a row) that make a breach (the director sets it; default 2). A breach has two levels: the first one at `need` warnings; the warnings are then spent
+        (the count starts again) and `need` more in a row make the second, severe one (`level` 2). Each level once per (flag, car, slot generation).
+        -> the NEW breaches [{car, generation, delta_s, strikes, level}]."""
+        need = need or self.need
         if flag_id != self._flag:
             self._flag = flag_id
             self._judged.clear(); self._car.clear()
         if not active or profile is None or len(profile) != N:
             self._car.pop(car, None)
             return []
-        c = self._car.setdefault(car, {"delta": 0.0, "strikes": 0, "prev": None})
+        c = self._car.get(car)
+        if c is None or c["generation"] != generation:   # (a new driver in the slot starts with no warnings spent)
+            c = self._car[car] = {"delta": 0.0, "strikes": 0, "prev": None, "level": 0, "generation": generation}
         if in_pit:   # (also with no crossing in this packet: nothing of before the pit lane carries over)
             c.update(prev=None, delta=0.0, strikes=0)
             return []
@@ -124,9 +129,11 @@ class DeltaJudge:
             c["delta"] = min(self.credit_s, c["delta"] + dt - profile[(b - 1) % N] / 1000.0)
             c["strikes"] = c["strikes"] + 1 if c["delta"] < -self.tol_s else 0
             key = (flag_id, car, generation)
-            if c["strikes"] >= self.need and key not in self._judged:
-                self._judged.add(key)
-                d = {"car": car, "generation": generation, "delta_s": round(c["delta"], 2), "strikes": c["strikes"]}
+            if c["strikes"] >= need and c["level"] < 2 and (*key, c["level"] + 1) not in self._judged:
+                level = c["level"] + 1
+                self._judged.add((*key, level))
+                d = {"car": car, "generation": generation, "delta_s": round(c["delta"], 2), "strikes": c["strikes"], "level": level}
+                c["level"], c["strikes"] = level, 0   # the warnings are spent: the next breach needs `need` more
                 out.append(d)
                 self.log.append({"t": now, "flag": flag_id, **d})
         return out

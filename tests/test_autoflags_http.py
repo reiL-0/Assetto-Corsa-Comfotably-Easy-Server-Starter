@@ -60,9 +60,13 @@ def test_the_director_changes_the_pace_rules_of_a_running_vsc_over_http(live):
     url = f"{V}/servers/{sid}/race-control"
     assert _client("steward").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code == 409, "no VSC running"
     r = _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60})
-    assert r.status_code == 200 and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 3}, "the default is the drive-through of 3 laps"
+    assert r.status_code == 200 and r.json()["vsc_penalty"] == {"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, "the default is the drive-through of 3 laps, 2 warnings and 10 s of severe penalty"
     r = _client("steward").post(f"{url}/vsc-config", json={"tolerance_kmh": 8, "penalty": {"kind": "pits", "laps": 5}})
-    assert r.status_code == 200 and r.json() == {"tolerance_kmh": 8, "penalty": {"kind": "pits", "laps": 5}}
+    assert r.status_code == 200 and r.json() == {"tolerance_kmh": 8, "penalty": {"kind": "pits", "laps": 5, "warnings": 2, "severe_s": 10}}
+    r = _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 5, "warnings": 3, "severe_s": 20}})
+    assert r.status_code == 200 and r.json()["penalty"] == {"kind": "pits", "laps": 5, "warnings": 3, "severe_s": 20}, "the warnings and the severe penalty are adjustable while the flag runs"
+    assert _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 5, "warnings": 9}}).status_code == 422
+    assert _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 5, "severe_s": 99}}).status_code == 422
     assert _client("steward").post(f"{url}/vsc-config", json={"penalty": {"kind": "pits", "laps": 9}}).status_code == 422
     assert _client("reporter").post(f"{url}/vsc-config", json={"tolerance_kmh": 8}).status_code in (401, 403)
     assert _client("steward").post(f"{url}/autoflags", json={"kind": "pace", "off": True}).json() == {"auto_off": ["pace"]}, "the kill switch of the pace judge"

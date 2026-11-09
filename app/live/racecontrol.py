@@ -63,7 +63,9 @@ PACE_MIN, PACE_MAX = 30, 250     # km/h a VSC may ask for
 GRACE_MIN, GRACE_MAX, GRACE_DEFAULT = 3, 60, 20
 TOL_MAX, TOL_DEFAULT = 30, 5     # km/h over the pace that are still forgiven when the grace ends
 VSC_FACTOR = 1.35                 # the minimum time of a sector in a delta VSC: this times the best clean lap of the car model (F1 asks for about this much more than a racing lap)
-DEFAULT_PENALTY = {"kind": "pits", "laps": 3}   # a VSC / FCY that nobody configured: the drive-through (3 laps to serve it), never a disqualification
+WARN_DEFAULT, WARN_MIN, WARN_MAX = 2, 1, 5   # warnings (sectors under the limit in a row) before the first breach of a VSC by sectors; the director sets it
+SEVERE_DEFAULT_S, SEVERE_MAX_S = 10, 60      # the severe penalty (seconds added to the race result, as a proposal for the director): after the warnings are spent and as many more come; 0 = none
+DEFAULT_PENALTY = {"kind": "pits", "laps": 3, "warnings": WARN_DEFAULT, "severe_s": SEVERE_DEFAULT_S}   # a VSC / FCY that nobody configured: the drive-through (3 laps to serve it), never a disqualification
 LAPS_MAX = 5                     # laps a car gets to serve a drive-through (the game enforces it: pit-lane pass clears it, running out sends the car to the pits)
 JUDGE_WINDOW = 1.5               # s before the grace ends whose speed samples decide (median)
 JUDGE_MIN_SAMPLES = 3
@@ -166,12 +168,25 @@ class RaceControl:
         self.next_delay_s = NEXT_SESSION_DELAY
         self._clear_vsc()
 
+    @staticmethod
+    def _clean_penalty(given: dict) -> dict:
+        """The penalty of a VSC / FCY as the judges use it: {kind, laps, warnings, severe_s}. Raises ValueError when something is out of range. Fields a client does not send keep their defaults."""
+        if given.get("kind") not in ("none", "pits") or (given["kind"] == "pits" and not 1 <= given.get("laps", 0) <= LAPS_MAX):
+            raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
+        warnings, severe = given.get("warnings", WARN_DEFAULT), given.get("severe_s", SEVERE_DEFAULT_S)
+        if not WARN_MIN <= warnings <= WARN_MAX:
+            raise ValueError(f"the warnings are {WARN_MIN} to {WARN_MAX} sectors in a row")
+        if not 0 <= severe <= SEVERE_MAX_S:
+            raise ValueError(f"the severe penalty is 0 to {SEVERE_MAX_S} s")
+        return {"kind": given["kind"], "laps": given.get("laps", 0) if given["kind"] == "pits" else 0, "warnings": warnings, "severe_s": severe}
+
     def _clear_vsc(self) -> None:
-        self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0}
+        self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0, "warnings": WARN_DEFAULT, "severe_s": SEVERE_DEFAULT_S}
         self.evaluated, self.violations, self.exempt = True, [], []
         self.vsc_mode, self.vsc_profiles, self.vsc_fallback = "fixed", {}, False   # `delta` only for a VSC/FCY that started with at least one reference lap or fallback; vsc_profiles: car model -> minimum ms of the 20 sectors, frozen at the start
         self._since: float | None = None   # the instant (clock of the samples) the grace of a delta VSC ended: latched ONCE, never recomputed from the wall clock
         self._pen_cars: set[tuple[int, int]] = set()   # (car, slot generation) already penalised in this flag, by whichever judge: one penalty per car and flag
+        self._sev_cars: set[tuple[int, int]] = set()   # (car, slot generation) that already got the severe level in this flag
         self._green_clear_since = self._green_last_look = None
         self._green_anchor = None
         self._green_laps = -1  # first leader crossing is partial
@@ -221,10 +236,7 @@ class RaceControl:
                 raise ValueError(f"the tolerance is between 0 and {TOL_MAX} km/h")
             if mode not in ("fixed", "delta"):
                 raise ValueError("the mode of a VSC is fixed or delta")
-            given = penalty or DEFAULT_PENALTY
-            if given.get("kind") not in ("none", "pits") or (given["kind"] == "pits" and not 1 <= given.get("laps", 0) <= LAPS_MAX):
-                raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
-            pen = {"kind": given["kind"], "laps": given.get("laps", 0) if given["kind"] == "pits" else 0}
+            pen = self._clean_penalty(penalty or DEFAULT_PENALTY)
         with _lock:
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
@@ -235,6 +247,8 @@ class RaceControl:
             self._neutralization_flag = source == "incident" and flag in SLOWING
             was_caution = self.flag in CAUTION
             pits = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}   # (before _clear_vsc forgets them)
+            if self.flag == "fcy" and flag == "green":
+                self._fcy_green_dues(now)   # (before _clear_vsc: the judges still hold what each car gained over the flag)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
             if flag == "yellow":
@@ -1046,6 +1060,26 @@ class RaceControl:
         the switch is on (the judge only logs). Switching it on or off in the middle of a flag never makes the two judges punish the same car."""
         return not self.legacy and "pace" not in self.auto_off
 
+    def _is_race(self) -> bool:
+        return (self.session_ref or {}).get("session_type") == RACE_TYPE
+
+    def _queue_neutral_due(self, car: int, generation: int, kind: str, level: int, seconds: int, now: float, reason: str) -> None:
+        """A time penalty of a VSC / FCY that waits for the result of the race (app/stewards/auto.py `neutral_penalties`): queued here, written to the database by the monitor (retained across session changes)."""
+        key = (getattr(self, "server_id", 0), self.vsc_id, car, generation, level)
+        with _lock:
+            if key not in _neutral_dues_pending and len(_neutral_dues_pending) < MAX_NEUTRAL_DUES_PENDING:
+                _neutral_dues_pending[key] = {"server_id": key[0], "flag_id": self.vsc_id, "car": car, "generation": generation, "level": level, "kind": kind, "seconds": seconds, "ts": now, "reason": reason}
+
+    def _fcy_green_dues(self, now: float) -> None:
+        """An FCY is over (green): every car whose delta over the whole flag (its total, without the credit limit) is still under -tol gets the severe penalty, the second level after the drive-through of the flag
+        (the judged delta never lies above the total, so such a car was already penalised in the flag: the check is about whether the offence stands at the end; whoever recovered by slowing down is spared)."""
+        severe_s = self.vsc_penalty.get("severe_s", 0)
+        if severe_s <= 0 or not self._is_race() or not self.judging_continuously() or self.vsc_mode != "delta":
+            return
+        for car, (generation, real) in self.pacedelta.totals(self.vsc_id).items():
+            if real < -self.pacedelta.tol_s:
+                self._queue_neutral_due(car, generation, "fcy", 0, severe_s, now, f"FCY: delta total {real:+.2f} s al volver a verde")
+
     @fieldrec.capture(_lock)
     def pace_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float, models: dict[int, str] | None = None) -> list[dict]:
         """One look at the pace of a VSC / FCY. Two judges share it: the DELTA judge (app/live/sectors.py) for the cars of a delta VSC whose model has a reference lap, the FIXED-pace judge
@@ -1077,7 +1111,7 @@ class RaceControl:
                     self.reflaps.forget(car)   # (a lap that was running when the green went away is not a reference: its partial times are dropped)
                 prof = self.vsc_profiles.get(models.get(car)) if self.vsc_mode == "delta" else None   # (a model with a reference lap: its sectors; any other car: its speed, below)
                 if prof is not None:
-                    for d in self.deltajudge.feed(mono, self.vsc_id, delta_on, since, car, s.generation, prof, events, car in in_pit):
+                    for d in self.deltajudge.feed(mono, self.vsc_id, delta_on, since, car, s.generation, prof, events, car in in_pit, self.vsc_penalty.get("warnings")):
                         found.append({**d, "kind": "delta", "speed_kmh": round(speeds.get(car) or 0)})
             active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
             if self.vsc_mode == "delta":
@@ -1090,7 +1124,8 @@ class RaceControl:
             if not found:
                 return found
             applied, pen, flag = self.judging_continuously(), dict(self.vsc_penalty), self.flag   # (taken here, under the lock: what the caller announces is what was done)
-            found = [{**d, "applied": applied and (d["car"], d["generation"]) not in self._pen_cars, "pen": pen, "flag": flag} for d in found]
+            severe = [d for d in found if d.get("level") == 2]   # (the second level of a VSC by sectors: not a drive-through, seconds on the result)
+            found = [{**d, "applied": applied and (d["car"], d["generation"]) not in self._pen_cars, "pen": pen, "flag": flag} for d in found if d.get("level") != 2]
             if applied:
                 for d in [d for d in found if d["applied"]]:
                     self._pen_cars.add((d["car"], d["generation"]))
@@ -1098,6 +1133,15 @@ class RaceControl:
                     if pen["kind"] == "pits":
                         self.add_penalty(d["car"], pen["laps"])
                 self._bump()
+            for d in severe:
+                key = (d["car"], d["generation"])
+                sd = {**d, "pen": pen, "flag": flag, "applied": False}
+                if applied and key not in self._sev_cars and pen.get("severe_s", 0) > 0 and self._is_race():
+                    self._sev_cars.add(key)
+                    self._queue_neutral_due(d["car"], d["generation"], "vsc", 2, pen["severe_s"], now, f"VSC: sectores en rojo tras {pen.get('warnings', WARN_DEFAULT)} avisos (delta {d['delta_s']:+.2f} s)")
+                    sd["applied"] = True
+                    self._bump()
+                found.append(sd)
             for decision in found:
                 self.audit("pace_judge", decision=decision, limit=(self.pace_kmh or 0) + self.tolerance_kmh, executed=decision["applied"])
             return found
@@ -1140,7 +1184,7 @@ class RaceControl:
         with _lock:
             if self.flag not in SLOWING or self.vsc_mode != "delta":
                 return None
-            base = {"mode": "delta", "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id}
+            base = {"mode": "delta", "tol": self.deltajudge.tol_s, "credit": self.deltajudge.credit_s, "id": self.vsc_id, "need": self.vsc_penalty.get("warnings", WARN_DEFAULT)}
             prof = self.vsc_profiles.get(model)
             return {**base, "min_ms": list(prof)} if prof is not None else {**base, "pace_kmh": self.pace_kmh or 0, "band_kmh": self.tolerance_kmh}   # (no reference lap: a virtual car at the pace, by the car's own speed; the tolerance is a dead band)
 
@@ -1152,12 +1196,11 @@ class RaceControl:
                 raise ValueError("there is no VSC or FCY running")
             if tolerance_kmh is not None and not 0 <= tolerance_kmh <= TOL_MAX:
                 raise ValueError(f"the tolerance is between 0 and {TOL_MAX} km/h")
-            if penalty is not None and (penalty.get("kind") not in ("none", "pits") or (penalty["kind"] == "pits" and not 1 <= penalty.get("laps", 0) <= LAPS_MAX)):
-                raise ValueError(f"the penalty is none or a drive-through of 1 to {LAPS_MAX} laps")
+            clean = self._clean_penalty(penalty) if penalty is not None else None
             if tolerance_kmh is not None:
                 self.tolerance_kmh = tolerance_kmh
-            if penalty is not None:
-                self.vsc_penalty = {"kind": penalty["kind"], "laps": penalty.get("laps", 0) if penalty["kind"] == "pits" else 0}
+            if clean is not None:
+                self.vsc_penalty = clean
             self._bump()
 
     def autoflags_view(self) -> dict:
@@ -1428,6 +1471,21 @@ def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: b
 
 
 MAX_CUT_DUES_PENDING = 10000
+MAX_NEUTRAL_DUES_PENDING = 500
+_neutral_dues_pending: dict[tuple, dict] = {}   # the time penalties of VSC / FCY waiting to be written: protected by _lock, retained across session changes
+
+
+def pending_neutral_dues() -> list[dict]:
+    with _lock:
+        return [dict(row) for row in _neutral_dues_pending.values()]
+
+
+def acknowledge_neutral_dues(rows: list[dict]) -> None:
+    with _lock:
+        for r in rows:
+            _neutral_dues_pending.pop((r["server_id"], r["flag_id"], r["car"], r["generation"], r["level"]), None)
+
+
 _cut_dues_pending: dict[tuple, dict] = {}   # protected by _lock, retained across session changes
 
 

@@ -69,19 +69,19 @@ def test_the_best_clean_lap_per_model_becomes_the_profile_and_dirty_laps_do_not_
     assert hole_r.best == {}, "a lap with a hole is not a reference"
 
 
-def _vsc(judge, clock, car, prof, speed_at, flag=1, seconds=120.0, gen=0, active=True, in_pit=False, t0=0.0, p0=0.3, since=0.0, skip=()):
+def _vsc(judge, clock, car, prof, speed_at, flag=1, seconds=120.0, gen=0, active=True, in_pit=False, t0=0.0, p0=0.3, since=0.0, skip=(), need=None):
     out = []
     t, p, i = t0, p0, 0
     while t - t0 < seconds:
         if i not in skip:
-            out += judge.feed(t, flag, active, since, car, gen, prof, clock.observe(car, p, t, 1, gen), in_pit)
+            out += judge.feed(t, flag, active, since, car, gen, prof, clock.observe(car, p, t, 1, gen), in_pit, need)
         p += speed_at(p) / 5.0 / L
         t += 0.2
         i += 1
     return out
 
 
-def test_the_delta_judge_punishes_two_negative_sectors_in_a_row_and_only_once():
+def test_the_delta_judge_punishes_two_negative_sectors_in_a_row_and_then_again_at_the_severe_level():
     ref_clock, ref = SectorClock(), RefLaps()
     ev, _ = drive(ref_clock, 1, speed, seconds=400.0)
     ref.feed(1, "gt3", ev, False)
@@ -89,13 +89,19 @@ def test_the_delta_judge_punishes_two_negative_sectors_in_a_row_and_only_once():
     slow = lambda p: speed(p) / 1.50   # 50 % slower than the best lap: slower than the 1.35 allowance, as asked
     assert _vsc(DeltaJudge(), SectorClock(), 3, prof, slow) == [], "slower than needed: delta positive, nothing"
     fast = lambda p: speed(p) / 1.10   # only 10 % slower than the lap: faster than the VSC allows
-    out = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast)
-    assert len(out) == 1 and out[0]["car"] == 3 and out[0]["delta_s"] < -0.2 and out[0]["strikes"] == 2, out
+    out = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, seconds=16.0)
+    assert len(out) == 1 and out[0]["car"] == 3 and out[0]["delta_s"] < -0.2 and out[0]["strikes"] == 2 and out[0]["level"] == 1, out
+    both = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast)   # 120 s of it: the two warnings are spent at the first breach, two more in a row make the severe one
+    assert [d["level"] for d in both] == [1, 2] and both[1]["strikes"] == 2, both
     j = DeltaJudge()
     c = SectorClock()
-    assert len(_vsc(j, c, 3, prof, fast)) == 1 and _vsc(j, c, 3, prof, fast, t0=120.0, p0=0.0) == [], "once per flag, car and slot generation"
-    assert len(_vsc(j, SectorClock(), 3, prof, fast, gen=1, t0=300.0)) == 1, "the new driver of the slot is judged on his own"
-    assert len(_vsc(j, SectorClock(), 3, prof, fast, flag=2, t0=500.0)) == 1, "a new flag, a new judgement"
+    assert [d["level"] for d in _vsc(j, c, 3, prof, fast)] == [1, 2] and _vsc(j, c, 3, prof, fast, t0=120.0, p0=0.0) == [], "each level once per flag, car and slot generation"
+    assert [d["level"] for d in _vsc(j, SectorClock(), 3, prof, fast, gen=1, t0=300.0)] == [1, 2], "the new driver of the slot is judged on his own"
+    assert [d["level"] for d in _vsc(j, SectorClock(), 3, prof, fast, flag=2, t0=500.0)] == [1, 2], "a new flag, a new judgement"
+    # the warnings are adjustable: three in a row instead of two
+    three = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, need=3)
+    assert [d["level"] for d in three] == [1, 2] and three[0]["strikes"] == 3, three
+    assert _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, need=3, seconds=14.0) == [], "with 3 warnings, 2 red sectors in a row are not a breach yet"
 
 
 def test_one_bad_sector_a_hole_the_pit_lane_the_grace_and_a_missing_profile_do_not_punish():
@@ -111,7 +117,7 @@ def test_one_bad_sector_a_hole_the_pit_lane_the_grace_and_a_missing_profile_do_n
     spike = lambda p: speed(p) / 1.10 if 0.30 <= p % 1 < 0.345 else speed(p) / 1.50   # one fast sector in a slow lap: one strike, then it clears
     assert _vsc(DeltaJudge(), SectorClock(), 3, prof, spike) == [], "a single negative sector is only a strike"
     bridged = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, skip=tuple(range(0, 600, 5)))
-    assert len(bridged) == 1, "a packet lost every second (0.4 s hole, under the 0.8 s limit) is bridged by the interpolation"
+    assert [d["level"] for d in bridged] == [1, 2], "a packet lost every second (0.4 s hole, under the 0.8 s limit) is bridged by the interpolation"
     broken = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, skip=tuple(i for i in range(0, 600) if i % 5 != 0))   # one packet in five: holes of 1 s break the thread every time
     assert broken == [], "holes longer than 0.8 s break the continuity: no complete sector, no verdict"
 
@@ -298,3 +304,84 @@ def test_the_speed_delta_stands_still_at_the_pace_and_inside_the_tolerance_band(
     assert j.state(1)["delta"] > d0 + 0.4
     t = drive(j, 105.0, t, 3.0)   # above the band it falls as if the car were 5 km/h slower: 100 / 80 - 1 = 0.25 s per second
     assert abs(j.state(1)["delta"] - (d0 + 0.5 - 0.75)) < 0.05, "above the band it falls: 2 s at 60 km/h (+0.25 s per second) and 3 s at 105 (-0.25 s per second)"
+
+
+def _dues():
+    from app.live.racecontrol import pending_neutral_dues
+
+    return sorted(((d["kind"], d["level"], d["car"], d["seconds"]) for d in pending_neutral_dues()))
+
+
+def test_a_vsc_by_sectors_escalates_from_the_drive_through_to_the_severe_time_penalty():
+    from app.live import racecontrol as rcmod
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rcmod._neutral_dues_pending.clear()
+    rc = RaceControl({"session_type": RACE_TYPE})
+    models = {1: "gt3", 2: "gt3"}
+    _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # green racing: the reference laps
+    rc.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 12}, now=1000.0)
+    cars = {1: lambda p: speed(p) / 1.10, 2: lambda p: speed(p) / 1.60}   # car 1 too fast in every sector, car 2 well below
+    out, p = _field(rc, cars, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3})
+    out, p = _field(rc, cars, 505.0, 14.0, models, wall0=1006.0, p0=p)
+    assert [(d["car"], d.get("level")) for d in out] == [(1, 1)] and out[0]["applied"], "two red sectors in a row: the drive-through, as before"
+    assert _dues() == [] and [x["car_id"] for x in rc.violations] == [1]
+    out, _ = _field(rc, cars, 519.0, 40.0, models, wall0=1020.0, p0=p)
+    assert [(d["car"], d.get("level"), d["applied"]) for d in out] == [(1, 2, True)], "as many more in a row: the severe level, once"
+    assert _dues() == [("vsc", 2, 1, 12)], "a time penalty of the adjusted seconds waits for the result of the race"
+    assert [x["car_id"] for x in rc.penalties] == [1], "it is not a second drive-through"
+    # no seconds, no proposal; and not in a practice session
+    rcmod._neutral_dues_pending.clear()
+    rc2 = RaceControl({"session_type": RACE_TYPE})
+    _field(rc2, {1: speed}, 0.0, 400.0, {1: "gt3"})
+    rc2.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 0}, now=1000.0)
+    _field(rc2, {1: lambda p: speed(p) / 1.10}, 500.0, 5.0, {1: "gt3"}, wall0=1000.0, p0={1: 0.3})
+    _field(rc2, {1: lambda p: speed(p) / 1.10}, 505.0, 60.0, {1: "gt3"}, wall0=1006.0, p0={1: 0.3})
+    assert _dues() == [], "severe_s 0: no proposal"
+    rc3 = RaceControl({"session_type": 1})
+    _field(rc3, {1: speed}, 0.0, 400.0, {1: "gt3"})
+    rc3.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
+    _field(rc3, {1: lambda p: speed(p) / 1.10}, 500.0, 5.0, {1: "gt3"}, wall0=1000.0, p0={1: 0.3})
+    _field(rc3, {1: lambda p: speed(p) / 1.10}, 505.0, 60.0, {1: "gt3"}, wall0=1006.0, p0={1: 0.3})
+    assert _dues() == [], "a practice session has no race result to put it on"
+    rcmod._neutral_dues_pending.clear()
+
+
+def test_an_fcy_proposes_the_severe_penalty_when_the_green_comes_if_the_delta_is_still_negative():
+    from app.live import racecontrol as rcmod
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rcmod._neutral_dues_pending.clear()
+    rc = RaceControl({"session_type": RACE_TYPE})
+    models = {1: "gt3", 2: "gt3", 3: "gt3"}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
+    band = rc.tolerance_kmh
+    stay = lambda p: (60 + band + 40) / 3.6   # 40 km/h over the band: the delta falls 0.4 s per second
+    _, p = _field(rc, {1: stay, 2: lambda p: 60 / 3.6, 3: stay}, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3, 3: 0.3})
+    # car 1 keeps it up for the whole flag; car 3 breaches and then crawls long enough to recover the total
+    out, p = _field(rc, {1: stay, 2: lambda p: 60 / 3.6, 3: stay}, 5.0, 12.0, models, wall0=1006.0, p0=p)
+    assert {d["car"] for d in out} == {1, 3}, "both cars breach in the flag (the drive-through)"
+    out, p = _field(rc, {1: stay, 2: lambda p: 60 / 3.6, 3: lambda p: 5 / 3.6}, 17.0, 40.0, models, wall0=1018.0, p0=p)
+    assert _dues() == [], "nothing until the flag ends"
+    rc.set_flag("green", now=1060.0)
+    assert _dues() == [("fcy", 0, 1, 10)], "the green: only the car whose total is still negative; car 3 recovered by slowing down, car 2 never lost"
+    rc.set_flag("green", now=1061.0)
+    assert _dues() == [("fcy", 0, 1, 10)], "a second green does not queue it again"
+    rcmod._neutral_dues_pending.clear()
+
+
+def test_an_fcy_that_ends_before_the_judge_looked_at_it_does_not_inherit_the_totals_of_the_one_before():
+    from app.live import racecontrol as rcmod
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rcmod._neutral_dues_pending.clear()
+    rc = RaceControl({"session_type": RACE_TYPE})
+    models = {1: "gt3"}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)
+    stay = {1: lambda p: 120 / 3.6}
+    _, p = _field(rc, stay, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3})
+    _field(rc, stay, 5.0, 20.0, models, wall0=1006.0, p0=p)   # the judge holds a negative total of this FCY
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1100.0)   # a new FCY out and over before the judge looks at it
+    rc.set_flag("green", now=1101.0)
+    assert _dues() == [], "nothing is queued for the second FCY: nobody was judged in it"
+    rcmod._neutral_dues_pending.clear()

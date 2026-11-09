@@ -104,7 +104,7 @@ def test_the_judge_decides_by_default_the_drive_through_is_three_laps_and_the_di
 
     rc = RaceControl({"session_type": RACE_TYPE})
     rc.set_flag("fcy", 80, grace_s=10, now=1000.0)   # no penalty given: the default
-    assert rc.vsc_penalty == {"kind": "pits", "laps": 3}
+    assert rc.vsc_penalty == {"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, "the default: drive-through of 3 laps, 2 warnings, 10 s for the severe level"
     out = _run_vsc(rc)
     assert [d["car"] for d in out] == [3] and [(p["car_id"], p["laps"]) for p in rc.penalties] == [(3, 3)], "a breach gets the drive-through, 3 laps"
     assert rc.snapshot()["violations"] == [{"car_id": 3, "speed_kmh": 100}]

@@ -250,6 +250,27 @@ class GiveBackDue(SQLModel, table=True):
     created_by: str = "auto"
 
 
+class NeutralDue(SQLModel, table=True):
+    """A time penalty of a VSC / FCY (app/live/racecontrol.py `_queue_neutral_due`): the severe level of a VSC by sectors, or an FCY whose delta was still negative when the green came. The result of the race
+    is not there yet while it happens, so it waits here: the first Race result of the server counted after `ts` turns the dues of each driver into ONE time `Penalty` on that result
+    (app/stewards/auto.py `neutral_penalties`). One row per (server, flag, driver, level): saving it again is harmless."""
+
+    __tablename__ = "neutral_dues"
+    __table_args__ = (UniqueConstraint("server_id", "flag_id", "driver_guid", "level"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True)
+    flag_id: int  # the VSC / FCY it belongs to (RaceControl.vsc_id)
+    driver_guid: str
+    driver_name: str = ""
+    ts: float  # unix seconds
+    kind: str  # vsc | fcy
+    level: int  # 2 = the severe level of a VSC; 0 = the check of an FCY at the green
+    seconds: int
+    reason: str = ""
+    state: str = "due"  # due | applied | expired (its race was counted without the driver)
+
+
 class Notice(SQLModel, table=True):
     """A warning for the race director: something in a counted result that may deserve a penalty (app/stewards/auto.py). Nothing is applied until a steward
     confirms it (it becomes a `Penalty`) or dismisses it; closing the result deletes what is left (app/penalties.py)."""
