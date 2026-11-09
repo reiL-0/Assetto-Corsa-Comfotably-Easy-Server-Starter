@@ -91,17 +91,16 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
     if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
         raise HTTPException(409, "that car is not that driver")
     if engine.record_limits(inst.acsp, body.car_id, body.name, body.model_dump(exclude={"car_id", "name"})):
-        from app.live.racecontrol import RACE_TYPE, on_cuts, state_of, _lock
-        if (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
-            rc = state_of(server_id, True, inst.acsp.session, create=True)
-            with _lock:
-                now = time.monotonic()
-                ok, reason = limits_filter.count_cut(cfg, body.model_dump(), now, rc.flag,
-                                                    rc._limits_counted.get(body.car_id))
-                if ok and body.car_id != rc.pace_car:
-                    on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)
-                    rc._limits_counted[body.car_id] = now
-                elif not ok:
-                    rc.audit("cut_filtered", car=body.car_id, reason=reason, executed=False)
+        from app.live.racecontrol import on_cuts, state_of, _lock
+        rc = state_of(server_id, True, inst.acsp.session, create=True)
+        with _lock:
+            now = time.monotonic()
+            ok, reason = limits_filter.count_cut(cfg, body.model_dump(), now, rc.flag,
+                                                rc._limits_counted.get(body.car_id))
+            if ok and body.car_id != rc.pace_car:
+                on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)
+                rc._limits_counted[body.car_id] = now
+            elif not ok:
+                rc.audit("cut_filtered", car=body.car_id, reason=reason, executed=False)
         from app.live.racecontrol import on_excursion
         on_excursion(server_id, inst.acsp.session, body.car_id, body.ms, body.lap, body.spline)   # (the advantage judge: when the excursion started and how long it lasted)

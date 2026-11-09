@@ -1231,9 +1231,18 @@ class RaceControl:
                 self.audit("give_back_excursion", car=car, ms=ms, lap=lap, spline=spline, executed=True)
 
     def add_cuts(self, car: int, n: int, from_client: bool, rule: dict | None = None, driver_guid: str = "") -> None:
-        """Cuts of a car in this race: `from_client` = an excursion its own game reported (+n live), else the acServer's count of a finished lap."""
+        """CSP excursions count live; practice/qualifying return before race ladder reconciliation."""
         with _lock:
             if car == self.pace_car:
+                return
+            session = self.session_ref if isinstance(self.session_ref, dict) else {}
+            if session.get("session_type") in (1, 2):
+                if from_client and n > 0:
+                    self.cuts_client[car] = self.cuts_client.get(car, 0) + n
+                    self.audit("cuts", car=car, count=self.cuts_client[car], added=n, from_client=True, executed=True)
+                    self._bump()
+                return
+            if session.get("session_type") != RACE_TYPE:
                 return
             if driver_guid:
                 client, server = self.cuts_totals.get(driver_guid, (0, 0))
@@ -1290,15 +1299,19 @@ class RaceControl:
 
     def cuts_view(self, rule: dict | None) -> dict:
         """The counter of the hub: {cuts: {car: n}, cuts_rule}. n includes CSP reports; native lap cuts are ignored at ingress.
-        Only in a race and with a rule: otherwise nothing is shown."""
+        Practice/qualifying expose an informational counter; races retain the ladder view."""
         with _lock:
             session = self.session_ref if isinstance(self.session_ref, dict) else {}   # (a test may hold a bare object as the session reference: the default rule is always there now)
-            if not (rule and session.get("session_type") == RACE_TYPE):
+            if not (rule and session.get("session_type") in (1, 2, RACE_TYPE)):
                 return {"cuts": {}, "cuts_rule": None}
+            if session.get("session_type") in (1, 2):
+                return {"cuts": {str(c): n for c, n in sorted(self.cuts_client.items())},
+                        "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")}, "cuts_info": True}
             cars = set(self.cuts_server) | set(self.cuts_client)
             cuts = {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}
             extra = ({"cuts_round": {c: n % (rule["max"] + 1) for c, n in cuts.items()},
-                      "cuts_rounds": {c: n // (rule["max"] + 1) for c, n in cuts.items()}}
+                      "cuts_rounds": {c: n // (rule["max"] + 1) for c, n in cuts.items()},
+                      "cuts_ladder": list(rule["ladder"])}
                      if rule.get("ladder") else {})
             return {"cuts": cuts, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")}, **extra}
 
@@ -1399,8 +1412,8 @@ def on_excursion(server_id: int, session: object, car_id: int, ms: int, lap: int
 
 
 def on_cuts(server_id: int, session: object, car_id: int, n: int, from_client: bool = False) -> None:
-    """Only CSP reports count in a race; native lap events only clear the pit mark."""
-    if (from_client and n <= 0) or (session or {}).get("session_type") != RACE_TYPE:
+    """CSP reports count in driving sessions; only races apply the penalty ladder."""
+    if (from_client and n <= 0) or not isinstance(session, dict) or session.get("session_type") not in (1, 2, RACE_TYPE):
         return
     rc = state_of(server_id, True, session, create=True)
     if rc and not from_client:
