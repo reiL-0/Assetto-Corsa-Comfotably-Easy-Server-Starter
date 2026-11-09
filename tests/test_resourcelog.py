@@ -39,7 +39,9 @@ def test_each_cycle_writes_one_host_line_and_one_per_running_server(tmp_path, mo
     assert host["kind"] == "host" and host["late_ms"] == 250 and srv["kind"] == "server" and srv["server"] == 7
     assert srv["players"] == 2 and srv["session_type"] == 3 and srv["rss_mb"] > 0 and srv["threads"] >= 1
     assert first[1]["cpu_pct"] is None and srv["cpu_pct"] is not None and 20 < srv["cpu_pct"] <= 120      # the busy loop: roughly one core
-    assert len(_lines(tmp_path)) == 4                                                                      # 2 cycles x (host + server): all in one file
+    lines = _lines(tmp_path)
+    assert len(lines) == 5 and lines[-1]["kind"] == "top"                                                  # 2 cycles x (host + server) + the second's top: all in one file
+    assert any(p["pid"] == os.getpid() and p["cpu_pct"] > 20 for p in lines[-1]["procs"])                  # the busy loop is among the top processes, with its command line
 
 
 def test_a_stopped_server_and_a_missing_process_are_skipped(tmp_path, monkeypatch):
@@ -64,12 +66,14 @@ def test_old_files_are_deleted_and_the_summary_reads_what_was_written(tmp_path, 
     assert not (d / f"resources-{old}.jsonl").exists()                                                     # past the retention
     now = datetime.now(UTC).isoformat(timespec="seconds")
     rows = [{"t": now, "kind": "host", "load1": 0.5, "steal_pct": 0.1, "psi_cpu": 0.2, "late_ms": 30},
-            {"t": now, "kind": "host", "load1": 1.5, "steal_pct": 2.0, "psi_cpu": 3.0, "late_ms": 180},
+            {"t": now, "kind": "host", "load1": 1.5, "steal_pct": 2.0, "psi_cpu": 30.0, "late_ms": 180},
+            {"t": now, "kind": "top", "procs": [{"pid": 9, "cpu_pct": 60.0, "cmd": "gunicorn oprweb"}]},
             {"t": now, "kind": "server", "server": 1, "pid": 1, "cpu_pct": 20.0, "rss_mb": 50.0, "threads": 5, "players": 5, "session_type": 3},
             {"t": now, "kind": "server", "server": 1, "pid": 1, "cpu_pct": 40.0, "rss_mb": 60.0, "threads": 5, "players": 5, "session_type": 3}]
     (d / f"resources-{datetime.now(UTC):%Y-%m-%d}.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     out = resourcelog.summarize(hours=1)
     assert "despertares tardíos (≥100 ms): 1" in out and "servidor 1" in out and "máx. 40.0%" in out
+    assert "quién más gastó" in out and "gunicorn oprweb 60%" in out                                       # only the host sample with psi >= 20 counts: 60 % over 1 hot sample
     assert "~6.00% de núcleo por piloto" in out                                                            # (20 + 40) % over (5 + 5) player-samples
     assert resourcelog.summarize(hours=1, directory=tmp_path / "empty").startswith("sin muestras")
 

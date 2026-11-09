@@ -9,6 +9,8 @@ Each cycle writes one `host` line and one `server` line per running acServer:
 - `host`: `load1`, `steal_pct` (CPU the hypervisor took since the last sample), `psi_cpu` (share of time something waited for a CPU, last 10 s) and `late_ms`:
   how late this loop woke up. A VM that is stalled wakes late, so a burst of large `late_ms` next to a «server CPU overload» warning is the signature of jitter
   from the host rather than of a busy server.
+- `top`: the 3 processes of the whole machine that used most CPU since the previous sample (`pid`, `cpu_pct` of one core, `cmd`); only those at 1 % or more, no line when
+  nothing does. It answers «who was eating the CPU» when `psi_cpu` is high and the acServer is not (the web, the manager, staging, a backup...).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from pathlib import Path
 from app.config import settings
 
 CLK = os.sysconf("SC_CLK_TCK")
+HOT_PSI = 20    # a host sample with at least this CPU pressure counts as «busy» in the summary
 LATE_MS = 100   # a wake-up later than this counts as a stall in the summary (acServer itself warns above 100 ms)
 
 
@@ -54,6 +57,26 @@ def _proc_status(pid: int) -> tuple[float, int]:
     return round(rss, 1), threads
 
 
+def _all_ticks() -> dict[int, int]:
+    """pid -> utime + stime of every process on the machine (one small read of /proc/<pid>/stat each)."""
+    out = {}
+    for p in Path("/proc").iterdir():
+        if p.name.isdigit():
+            try:
+                f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                out[int(p.name)] = int(f[11]) + int(f[12])
+            except (OSError, IndexError, ValueError):
+                pass   # it ended while we looked
+    return out
+
+
+def _cmd(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()[:100] or "(kernel)"
+    except OSError:
+        return "?"
+
+
 def _host_cpu() -> tuple[int, int]:
     """(total, steal) jiffies since boot."""
     try:
@@ -74,6 +97,7 @@ class Sampler:
     def __init__(self) -> None:
         self.prev: dict[int, tuple[int, float]] = {}   # pid -> (ticks, wall clock)
         self.prev_host: tuple[int, int] | None = None
+        self.prev_all: tuple[dict[int, int], float] | None = None   # every process: ticks, wall clock
         self.day = ""
 
     def sample(self, late_ms: float = 0.0, now: float | None = None) -> list[dict]:
@@ -100,8 +124,19 @@ class Sampler:
             lines.append({"t": stamp, "kind": "server", "server": sid, "pid": inst.pid, "cpu_pct": cpu, "rss_mb": rss, "threads": threads,
                           "players": sum(1 for d in board.drivers if d.connected) if board else None,
                           "session_type": (board.session or {}).get("session_type") if board else None})
+        top = self._top(now)
+        if top:
+            lines.append({"t": stamp, "kind": "top", "procs": top})
         self._write(lines)
         return lines
+
+    def _top(self, now: float) -> list[dict]:
+        cur, prev = _all_ticks(), self.prev_all
+        self.prev_all = (cur, now)
+        if not prev or now <= prev[1]:
+            return []
+        used = sorted(((cur[p] - prev[0][p]) / CLK * 100 / (now - prev[1]), p) for p in cur if p in prev[0] and cur[p] >= prev[0][p])   # a reused pid has fewer ticks: skipped
+        return [{"pid": p, "cpu_pct": round(c, 1), "cmd": _cmd(p)} for c, p in used[::-1][:3] if c >= 1]
 
     def _write(self, lines: list[dict]) -> None:
         today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -154,6 +189,15 @@ def summarize(hours: float = 12.0, directory: Path | None = None) -> str:
     out.append(f"   carga media máx. {max(r['load1'] for r in host):.2f} · steal medio {sum(steal) / len(steal) if steal else 0:.2f}% (máx. {max(steal) if steal else 0:.2f}%) · "
                f"presión de CPU máx. {max((r['psi_cpu'] or 0) for r in host):.2f}")
     out.append(f"   despertares tardíos (≥{LATE_MS} ms): {len(late)}" + ("  -> " + ", ".join(f"{r['t'][11:19]} +{r['late_ms']}ms" for r in late[:8]) if late else ""))
+    hot = {r["t"] for r in host if (r["psi_cpu"] or 0) >= HOT_PSI}
+    if hot:
+        tot: dict[str, float] = {}
+        for r in rows:
+            if r["kind"] == "top" and r["t"] in hot:
+                for p in r["procs"]:
+                    tot[p["cmd"]] = tot.get(p["cmd"], 0) + p["cpu_pct"]
+        out.append(f"   con presión de CPU ≥{HOT_PSI} ({len(hot)} muestras), quién más gastó (% de un núcleo de media): " +
+                   " · ".join(f"{c[:60]} {v / len(hot):.0f}%" for c, v in sorted(tot.items(), key=lambda kv: -kv[1])[:4]))
     for sid in sorted({r["server"] for r in rows if r["kind"] == "server"}):
         s = [r for r in rows if r["kind"] == "server" and r["server"] == sid]
         cpu = [r["cpu_pct"] for r in s if r["cpu_pct"] is not None]
