@@ -137,9 +137,10 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3", 4: "lmp"}
     rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
-    assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta runs with synthetic fallback profile"
-    assert rc.delta_block("gt3") is not None and len(rc.delta_block("gt3")["min_ms"]) == 20
-    assert rc.auto_live() == ["vsc"]
+    assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, waiting for a profile"
+    assert rc.delta_block("gt3") is None and rc.auto_live() == ["vsc"], "no reference lap and the track's length unknown: no delta invented, the fixed pace judges meanwhile"
+    rc.autoflags_tick({}, {}, 4000.0, 0.0, 1001.0)   # the look at the field brings the length
+    assert rc.delta_block("gt3") is not None and rc.delta_block("gt3")["min_ms"] == [round(4000 / 20 / (80 / 3.6) * 1000)] * 20, "and the flag that is running passes to the delta of the pace"
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
@@ -234,3 +235,21 @@ def test_the_start_of_the_judging_is_latched_once_and_a_green_drops_partial_laps
     assert rc._since is None
     rc.pace_tick({1: Sample(0.2, 1, 0, 600.0, 0.0)}, {1: 100.0}, 600.0, 6000.0, models)
     assert 1 not in rc.reflaps._cross, "no partial lap is kept while the flag is not green"
+
+
+def test_an_fcy_with_an_unknown_track_length_is_judged_by_the_fixed_pace_until_the_length_is_known():
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    models = {1: "gt3"}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)
+    assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is None and rc.vsc_default_profile is None, "no length: no profile (a 4 km guess would punish or forgive the wrong cars)"
+    fast = {1: lambda p: 120 / 3.6}
+    _, p = _field(rc, fast, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3})   # the grace
+    out, _ = _field(rc, fast, 5.0, 30.0, models, wall0=1006.0, p0=p)
+    assert {d["kind"] for d in out} == {"pace"}, "at 120 km/h under a 60 km/h FCY the fixed-pace judge has him, not a delta of an invented length"
+    rc.autoflags_tick({}, {}, 7004.0, 0.0, 1040.0)
+    assert rc.delta_block("gt3")["min_ms"] == [round(7004 / 20 / (60 / 3.6) * 1000)] * 20 == [21012] * 20, "the length is known now: the pace over a twentieth of Spa"
+    rc.set_flag("green")
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=2000.0, track_length_m=7004.0)
+    assert rc.delta_block("gt3")["min_ms"] == [21012] * 20, "a length that came with the flag counts from the first second"

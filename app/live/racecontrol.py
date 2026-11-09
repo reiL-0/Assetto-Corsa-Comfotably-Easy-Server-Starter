@@ -112,6 +112,7 @@ class RaceControl:
         self.rev, self.ts = 0, self.clock.time()
         self.cuts_session_key = uuid.uuid4().hex
         self.session_ref = session_ref   # the ACSP session object this state belongs to (a new session replaces it)
+        self.track_length_m: float | None = None   # what the manager knows of the track's length (the director's flag and the field's look both bring it); None = not known yet
         self.server_id = 0               # (set by state_of)
         self.giveback: GiveBack | None = None   # the advantage gained off the track (app/live/giveback.py): only in a race of a league whose rule is on
         self.sectorclock, self.reflaps, self.deltajudge = SectorClock(), RefLaps(), DeltaJudge()   # the F1-style VSC (app/live/sectors.py): sector crossings, the best clean lap per car model, the delta judge
@@ -163,6 +164,14 @@ class RaceControl:
         self.next_at: float | None = None
         self.next_delay_s = NEXT_SESSION_DELAY
         self._clear_vsc()
+
+    def _pace_profile(self) -> list[int] | None:
+        """The minimum ms of each of the 20 sectors for a car with no reference lap of its own: the time the pace needs for a twentieth of the track. None while the length of the track is not known: with a guessed
+        length the cars would be punished or forgiven for the wrong reasons, so they stay with the fixed-pace judge until it is."""
+        L, pace = self.track_length_m, self.pace_kmh
+        if not L or L < 100 or not pace:
+            return None
+        return [round((L / 20.0) / (pace / 3.6) * 1000)] * 20
 
     def _clear_vsc(self) -> None:
         self.vsc_id, self.grace_end, self.tolerance_kmh, self.vsc_penalty = 0, 0.0, TOL_DEFAULT, {"kind": "none", "laps": 0}
@@ -249,10 +258,7 @@ class RaceControl:
                 self.legacy = "pace" in self.auto_off
                 delta_wanted = mode == "delta" and flag in SLOWING and not self.legacy
                 self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if (delta_wanted and flag == "vsc") else {}   # a VSC: the minimum time of every sector from the car's own best clean lap; an FCY has no reference lap: the pace itself is the reference (the default profile below)
-                L = max(100.0, float(track_length_m or getattr(self, "track_length_m", None) or 4000.0))
-                pace = max(10.0, float(pace_kmh or 80))
-                sec_ms = round((L / 20.0) / (pace / 3.6) * 1000)
-                self.vsc_default_profile = [sec_ms] * 20 if delta_wanted else None
+                self.vsc_default_profile = self._pace_profile() if delta_wanted else None   # (None while the track's length is unknown: autoflags_tick fills it in as soon as it is)
                 self.vsc_mode = "delta" if delta_wanted else "fixed"
                 self.vsc_fallback = delta_wanted and flag == "vsc" and not bool(self.vsc_profiles)   # a VSC asked for reference laps and there are none yet: its sectors take the pace's time
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
@@ -996,6 +1002,8 @@ class RaceControl:
         with _lock:
             if length:
                 self.track_length_m = length
+            if self.vsc_mode == "delta" and self.vsc_default_profile is None and self.flag in SLOWING:
+                self.vsc_default_profile = self._pace_profile()   # the length became known while the flag runs: the cars with no reference lap pass from the fixed pace to the delta
             racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
