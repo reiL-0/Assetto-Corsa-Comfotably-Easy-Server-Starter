@@ -261,6 +261,29 @@ def test_cut_notices_are_warnings_the_director_confirms_dismisses_or_closes():
         assert s.query(Notice).filter_by(server_id=sid).count() == 0
 
 
+def test_reopen_closed_result_allows_edits_without_restoring_deleted_notices():
+    sid, name = _sid_and_file("reopen.json")
+    other_sid, other_name = _sid_and_file("other-reopen.json")
+    steward = _client("steward")
+    url = f"{V}/servers/{sid}/results/{name}/penalties"
+    other_url = f"{V}/servers/{other_sid}/results/{other_name}/penalties"
+    assert steward.delete(f"{url}/close").status_code == 404
+    assert steward.delete(f"{V}/servers/{sid}/results/missing.json/penalties/close").status_code == 404
+    from app.models import Notice
+    with Session(engine) as sess:
+        sess.add(Notice(server_id=sid, filename=name, driver_guid=A, kind="cuts", penalty_kind="time", value=5000, reason="Cortes de pista: 5"))
+        sess.commit()
+    assert len(steward.get(f"{url}/notices").json()["notices"]) == 1
+    assert steward.post(f"{url}/close").status_code == 204
+    assert steward.post(f"{other_url}/close").status_code == 204
+    assert _client("reporter").delete(f"{url}/close").status_code == 403
+    assert steward.delete(f"{url}/close").status_code == 204
+    assert steward.delete(f"{url}/close").status_code == 404
+    assert steward.get(f"{url}/notices").json() == {"closed": False, "notices": []}
+    assert steward.get(f"{other_url}/notices").json()["closed"] is True
+    assert steward.post(url, json={"driver_guid": A, "kind": "time", "value": 5, "reason": "Incidente revisado"}).status_code == 201
+
+
 def test_dismissing_a_notice_deletes_it_without_a_penalty():
     from app.models import Notice
     sid, name = _sid_and_file("dismiss.json")

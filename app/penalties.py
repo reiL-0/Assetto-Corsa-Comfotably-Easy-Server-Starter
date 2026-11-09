@@ -133,6 +133,18 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
         return _new_penalty(sess, server_id, filename, parsed, body.driver_guid, body.kind, body.value * 1000 if body.kind in TIMED else body.value, body.reason.strip(), user.username)
 
 
+@router.delete("/close", status_code=204)
+def reopen_result(server_id: int, filename: str, sess: SessionDep, user: CurrentUser) -> None:
+    """Reopen a closed result for editing; closing already discarded its outstanding notices."""
+    _existing_result(sess, server_id, filename)
+    with _write:
+        if sess.execute(delete(ResultClose).where(ResultClose.server_id == server_id, ResultClose.filename == filename)).rowcount != 1:
+            sess.rollback()
+            raise HTTPException(404, "result is not closed")
+        sess.commit()
+    record(server_id, "result_reopened", filename=filename, source=user.username, executed=True)
+
+
 @router.delete("/{penalty_id}", status_code=204)
 def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: SessionDep) -> None:
     p = sess.get(Penalty, penalty_id)
