@@ -139,7 +139,7 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
     assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, the cars are judged by the delta of their speed"
     blk0 = rc.delta_block("gt3")
-    assert blk0 is not None and "min_ms" not in blk0 and blk0["limit_kmh"] == 80 + rc.tolerance_kmh and blk0["credit"] == 3.0 and rc.auto_live() == ["vsc"], "no reference lap: a virtual car at the limit speed, no track length needed"
+    assert blk0 is not None and "min_ms" not in blk0 and blk0["pace_kmh"] == 80 and blk0["band_kmh"] == rc.tolerance_kmh and blk0["credit"] == 3.0 and rc.auto_live() == ["vsc"], "no reference lap: a virtual car at the pace, no track length needed"
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
@@ -148,8 +148,8 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     frozen = {k: list(v) for k, v in rc.vsc_profiles.items()}
     blk = rc.delta_block("gt3")
     assert blk["mode"] == "delta" and blk["min_ms"] == frozen["gt3"] and blk["tol"] == 0.2
-    assert "min_ms" not in rc.delta_block("lmp") and rc.delta_block("lmp")["limit_kmh"] == 80 + rc.tolerance_kmh   # lmp has no reference lap: the delta of its speed
-    assert rc.delta_block(None)["limit_kmh"] == 85
+    assert "min_ms" not in rc.delta_block("lmp") and rc.delta_block("lmp")["pace_kmh"] == 80   # lmp has no reference lap: the delta of its speed
+    assert rc.delta_block(None)["pace_kmh"] == 80
     assert rc.auto_live() == ["vsc"] and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
     # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference lap: the delta of its speed) drives at 120 km/h > 85 km/h
     bad = {1: lambda p: speed(p) / 1.10, 3: lambda p: speed(p) / 1.60, 4: lambda p: 120 / 3.6}
@@ -165,7 +165,7 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
     assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: its reference is the speed, even with reference laps known"
     fb1, fb2 = rc.delta_block("gt3"), rc.delta_block("lmp")
-    assert fb1 == fb2 and "min_ms" not in fb1 and fb1["limit_kmh"] == 80 + rc.tolerance_kmh and fb1["credit"] == 3.0, "the same for every model: a virtual car at the limit speed"
+    assert fb1 == fb2 and "min_ms" not in fb1 and fb1["pace_kmh"] == 80 and fb1["band_kmh"] == rc.tolerance_kmh and fb1["credit"] == 3.0, "the same for every model: a virtual car at the pace"
     rc.set_flag("fcy", 80, grace_s=5, mode="fixed", now=2100.0)
     assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY with mode=fixed is fixed pace"
     import pytest
@@ -241,13 +241,13 @@ def test_an_fcy_is_judged_by_the_delta_of_its_speed_without_a_reference_lap_or_t
 
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3"}
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)   # limit = 60 + the tolerance
-    limit = 60 + rc.tolerance_kmh
-    assert rc.delta_block("gt3")["limit_kmh"] == limit and rc.delta_block("gt3").get("min_ms") is None
-    cars = {1: lambda p: (limit + 55) / 3.6, 2: lambda p: (limit - 1) / 3.6, 3: lambda p: 30 / 3.6}
+    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)   # the pace, with the tolerance as a dead band
+    band = rc.tolerance_kmh
+    assert rc.delta_block("gt3")["pace_kmh"] == 60 and rc.delta_block("gt3")["band_kmh"] == band and rc.delta_block("gt3").get("min_ms") is None
+    cars = {1: lambda p: (60 + band + 55) / 3.6, 2: lambda p: (60 + band - 1) / 3.6, 3: lambda p: 30 / 3.6}
     _, p = _field(rc, cars, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3, 3: 0.3})   # the grace
     out, _ = _field(rc, cars, 5.0, 40.0, models, wall0=1006.0, p0=p)
-    assert {(d["car"], d["kind"]) for d in out} == {(1, "delta")}, "55 km/h over the limit is a breach; just under it, or crawling, is nothing: " + str(out)
+    assert {(d["car"], d["kind"]) for d in out} == {(1, "delta")}, "55 km/h over the pace + band is a breach; inside the band, or crawling, is nothing: " + str(out)
     assert sorted(x["car_id"] for x in rc.violations) == [1] and [x["car"] for x in rc.autoflags_view()["delta"]] == [1]
 
 
@@ -259,7 +259,7 @@ def test_the_delta_of_a_speed_banks_at_most_the_credit():
         out, t = [], t0
         for _ in range(round(secs * 5)):
             t += 0.2
-            out += j.step(t, 1, True, 65.0, {1: Sample(0.5, 1, 0, t, 0.0)}, {1: v}, set())
+            out += j.step(t, 1, True, 65.0, 0.0, {1: Sample(0.5, 1, 0, t, 0.0)}, {1: v}, set())
         return t, out
 
     j = PaceDeltaJudge()
@@ -273,3 +273,28 @@ def test_the_delta_of_a_speed_banks_at_most_the_credit():
     unlimited = PaceDeltaJudge(credit_s=1e9)
     t2, _ = drive(unlimited, 20.0, 0.0, 30.0)
     assert drive(unlimited, 130.0, t2, 4.0)[1] == [], "(without the limit the same car would not have been judged: the cap is what is tested)"
+
+
+def test_the_speed_delta_stands_still_at_the_pace_and_inside_the_tolerance_band():
+    from app.live.field import Sample
+    from app.live.pacejudge import PaceDeltaJudge
+
+    def drive(j, v, t0, secs, band=5.0):
+        t = t0
+        for _ in range(round(secs * 5)):
+            t += 0.2
+            j.step(t, 1, True, 80.0, band, {1: Sample(0.5, 1, 0, t, 0.0)}, {1: v}, set())
+        return t
+
+    j = PaceDeltaJudge()
+    t = drive(j, 40.0, 0.0, 5.0)   # a little slower first: some credit
+    d0 = j.state(1)["delta"]
+    assert d0 > 1.0
+    t = drive(j, 80.0, t, 20.0)   # exactly the pace (the pit limiter at 80): it does not move
+    assert abs(j.state(1)["delta"] - d0) < 0.01, "at the pace the delta stands still, it neither climbs nor falls"
+    t = drive(j, 84.0, t, 20.0)   # inside the tolerance band (80 + 5): the same
+    assert abs(j.state(1)["delta"] - d0) < 0.01, "inside the band it stands still too"
+    t = drive(j, 60.0, t, 2.0)   # below the pace it climbs
+    assert j.state(1)["delta"] > d0 + 0.4
+    t = drive(j, 105.0, t, 3.0)   # above the band it falls as if the car were 5 km/h slower: 100 / 80 - 1 = 0.25 s per second
+    assert abs(j.state(1)["delta"] - (d0 + 0.5 - 0.75)) < 0.05, "above the band it falls: 2 s at 60 km/h (+0.25 s per second) and 3 s at 105 (-0.25 s per second)"

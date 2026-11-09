@@ -65,10 +65,11 @@ class PaceJudge:
 
 
 class PaceDeltaJudge:
-    """The delta of a car with no reference lap of its own (an FCY always, a VSC until its model has a clean lap) against a VIRTUAL CAR that holds `limit` km/h from the moment the judging started:
-    delta = the time this car has taken - the distance it has covered / limit. Positive = slower than the virtual car (right), negative = faster. It is worked out from the car's own speed, so it needs no
-    sector, no spline and no length of the track. The credit that can be banked is limited (`credit_s`, the same rule as app/live/sectors.py `DeltaJudge`: min(credit, delta + dt * (1 - v / limit))); a car
-    whose limited delta falls under -`tol_s` is in breach, once per (flag, car, slot generation). Same inputs and same holes as `PaceJudge`; plain state, no I/O."""
+    """The delta of a car with no reference lap of its own (an FCY always, a VSC until its model has a clean lap) against a VIRTUAL CAR that holds the pace from the moment the judging started:
+    delta = the time this car has taken - the distance it has covered / pace. Positive = slower than the virtual car (right), negative = faster. It is worked out from the car's own speed, so it needs no
+    sector, no spline and no length of the track. The tolerance in km/h is a dead band: from the pace up to pace + band the delta stands still (the virtual car matches the car), below the pace it climbs, above
+    the band it falls as if the car were `band` km/h slower. The credit that can be banked is limited (`credit_s`, the same rule as app/live/sectors.py `DeltaJudge`: min(credit, delta + ...)); a car whose
+    limited delta falls under -`tol_s` is in breach, once per (flag, car, slot generation). Same inputs and same holes as `PaceJudge`; plain state, no I/O."""
 
     def __init__(self, tol_s: float = 0.2, credit_s: float = 3.0) -> None:
         self.tol_s, self.credit_s = tol_s, credit_s
@@ -84,9 +85,9 @@ class PaceDeltaJudge:
         c = self._car.get(car)
         return None if c is None else {"delta": round(c["delta"], 2)}
 
-    def step(self, now: float, flag_id: int, active: bool, limit: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int]) -> list[dict]:
-        """`active`: a VSC/FCY whose grace is over. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""
-        if not active or not limit or limit <= 0:
+    def step(self, now: float, flag_id: int, active: bool, pace: float, band: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int]) -> list[dict]:
+        """`active`: a VSC/FCY whose grace is over. `pace` and `band`: the pace and the tolerance, km/h. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""
+        if not active or not pace or pace <= 0:
             self._car.clear()
             return []
         if flag_id != self._flag:
@@ -106,12 +107,13 @@ class PaceDeltaJudge:
                 continue
             if s.stamp <= st["t"]:
                 continue   # the same packet again
-            st["delta"] = min(self.credit_s, st["delta"] + (s.stamp - st["t"]) * (1.0 - v / limit))
+            eff = v if v <= pace else pace if v <= pace + band else v - band   # (the dead band: pace .. pace + band counts as the pace)
+            st["delta"] = min(self.credit_s, st["delta"] + (s.stamp - st["t"]) * (1.0 - eff / pace))
             st["t"] = s.stamp
             key = (flag_id, car, s.generation)
             if st["delta"] < -self.tol_s and key not in self._judged:
                 self._judged.add(key)
                 d = {"car": car, "generation": s.generation, "speed_kmh": round(v), "delta_s": round(st["delta"], 2)}
                 out.append(d)
-                self.log.append({"t": now, "flag": flag_id, **d, "limit": round(limit)})
+                self.log.append({"t": now, "flag": flag_id, **d, "limit": round(pace + band)})
         return out
