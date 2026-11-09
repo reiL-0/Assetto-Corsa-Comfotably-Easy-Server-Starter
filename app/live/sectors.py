@@ -83,7 +83,7 @@ class RefLaps:
 
 
 class DeltaJudge:
-    def __init__(self, tol_s: float = 0.2, credit_s: float = 0.8, strikes: int = 2) -> None:
+    def __init__(self, tol_s: float = 0.2, credit_s: float = 3.0, strikes: int = 2) -> None:
         self.tol_s, self.credit_s, self.need = tol_s, credit_s, strikes
         self._car: dict[int, dict] = {}   # car -> {delta, strikes, prev: (boundary, t) | None, since}
         self._judged: set[tuple[int, int, int]] = set()

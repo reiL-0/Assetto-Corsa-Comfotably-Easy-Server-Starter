@@ -248,13 +248,13 @@ class RaceControl:
                 self.vsc_id, self.grace_end, self.evaluated = next(_vsc_ids), now + grace_s, False
                 self.legacy = "pace" in self.auto_off
                 delta_wanted = mode == "delta" and flag in SLOWING and not self.legacy
-                self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if delta_wanted else {}
+                self.vsc_profiles = self.reflaps.profiles(VSC_FACTOR) if (delta_wanted and flag == "vsc") else {}   # a VSC: the minimum time of every sector from the car's own best clean lap; an FCY has no reference lap: the pace itself is the reference (the default profile below)
                 L = max(100.0, float(track_length_m or getattr(self, "track_length_m", None) or 4000.0))
                 pace = max(10.0, float(pace_kmh or 80))
                 sec_ms = round((L / 20.0) / (pace / 3.6) * 1000)
                 self.vsc_default_profile = [sec_ms] * 20 if delta_wanted else None
                 self.vsc_mode = "delta" if delta_wanted else "fixed"
-                self.vsc_fallback = delta_wanted and not bool(self.vsc_profiles)
+                self.vsc_fallback = delta_wanted and flag == "vsc" and not bool(self.vsc_profiles)   # a VSC asked for reference laps and there are none yet: its sectors take the pace's time
             actions = self.nascar.on_flag(flag) if self.nascar and source not in ("nascar", "formation") else []
             if field is not None and (self.nascar or self.pace_car is not None or self.caution):   # (without NASCAR only behind a pace car: a plain yellow with nobody to lead is just a flag)
                 samples = field.samples() if hasattr(field, "samples") and callable(field.samples) else None
@@ -834,7 +834,7 @@ class RaceControl:
                         self.notify("SAFETY CAR AUTOMÁTICO: accidente muy grave", "flag")
                         return None, actions
                     if mode == "live" and target in ("VSC", "FCY") and self.flag in ("green", "white"):
-                        actions = self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field)
+                        actions = self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field, mode="delta")
                         self.audit("neutralization_applied", **evidence, executed=True)
                         return None, actions
                 return None, []
