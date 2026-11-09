@@ -77,12 +77,13 @@ class GiveBackRule(_Strict):
 
 class DrsRule(_Strict):
     """DRS in a race (app/live/drs.py). Off by default (`detectors.drs` is None). DRS is not allowed for `start_laps_off` laps after the start, `restart_laps_off` after each restart, while it rains
-    (the weather signal, max of rain and wetness, went over `wet_on`; allowed again after `dry_confirm_s` seconds under `dry_below`) and under any caution. Using it then is sanctioned once per period:
-    `dt` = a drive-through (3 laps to serve it), `warn` = a notice to the driver and a line in the audit, nothing else."""
+    (the weather signal, max of rain and wetness, went over `wet_on`; allowed again after `dry_confirm_s` seconds under `dry_below`) and under any caution. Using it then is ALWAYS a drive-through (3 laps to serve it),
+    once per period; one never served costs `unserved_s` seconds on the result."""
 
     start_laps_off: int = Field(default=2, ge=0, le=20)
     restart_laps_off: int = Field(default=2, ge=0, le=10)
-    penalty: Literal["dt", "warn"] = "dt"
+    penalty: Literal["dt"] = "dt"   # (only a drive-through; kept so a rule saved with it still reads)
+    unserved_s: int = Field(default=10, ge=1, le=60)   # seconds on the result for a drive-through nobody served
     rain_disables: bool = True
     wet_on: float = Field(default=0.15, gt=0, le=1, allow_inf_nan=False)
     dry_below: float = Field(default=0.05, ge=0, lt=1, allow_inf_nan=False)

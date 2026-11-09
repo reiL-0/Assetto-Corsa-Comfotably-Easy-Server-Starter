@@ -425,3 +425,35 @@ def test_neutral_dues_become_one_capped_time_penalty_per_driver_and_are_saved_on
         states = {(d.driver_guid, d.flag_id): d.state for d in sess.exec(select(NeutralDue).where(NeutralDue.server_id == sid)).all()}
         assert states[(A, 1)] == states[(A, 2)] == states[(B, 1)] == "applied" and states[("999", 1)] == "expired" and states[(B, 3)] == "due", states
         assert neutral_penalties(sess, league, sid, filename, parsed, 200, 0) == 0, "each due is counted once"
+
+
+def test_drs_offence_is_charged_only_when_the_drive_through_was_never_served():
+    from sqlmodel import select
+
+    from app.models import Championship, DrsDue, Server
+    from app.stewards.auto import drs_penalties, stage_drs_dues
+    sid, filename = _sid_and_file("drs-dues.json")
+    parsed = parse_result_file(_result(sid, filename))
+    with Session(engine) as sess:
+        server = sess.get(Server, sid)
+        server.session = {**(server.session or {}), "rulebook_snapshot": {"detectors": {"drs": {"unserved_s": 12}}}}
+        sess.add(server)
+        league = Championship(name="drs", rulebook={"detectors": {"drs": {"unserved_s": 12}}})
+        sess.add(league)
+        sess.flush()
+        server.session = {**server.session, "rulebook_league_id": league.id}
+        sess.add(server)
+        sess.add(ChampionshipEvent(championship_id=league.id, server_id=sid, filename=filename, rulebook_snapshot=server.session["rulebook_snapshot"]))
+        rows = [dict(server_id=sid, session_key="k", driver_guid=g, period=1, seconds=12, ts=100.0) for g in (A, B)]
+        stage_drs_dues(sess, rows)
+        stage_drs_dues(sess, rows)   # idempotent: the same offence twice is one row
+        stage_drs_dues(sess, [], {(sid, "k", B, 1)})   # B served the drive-through
+        sess.commit()
+        assert len(sess.exec(select(DrsDue).where(DrsDue.server_id == sid)).all()) == 2
+        assert drs_penalties(sess, league, sid, filename, parsed, 200, 0) == 1, "only A never served it"
+        sess.commit()
+        p = sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.driver_guid == A)).one()
+        assert p.kind == "time" and p.value == 12000 and p.auto_key.startswith("drs:")
+        assert not sess.exec(select(Penalty).where(Penalty.server_id == sid, Penalty.driver_guid == B)).all()
+        assert {d.driver_guid: d.state for d in sess.exec(select(DrsDue).where(DrsDue.server_id == sid)).all()} == {A: "applied", B: "applied"}
+        assert drs_penalties(sess, league, sid, filename, parsed, 200, 0) == 0, "once"

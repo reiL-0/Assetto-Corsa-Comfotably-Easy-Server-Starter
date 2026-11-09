@@ -138,6 +138,7 @@ class RaceControl:
         self.gb_owner: dict[int, str] = {}      # obligation id -> the Steam ID of the driver who owed the place when it opened (a slot can change hands)
         self.cuts_emitted: dict[str, int] = {}
         self._manual_dt_keys: set[tuple] = set()
+        self.drs_dt_open: dict[tuple, tuple[int, float]] = {}   # DRS drive-throughs not served yet: due key (server, session, driver, window) -> (car, issued at)
         self.dt_open: dict[tuple, tuple[int, float]] = {}   # cut-ladder drive-throughs not served yet: due key -> (car, issued at)
         self.cuts_at: dict[str, float] = {}
         self.cuts_totals: dict[str, tuple[int, int]] = {}
@@ -784,6 +785,10 @@ class RaceControl:
                             self._manual_dt_keys.discard(key)
                         else:
                             _cut_served.add(key)
+                for key, (car, issued) in list(self.drs_dt_open.items()):   # (the same pit pass serves a DRS drive-through)
+                    if car == car_id and self._pit_seen[car_id] > issued:
+                        del self.drs_dt_open[key]
+                        _drs_served.add(key)
                 # Keep the return command through parking: pit-lane entry is not
                 # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
@@ -1349,16 +1354,23 @@ class RaceControl:
                 self.audit("drs", state=self.drs.view(), window=self.drs.window, executed=True)
 
     def drs_use(self, car: int, guid: str, now: float) -> dict | None:
-        """The hub of `car` saw it using DRS. None when nothing is owed (DRS is on, inside the grace, already sanctioned in this period, the pace car, no rule). Otherwise the rule's `penalty` and the reason
-        of the period: a drive-through is queued here ('dt'); a 'warn' only leaves its trace in the audit. The caller tells the driver."""
+        """The hub of `car` saw it using DRS. None when nothing is owed (DRS is on, inside the grace, already sanctioned in this period, the pace car, no rule). Otherwise a drive-through is queued (one per car at a time:
+        a single pit pass serves all) and the offence is written down as a `DrsDue` (`unserved_s` seconds on the result if nobody serves it; a manual session keeps it live only). The caller tells the driver."""
         with _lock:
             if not self.drs or car == self.pace_car or not self.drs.used(guid or f"car{car}", now):
                 return None
-            kind, why = self.drs.rule["penalty"], self.drs.why
-            if kind == "dt" and not any(c == car for c, _ in self.dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):   # (one drive-through per car at a time: a single pit pass serves it)
+            rule, why, window = self.drs.rule, self.drs.why, self.drs.window
+            if not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
                 self.add_penalty(car, CUT_DT_LAPS)
-            self.audit("drs_use", car=car, driver=guid, window=self.drs.window, why=why, penalty=kind, executed=True)
-            return {"penalty": kind, "why": why, "laps": CUT_DT_LAPS}
+            if guid and not getattr(rule, "live_only", False):
+                key = (self.server_id, self.cuts_session_key, guid, window)
+                if len(_drs_dues_pending) < MAX_DRS_DUES_PENDING:
+                    _drs_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, period=window, seconds=rule["unserved_s"], ts=time.time())
+                    self.drs_dt_open[key] = (car, self.clock.time())
+                else:
+                    log.error("drs: pending ledger full; offence could not be queued: %s", key)
+            self.audit("drs_use", car=car, driver=guid, window=window, why=why, penalty="dt", executed=True)
+            return {"why": why, "laps": CUT_DT_LAPS}
 
     def give_back_view(self, now: float) -> dict:
         """What the hub and the panel read: the obligations that are open ({id, car, creditors, left_s}) and the cases left for the director."""
@@ -1550,6 +1562,28 @@ _cut_dues_pending: dict[tuple, dict] = {}   # protected by _lock, retained acros
 def pending_cut_dues() -> list[dict]:
     with _lock:
         return [dict(row) for row in _cut_dues_pending.values()]
+
+
+MAX_DRS_DUES_PENDING = 2000
+_drs_dues_pending: dict[tuple, dict] = {}   # DRS offences waiting to be written (protected by _lock, retained across session changes)
+_drs_served: set[tuple] = set()   # keys of DRS drive-throughs served, waiting to be written
+
+
+def pending_drs_dues() -> list[dict]:
+    with _lock:
+        return [dict(row) for row in _drs_dues_pending.values()]
+
+
+def pending_drs_served() -> set[tuple]:
+    with _lock:
+        return set(_drs_served)
+
+
+def acknowledge_drs(rows: list[dict], served: set[tuple]) -> None:
+    with _lock:
+        for row in rows:
+            _drs_dues_pending.pop((row["server_id"], row["session_key"], row["driver_guid"], row["period"]), None)
+        _drs_served.difference_update(served)
 
 
 _cut_served: set[tuple] = set()   # keys of drive-through dues served, waiting to be written (protected by _lock; outlives the RaceControl that saw the pit pass)

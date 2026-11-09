@@ -266,6 +266,20 @@ def save_cut_dues() -> None:
         raceaudit.record(row["server_id"], "cuts_due_saved", due=row, executed=True)
 
 
+def save_drs_dues() -> None:
+    from app.live.racecontrol import acknowledge_drs, pending_drs_dues, pending_drs_served
+    from app.stewards.auto import stage_drs_dues
+    served, rows = pending_drs_served(), pending_drs_dues()   # (served first: its row was queued before it, so the rows read next hold it unless it is already saved)
+    if not rows and not served:
+        return
+    with Session(engine) as s:
+        stage_drs_dues(s, rows, served)
+        s.commit()
+    acknowledge_drs(rows, served)
+    for row in rows:
+        raceaudit.record(row["server_id"], "drs_due_saved", due=row, executed=True)
+
+
 def slot_of(cars: dict, steam_id: str) -> int | None:
     """Where the driver with that SteamID sits (None: not on the server)."""
     return next((i for i, c in cars.items() if steam_id and (c.get("driver_guid") or "") == steam_id), None)
@@ -477,11 +491,9 @@ def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
         raise HTTPException(409, "that car is not that driver")
     rc = state_of(server_id, True, inst.acsp.session)
     verdict = rc.drs_use(body.car_id, str(car.get("driver_guid") or ""), time.time()) if rc else None
-    if verdict and verdict["penalty"] == "dt":
+    if verdict:
         laps = verdict["laps"]
         _say(rc, f"PENALIZACIÓN: DRS con el DRS inactivo · drive-through ({laps} vueltas)", "penalty", body.car_id)
-    elif verdict:
-        _say(rc, "AVISO: DRS con el DRS inactivo", "penalty", body.car_id)
 
 
 def _control(server_id: int, sess: SessionDep):
@@ -1049,6 +1061,10 @@ async def monitor_forever() -> None:
                 await asyncio.to_thread(save_cut_dues)
             except Exception:
                 log.exception("cuts: pending rounds could not be saved; retained for retry")
+            try:
+                await asyncio.to_thread(save_drs_dues)
+            except Exception:
+                log.exception("drs: pending offences could not be saved; retained for retry")
             try:
                 from app.live.racecontrol import acknowledge_neutral_dues
                 n_save, n_drop = neutral_rows_to_save()
