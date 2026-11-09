@@ -394,7 +394,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             nascar = getattr(inst, "nascar_config", None) if t == "new_session" and event.get("session_type") == 3 else None
             with _lock:
                 if t == "session_info":
-                    self.session.update(event)
+                    if event.get("session_index", event.get("current_session_index")) == event.get("current_session_index"):   # (only the description of the CURRENT session: the answer about another one, e.g. to the redefinition of session 0 the timeline makes when a race starts, must not turn the race into a practice)
+                        self.session.update(event)
                 else:
                     self.session = event
                     self.field.clear()

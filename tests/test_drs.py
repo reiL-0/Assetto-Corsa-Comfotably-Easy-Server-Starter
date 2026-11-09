@@ -125,3 +125,16 @@ def test_the_live_offence_is_queued_once_and_a_pit_pass_serves_it():
     from app.league import _ManualDrsRule
     live.drs_tick(_ManualDrsRule(rule), 1000.0, 0, None); live.drs_use(4, "G2", 1000.0)
     assert len(live.penalties) == 1 and not rcmod.pending_drs_dues(), "a manual session: the drive-through, nothing on the result"
+
+
+def test_the_description_of_another_session_does_not_turn_a_race_into_a_practice():
+    """The timeline redefines session 0 when a race starts after a resume; acServer answers with session 0's description. That is not the current session."""
+    from app.live import acsp
+    c = acsp.ACSPClient(990)
+    c.session = {"type": "new_session", "session_type": 3, "name": "Race", "session_index": 1, "current_session_index": 1, "track": "spa", "track_config": ""}
+    c._apply({"type": "session_info", "session_type": 1, "name": "Practice", "session_index": 0, "current_session_index": 1, "track": "spa", "track_config": ""})
+    assert c.session["session_type"] == 3 and c.session["name"] == "Race", "another session's description is ignored"
+    c._apply({"type": "session_info", "session_type": 3, "name": "Race", "session_index": 1, "current_session_index": 1, "track": "spa", "track_config": "", "elapsed_ms": 5000})
+    assert c.session["elapsed_ms"] == 5000, "the description of the current session still updates it"
+    c._apply({"type": "session_info", "session_type": 3, "name": "Race", "current_session_index": 1, "track": "spa", "track_config": "", "elapsed_ms": 9000})
+    assert c.session["elapsed_ms"] == 9000, "an event with no session_index counts as the current one"
