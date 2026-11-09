@@ -802,7 +802,7 @@ class RaceControl:
             with _lock:
                 self._pit_lap.add(car_id)
                 self._pit_seen[car_id] = self.clock.time() if now is None else now
-                self._pit_visit(car_id)
+                self._pit_visit(car_id, self._pit_seen[car_id])
                 for key, (car, issued) in list(self.dt_open.items()):
                     if car == car_id and self._pit_seen[car_id] > issued:   # a pit-lane pass after the penalty came out serves it
                         del self.dt_open[key]
@@ -1139,16 +1139,17 @@ class RaceControl:
             self.audit("flag_offence", flag=kind, car=car, driver=guid, seq=n, step=None, executed=False, **info)
             return False
         step = ladder[min(n - 1, len(ladder) - 1)]
+        if len(_flag_dues_pending) >= MAX_FLAG_DUES_PENDING:   # (nowhere to write it down: nobody is sanctioned for what could not be recorded)
+            log.error("flags: pending ledger full; offence dropped: %s car %s", kind, car)
+            self.flag_count[(guid, kind)] = n - 1
+            return False
         if step == 0 and not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) \
                 and not any(c == car for c, _ in self.flag_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
             self.add_penalty(car, CUT_DT_LAPS)
         key = (self.server_id, self.cuts_session_key, guid, kind, n)
-        if len(_flag_dues_pending) < MAX_FLAG_DUES_PENDING:
-            _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind=kind, seq=n, seconds=rule.get("unserved_s", 10) if step == 0 else step, ts=time.time())
-            if step == 0:
-                self.flag_dt_open[key] = (car, self.clock.time())
-        else:
-            log.error("flags: pending ledger full; offence could not be queued: %s", key)
+        _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind=kind, seq=n, seconds=rule.get("unserved_s", 10) if step == 0 else step, ts=time.time())
+        if step == 0:
+            self.flag_dt_open[key] = (car, self.clock.time())
         self.audit("flag_offence", flag=kind, car=car, driver=guid, seq=n, step=step, executed=True, **info)
         self.flag_new.append({"msg": "offence", "kind": kind, "car": car, "seq": n, "step": step, "laps": CUT_DT_LAPS})
         if conduct:
@@ -1165,7 +1166,7 @@ class RaceControl:
         if car is None or guid in self.black:
             return
         if n >= rule["black_at"]:
-            self.black[guid] = {"car": car, "laps": rule["pit_laps"]}
+            self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
             self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
             self.audit("black_flag", car=car, driver=guid, conduct=n, executed=self.flag_modes.get("black") == "live")
             self._bump()
@@ -1175,15 +1176,15 @@ class RaceControl:
             self.audit("bw_flag", car=car, driver=guid, conduct=n, executed=self.flag_modes.get("black") == "live")
             self._bump()
 
-    def _pit_visit(self, car: int) -> None:
-        """A car came into the pit lane: the orange disc and the black flag are served (the conduct starts again)."""
+    def _pit_visit(self, car: int, at: float) -> None:
+        """A car came into the pit lane (reported at `at`): the orange disc and the black flag given BEFORE that are served (the conduct starts again). A car that was already in the pits when it got the flag has to come in again."""
         guid = str(self.audit_guids.get(car) or "")
         if not guid:
             return
-        if guid in self.meatball:
+        if guid in self.meatball and at > self.meatball[guid]["since"]:
             del self.meatball[guid]
             self.audit("meatball_served", car=car, driver=guid, executed=True)
-        if guid in self.black:
+        if guid in self.black and at > self.black[guid]["since"]:
             del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
 
@@ -1198,7 +1199,7 @@ class RaceControl:
             if self.meatball[guid]["laps"] <= 0:
                 del self.meatball[guid]
                 rule = self._rule("black")
-                self.black[guid] = {"car": car, "laps": rule["pit_laps"]}
+                self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
                 self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
                 self.audit("black_flag", car=car, driver=guid, conduct=self.conduct.get(guid, 0), why="meatball", executed=live)
                 self._bump()
@@ -1251,7 +1252,7 @@ class RaceControl:
                 since = self._slow_since.setdefault(c, mono)
                 guid = str(self.audit_guids.get(c) or "")
                 if guid and mono - since >= rule["sustained_s"] and guid not in self.meatball and guid not in self.black:
-                    self.meatball[guid] = {"car": c, "laps": rule["pit_laps"]}
+                    self.meatball[guid] = {"car": c, "laps": rule["pit_laps"], "since": self.clock.time()}
                     self.flag_new.append({"msg": "meatball", "car": c, "laps": rule["pit_laps"]})
                     self.audit("meatball_flag", car=c, driver=guid, kmh=round(v), ref_kmh=round(ref), executed=mode == "live")
                     self._bump()
@@ -1635,15 +1636,15 @@ class RaceControl:
             if not self.drs or car == self.pace_car or not self.drs.used(guid or f"car{car}", now):
                 return None
             rule, why, window = self.drs.rule, self.drs.why, self.drs.window
+            if guid and not getattr(rule, "live_only", False) and len(_drs_dues_pending) >= MAX_DRS_DUES_PENDING:   # (nowhere to write it down: no sanction for what could not be recorded)
+                log.error("drs: pending ledger full; offence dropped: car %s", car)
+                return None
             if not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
                 self.add_penalty(car, CUT_DT_LAPS)
             if guid and not getattr(rule, "live_only", False):
                 key = (self.server_id, self.cuts_session_key, guid, window)
-                if len(_drs_dues_pending) < MAX_DRS_DUES_PENDING:
-                    _drs_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, period=window, seconds=rule["unserved_s"], ts=time.time())
-                    self.drs_dt_open[key] = (car, self.clock.time())
-                else:
-                    log.error("drs: pending ledger full; offence could not be queued: %s", key)
+                _drs_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, period=window, seconds=rule["unserved_s"], ts=time.time())
+                self.drs_dt_open[key] = (car, self.clock.time())
             self.audit("drs_use", car=car, driver=guid, window=window, why=why, penalty="dt", executed=True)
             if guid:
                 self.conduct_add(guid, car)

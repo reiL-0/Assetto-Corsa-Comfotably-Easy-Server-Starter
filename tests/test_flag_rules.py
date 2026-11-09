@@ -82,7 +82,7 @@ def test_a_crawling_car_gets_the_disc_then_the_black_flag_then_seconds():
     speeds = {1: 200.0, 2: 205.0, 3: 198.0, 4: 202.0, 5: 60.0}   # car 5 runs at 30 % of the cars around it
     for t in range(0, 22):
         rc.autoflags_tick({c: sm(0.1 * c, float(t)) for c in speeds}, speeds, L, float(t), 1000.0 + t)
-    assert rc.meatball.get("G5") == {"car": 5, "laps": 2}
+    assert {k: v for k, v in rc.meatball["G5"].items() if k != "since"} == {"car": 5, "laps": 2}
     assert rc.auto_for(5, 0, 21.0)["meatball"] == {"laps": 2}, "the driver's screen gets it"
     rc.lap_done(5, 100000, 0, 5, 1030.0, "G5")
     assert rc.meatball["G5"]["laps"] == 1
@@ -111,7 +111,7 @@ def test_conduct_builds_to_black_and_white_then_black_and_a_pit_visit_starts_it_
     rc.conduct_add("G1", 1)
     rc.conduct_add("G1", 1)
     a = rc.auto_for(1, 0, 1.0)
-    assert rc.black["G1"] == {"car": 1, "laps": 2} and a["black"] == {"laps": 2} and "bw" not in a
+    assert {k: v for k, v in rc.black["G1"].items() if k != "since"} == {"car": 1, "laps": 2} and a["black"] == {"laps": 2} and "bw" not in a
     rc.report_pit(1, True, now=rc.clock.time() + 1)
     assert "G1" not in rc.black and rc.conduct["G1"] == 0 and "G1" not in rc.bw_shown, "served: it starts again"
 
@@ -153,3 +153,21 @@ def test_nothing_is_sanctioned_in_shadow():
     rc.autoflags_tick({1: sm(0.1, 20.0)}, {1: 200.0}, L, 20.0, 1020.0)
     assert not offences(rc) and not rc.penalties and not rcmod.pending_flag_dues()
     assert "red" not in (rc.auto_for(1, 0, 1.0) or {}), "shadow shows nothing"
+
+
+def test_a_flag_is_served_only_by_a_pit_visit_after_it_was_given_and_a_full_ledger_sanctions_nobody():
+    rc = rc_with(); rules(rc, black={"bw_at": 1, "black_at": 2})
+    rc.report_pit(1, True, now=rc.clock.time())   # already in the pit lane when the flag comes
+    rc.conduct_add("G1", 1); rc.conduct_add("G1", 1)
+    assert "G1" in rc.black
+    rc.report_pit(1, True, now=rc.clock.time() - 1)   # (the same pass reported again, before the flag: not a new visit)
+    assert "G1" in rc.black, "a car that was in the pits when it got the black flag has to come in again"
+    rc.report_pit(1, True, now=rc.clock.time() + 5)
+    assert "G1" not in rc.black
+    rcmod._flag_dues_pending.clear()
+    for i in range(rcmod.MAX_FLAG_DUES_PENDING):
+        rcmod._flag_dues_pending[("x", i)] = {}
+    rc = rc_with(); rules(rc, yellow={"ladder": [0]})
+    assert rc._flag_sanction("yellow", 1, rc._rule("yellow"), 1000.0) is False
+    assert not rc.penalties and not rc.conduct and rc.flag_count.get(("G1", "yellow"), 0) == 0, "nothing recorded, nobody sanctioned"
+    rcmod._flag_dues_pending.clear()
