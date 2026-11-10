@@ -137,7 +137,7 @@ class NascarSessionIn(BaseModel):
     shares: list[Annotated[float, Field(gt=0, le=MAX_SHARE, allow_inf_nan=False)]] | None = Field(default=None, min_length=1, max_length=MAX_SHARES)
 
 
-UNLIMITED_MIN = 65535   # «unlimited» session time: acServer has no such switch, the session simply never runs out (the protocol carries minutes in 16 bits)
+UNLIMITED_MIN = 30000   # «unlimited» session time (20 days): acServer has no such switch. Measured on a real acServer: 65535 min overflows its 32-bit millisecond clock (timeleft comes out NEGATIVE and the session would end at once); the largest safe value is 35791 min, 30000 leaves room
 
 
 class SessionIn(BaseModel):
@@ -157,7 +157,7 @@ class SessionIn(BaseModel):
     locked: bool = False  # only the Steam IDs in `entries` may join (LOCKED_ENTRY_LIST)
     pickup: bool = True  # drivers without a reserved slot pick a free one on joining
     welcome: str = Field(default="", max_length=2000)  # shown to a driver when joining (the session's rules, the league's link...)
-    practice_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)   # minutes; UNLIMITED_MIN (65535, the most the game's protocol carries: 45 days) is «unlimited»
+    practice_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)   # minutes; UNLIMITED_MIN is «unlimited»
     qualify_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)
     race_laps: int | None = Field(default=None, ge=0, le=999)
     race_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)  # a timed race (endurance) instead of laps; not both; UNLIMITED_MIN = no end
