@@ -199,3 +199,30 @@ def test_the_car_about_to_cross_the_line_when_the_red_comes_is_excused_that_cros
     rc.lap_done(1, 100000, 0, 5, 1100.0, "G1")   # its next crossing counts
     assert "G1" in rc.black
     rcmod._flag_dues_pending.clear()
+
+
+def test_in_practice_and_qualifying_a_flag_offence_is_a_live_drive_through_and_never_a_due():
+    for session_type in (1, 2):
+        rcmod._flag_dues_pending.clear()
+        rc = rc_with(); rc.session_ref = {"session_type": session_type}
+        rules(rc, yellow={"ladder": [5, 10]})   # seconds only: in a race that is a due on the result, here a drive-through
+        assert rc._flag_sanction("yellow", 1, rc._rule("yellow"), 1000.0) is True
+        assert rc.penalties and not rcmod._flag_dues_pending, "a due would become a time penalty on the race of the same event"
+        rc._disqualify(2, "G2", True)
+        assert not rcmod._flag_dues_pending, "a disqualification neither"
+        assert [m for m in rc.take_flag_messages() if m.get("step") == "dsq"]
+    race = rc_with()
+    rules(race, yellow={"ladder": [5, 10]})
+    race._flag_sanction("yellow", 1, race._rule("yellow"), 1000.0)
+    assert len(rcmod._flag_dues_pending) == 1 and not race.penalties, "in a race it stays a due for the result"
+    rcmod._flag_dues_pending.clear()
+
+
+def test_the_blue_flag_is_a_race_matter_and_the_rest_judge_in_every_session():
+    for session_type, blue in ((1, "off"), (2, "off"), (3, "live")):
+        rc = rc_with(); rc.session_ref = {"session_type": session_type}
+        rc.autoflags_tick({}, {}, L, 100.0, 1000.0)
+        assert rc.autoflags.modes["blue"] == blue and rc.autoflags.modes["danger"] == "live"
+        assert rc._sanctioned()
+    other = RaceControl(session_ref={"session_type": 0})
+    assert not other._sanctioned()

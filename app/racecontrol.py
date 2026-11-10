@@ -155,7 +155,7 @@ def _flag_messages(inst, rc) -> None:
 
 def blue_stale_servers() -> list[int]:
     """Servers in a race whose cached blue-flag rule has to be read again (a worker thread does it: never the event loop)."""
-    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and flag_rules_stale(i.server_id)]
+    return [i.server_id for i in supervisor.live() if _sanctioned(i) and flag_rules_stale(i.server_id)]
 
 
 def save_flag_dues() -> None:
@@ -196,9 +196,16 @@ def give_back_stale_servers() -> list[int]:
     return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and give_back_rule_stale(i.server_id)]
 
 
+SANCTIONED = (1, 2, RACE_TYPE)   # practice, qualifying and race: the rules sanction in every session (the blue flag, the DRS and the give-back are race matters, see RaceControl._is_race)
+
+
+def _sanctioned(inst) -> bool:
+    return (inst.acsp.session or {}).get("session_type") in SANCTIONED
+
+
 def flag_modes_stale_servers() -> list[int]:
     """Servers in a race whose cached modes of the automatic flags have to be read again (in a worker thread, like the give-back rule)."""
-    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and flag_modes_stale(i.server_id)]
+    return [i.server_id for i in supervisor.live() if _sanctioned(i) and flag_modes_stale(i.server_id)]
 
 
 def give_back_tick(now: float) -> list[dict]:
@@ -382,9 +389,9 @@ def autoflags_tick(now: float) -> None:
     """The blue flag and the danger warning of every server in a race, in SHADOW (decided and written down, shown to nobody). The director and the caster are not racing."""
     mono = time.monotonic()
     for inst in supervisor.live():
-        if (inst.acsp.session or {}).get("session_type") != RACE_TYPE:
+        if not _sanctioned(inst):
             continue
-        rc = state_of(inst.server_id, True, inst.acsp.session, create=True)   # (a race always has its state: the blue flag needs the pace of its cars)
+        rc = state_of(inst.server_id, True, inst.acsp.session, create=True)   # (a session always has its state: the judges of the flags need it; the blue flag needs the pace of its cars)
         if not rc:
             continue
         rc.rules = flag_rules_peek(inst.server_id)
@@ -437,13 +444,13 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
     inst = _live(server_id)
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
-    if inst and (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
+    if inst and _sanctioned(inst):
         cut_rule_of(server_id)   # (refreshes the cached rules here, in a request thread: the snapshot and the monitor never touch the database)
         give_back_rule_of(server_id)
     server = _get(sess, server_id)
     if rc:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
-    race = bool(inst) and (inst.acsp.session or {}).get("session_type") == RACE_TYPE   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
+    race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
     return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
@@ -1179,7 +1186,7 @@ async def monitor_forever() -> None:
                 if cut_rule_stale(inst.server_id):
                     await asyncio.to_thread(cut_rule_of, inst.server_id)
                 rc = state_of(inst.server_id, True, inst.acsp.session)
-                if rc and (inst.acsp.session or {}).get("session_type") == RACE_TYPE:
+                if rc and _sanctioned(inst):
                     from app.live.racecontrol import cut_rule_peek
                     rule = cut_rule_peek(inst.server_id)
                     with _lock:

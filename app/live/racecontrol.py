@@ -1073,12 +1073,12 @@ class RaceControl:
     def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
         """One look for the blue flag and the danger warning (shadow). `mono`: self.clock.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
         with _lock:
-            racing = (self.session_ref or {}).get("session_type") == RACE_TYPE and self.flag in ("green", "white")
+            racing = self._sanctioned() and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
             self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
-            if self.nascar:
-                self.autoflags.modes["blue"] = "off"   # NASCAR: a lapped car need not give way
+            if self.nascar or not self._is_race():
+                self.autoflags.modes["blue"] = "off"   # NASCAR: a lapped car need not give way; outside a race nobody laps anybody (the laps of a car are only how many it has driven)
             rule = self._blue_rule()
             self.pace.configure(rule["pace_laps"], rule["pace_margin_pct"])
             self.autoflags.pace_ok = self.pace.quicker
@@ -1169,6 +1169,16 @@ class RaceControl:
         if step == 0 and not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) \
                 and not any(c == car for c, _ in self.flag_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
             self.add_penalty(car, CUT_DT_LAPS)
+        if not self._is_race():   # practice / qualifying: the offence is a live drive-through (and counts for the conduct); no due is queued, or it would become a time penalty on the RACE result of the same event
+            if not any(c == car for c, _ in self.dt_open.values()) and not any(c == car for c, _ in self.drs_dt_open.values()) \
+                    and not any(c == car for c, _ in self.flag_dt_open.values()) and not any(p["car_id"] == car for p in self.penalties):
+                self.add_penalty(car, CUT_DT_LAPS)
+            self.audit("flag_offence", flag=kind, car=car, driver=guid, seq=n, step=step, executed=True, persistence="live_only", **info)
+            self.flag_new.append({"msg": "offence", "kind": kind, "car": car, "seq": n, "step": 0, "laps": CUT_DT_LAPS})
+            if conduct:
+                self.conduct_add(guid, car)
+            self._bump()
+            return True
         key = (self.server_id, self.cuts_session_key, guid, kind, n)
         _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind=kind, seq=n, seconds=rule.get("unserved_s", 10) if step == 0 else step, ts=time.time())
         if step == 0:
@@ -1254,6 +1264,11 @@ class RaceControl:
         if not live:
             self.audit("flag_offence", flag="black", car=car, driver=guid, step="dsq", executed=False)
             return
+        if not self._is_race():   # practice / qualifying: a notice only; a due would turn into a disqualification on the race result of the same event
+            self.audit("flag_offence", flag="black", car=car, driver=guid, step="dsq", executed=True, persistence="live_only")
+            self.flag_new.append({"msg": "offence", "kind": "black", "car": car, "seq": 1, "step": "dsq", "laps": 0})
+            self._bump()
+            return
         n = self.flag_count.get((guid, "black"), 0) + 1
         key = (self.server_id, self.cuts_session_key, guid, "black", n)
         if len(_flag_dues_pending) >= MAX_FLAG_DUES_PENDING:
@@ -1333,7 +1348,7 @@ class RaceControl:
             if yellow and not self._was_yellow:
                 self._yellow_id += 1
             self._was_yellow = yellow
-            active = yellow and mode != "off" and "yellow" not in self.auto_off and not self.caution and not self.nascar and (self.session_ref or {}).get("session_type") == RACE_TYPE
+            active = yellow and mode != "off" and "yellow" not in self.auto_off and not self.caution and not self.nascar and self._sanctioned()
             self.yellowjudge.window_s = float(rule["window_s"])
             pc = self.pace_car
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
@@ -1400,6 +1415,10 @@ class RaceControl:
 
     def _is_race(self) -> bool:
         return (self.session_ref or {}).get("session_type") == RACE_TYPE
+
+    def _sanctioned(self) -> bool:
+        """Practice, qualifying and race: the rules sanction in every session. Outside a race the sanction is only LIVE (a drive-through and the conduct that leads to the black flag): nothing is queued for a result."""
+        return (self.session_ref or {}).get("session_type") in (1, 2, RACE_TYPE)
 
     def _queue_neutral_due(self, car: int, generation: int, kind: str, level: int, seconds: int, now: float, reason: str) -> None:
         """A time penalty of a VSC / FCY that waits for the result of the race (app/stewards/auto.py `neutral_penalties`): queued here, written to the database by the monitor (retained across session changes)."""
@@ -1615,13 +1634,7 @@ class RaceControl:
             if car == self.pace_car:
                 return
             session = self.session_ref if isinstance(self.session_ref, dict) else {}
-            if session.get("session_type") in (1, 2):
-                if from_client and n > 0:
-                    self.cuts_client[car] = self.cuts_client.get(car, 0) + n
-                    self.audit("cuts", car=car, count=self.cuts_client[car], added=n, from_client=True, executed=True)
-                    self._bump()
-                return
-            if session.get("session_type") != RACE_TYPE:
+            if session.get("session_type") not in (1, 2, RACE_TYPE):
                 return
             if driver_guid:
                 client, server = self.cuts_totals.get(driver_guid, (0, 0))
@@ -1646,7 +1659,7 @@ class RaceControl:
                     row = dict(server_id=self.server_id, session_key=self.cuts_session_key,
                                driver_guid=driver_guid, round=round_no,
                                seconds=ladder[min(round_no - 1, len(ladder) - 1)], ts=self.cuts_at.get(driver_guid, time.time()))
-                    live_only = getattr(rule, "live_only", False)
+                    live_only = getattr(rule, "live_only", False) or not self._is_race()   # (practice / qualifying: the same ladder, only live: nothing is queued for a result)
                     if not live_only and len(_cut_dues_pending) >= MAX_CUT_DUES_PENDING:
                         log.error("cuts: pending ledger full; round could not be queued: %s", row)
                         continue
@@ -1717,14 +1730,11 @@ class RaceControl:
 
     def cuts_view(self, rule: dict | None) -> dict:
         """The counter of the hub: {cuts: {car: n}, cuts_rule}. n includes CSP reports; native lap cuts are ignored at ingress.
-        Practice/qualifying expose an informational counter; races retain the ladder view."""
+        Every session has the same view: the counter and its ladder."""
         with _lock:
             session = self.session_ref if isinstance(self.session_ref, dict) else {}   # (a test may hold a bare object as the session reference: the default rule is always there now)
             if not (rule and session.get("session_type") in (1, 2, RACE_TYPE)):
                 return {"cuts": {}, "cuts_rule": None}
-            if session.get("session_type") in (1, 2):
-                return {"cuts": {str(c): n for c, n in sorted(self.cuts_client.items())},
-                        "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")}, "cuts_info": True}
             cars = set(self.cuts_server) | set(self.cuts_client)
             cuts = {str(c): max(self.cuts_server.get(c, 0), self.cuts_client.get(c, 0)) for c in sorted(cars)}
             extra = ({"cuts_round": {c: n % (rule["max"] + 1) for c, n in cuts.items()},

@@ -66,7 +66,8 @@ def test_the_counter_exposes_driving_sessions_shows_the_larger_race_count_and_re
     _rule_of(monkeypatch, rule)
     client.session = {"session_index": 1, "session_type": 2}   # qualifying
     live_rc.on_cuts(sid, client.session, 3, 2, False)
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_info"] is True
+    qualy = api.get(f"{V}/servers/{sid}/race-state").json()
+    assert qualy["cuts_rule"] == rule and "cuts_info" not in qualy, "qualifying has the same counter as a race"
     client.session = {"session_index": 2, "session_type": 3}   # the race
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_rule"] == rule, "the rule is there before the first cut: CUTS 0/5"
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}
