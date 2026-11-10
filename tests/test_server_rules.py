@@ -33,6 +33,18 @@ def test_the_servers_own_drs_and_flags_apply_with_no_league_and_a_preset_sits_un
     assert set(bare["flag_modes"].values()) == {"live"} and set(bare["flag_rules"]) == set(league.FLAG_RULE_KINDS), "a preset alone reads like any other rules"
 
 
+def test_the_session_own_cuts_and_drs_win_over_the_server_and_its_preset():
+    league._EFFECTIVE.clear()
+    mine = {"cuts_per_step": 1, "step_seconds": 5, "max_seconds": 600, "tolerance": 4, "ladder": [0, 10]}
+    sid = _server(21090, rules={"preset": "vrl-base", "detectors": {"drs": DrsRule(start_laps_off=4).model_dump()}},
+                  session={"cuts_rule": mine, "drs_rule": DrsRule(start_laps_off=1).model_dump()})
+    r = league.effective_rules(sid)
+    assert r["cut"]["ladder"] == [0, 10] and r["cut"]["max"] == 4, "the session's cuts beat the preset's"
+    assert r["drs"]["start_laps_off"] == 1, "the session's DRS beats the server's"
+    none = league.effective_rules(_server(21091, rules={"preset": "vrl-base"}, session={}))
+    assert none["cut"]["ladder"] == [0, 5, 5, 10], "with nothing of its own the session takes the server's"
+
+
 def test_a_league_event_only_overrides_what_it_says():
     league._EFFECTIVE.clear()
     sid = _server(21020, rules={"detectors": {"drs": DrsRule(start_laps_off=5).model_dump()}})

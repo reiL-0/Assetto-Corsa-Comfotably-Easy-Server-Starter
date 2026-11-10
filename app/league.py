@@ -259,17 +259,17 @@ def _deep_merge(base: dict, over: dict) -> dict:
 
 def server_detectors(server: Server | None):
     """The detectors of a SERVER, with no league: the category preset (`rules.preset`, one of app/rulebook.py PRESETS) under the server's own settings (`rules.detectors`, only what it changed), under the
-    old manual-session fields (`session.cuts_rule` / `session.drs_rule`, kept so nothing saved before this moves). Plain `Detectors()` (everything live) when it has nothing. Returns (detectors, the keys the
-    server set itself)."""
+    cuts and DRS rule of the session being set up (`session.cuts_rule` / `session.drs_rule`: «only for this session», the most specific, so it wins over the server). Plain `Detectors()` (everything live)
+    when it has nothing. Returns (detectors, the keys the server set itself)."""
     from app.rulebook import PRESETS, CutRule, Detectors, DrsRule
     rules = (server.rules or {}) if server else {}
     session = (server.session or {}) if server else {}
     preset = PRESETS.get(rules.get("preset") or "")
     own = rules.get("detectors") or {}
     det = Detectors.model_validate(_deep_merge(preset.detectors.model_dump() if preset else {}, own))
-    if "cuts" not in own and not (preset and preset.detectors.cuts) and session.get("cuts_rule") is not None:
+    if session.get("cuts_rule") is not None:
         det.cuts = CutRule.model_validate(session["cuts_rule"])
-    if "drs" not in own and not (preset and preset.detectors.drs) and session.get("drs_rule") is not None:
+    if session.get("drs_rule") is not None:
         det.drs = DrsRule.model_validate(session["drs_rule"])
     return det, set(own) | (preset.detectors.model_fields_set if preset else set())
 
