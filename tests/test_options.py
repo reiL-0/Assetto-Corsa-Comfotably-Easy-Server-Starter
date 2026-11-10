@@ -149,7 +149,10 @@ def test_csp_scripts_are_on_by_default_and_switch_off_per_server():
         settings.csp_hub = False
 
 
-def test_race_over_time_is_always_written_and_the_option_wins():
+def test_race_over_time_is_always_written_10_minutes_by_time_3_by_laps_and_a_choice_wins():
     sid = _setup()
-    assert _apply(sid).json()["config"]["SERVER"]["RACE_OVER_TIME"] == 180   # not left to acServer's own default: the grid finishes after the winner
-    assert _apply(sid, race_over_time=240).json()["config"]["SERVER"]["RACE_OVER_TIME"] == 240
+    seen = lambda **kw: api.post(f"{V}/servers/{sid}/apply", json={**BASE, "restart": False, **kw}).json()["config"]["SERVER"]["RACE_OVER_TIME"]
+    assert seen() == 180, "a race by laps: 3 minutes, not acServer's 30 s"
+    assert seen(race_laps=None, race_min=20) == 600, "a race by time: the old 180 is raised to 10 minutes"
+    assert seen(race_laps=None, race_min=20, options={"race_over_time": 240}) == 240, "the option wins"
+    assert seen(race_laps=None, race_min=20) == 240, "and a choice stays on the next apply that does not mention it"
