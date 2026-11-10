@@ -174,9 +174,10 @@ def test_red_flag_order_is_the_last_line_the_whole_lead_lap_had_crossed():
     times = {4: {1: 100.0, 2: 101.0, 3: 102.5}, 5: {1: 190.0}}   # the leader crossed lap 5; the others had not yet
     prog = {1: 5.02, 2: 4.97, 3: 4.90, 4: 2.60}   # car 4 is lapped
     ref = red_reference(prog, times)
-    assert ref == {"lap": 4, "order": [1, 2, 3, 4]}, "the line before: order of lap 4, the lapped car after the lead lap, no lap given back"
+    assert (ref["lap"], ref["order"]) == (4, [1, 2, 3, 4]), "the line before: order of lap 4, the lapped car after the lead lap, no lap given back"
     times[5].update({2: 191.0, 3: 192.0})
-    assert red_reference({1: 5.10, 2: 5.05, 3: 5.01, 4: 2.60}, times) == {"lap": 5, "order": [1, 2, 3, 4]}   # everyone crossed 5: that line
+    full = red_reference({1: 5.10, 2: 5.05, 3: 5.01, 4: 2.60}, times)
+    assert (full["lap"], full["order"]) == (5, [1, 2, 3, 4])   # everyone crossed 5: that line
     assert red_reference({1: 0.5, 2: 0.4}, {}) is None   # no full lap yet: a plain start
     swapped = {4: {1: 100.0, 2: 99.0}}   # the order is the one of the crossings, not where they were caught
     assert red_reference({1: 4.9, 2: 4.95}, swapped)["order"] == [2, 1]
@@ -226,3 +227,52 @@ def test_the_blue_flag_is_a_race_matter_and_the_rest_judge_in_every_session():
         assert rc._sanctioned()
     other = RaceControl(session_ref={"session_type": 0})
     assert not other._sanctioned()
+
+
+class _Field:
+    def __init__(self, progress):
+        self.p = progress
+
+    def snapshot(self):
+        return dict(self.p)
+
+    def samples(self):
+        return {c: Sample(p, 0, 0, 0.0, 0.0, int(p // 1)) for c, p in self.p.items()}
+
+
+def test_the_restart_behind_the_pace_car_after_a_red_keeps_the_f1_order_and_the_green_ends_it():
+    rc = rc_with()
+    rc.pace_car = 9
+    rc.lap_times = {4: {1: 100.0, 2: 101.0, 3: 102.0}}
+    rc.set_red(True, now=1000.0, field=_Field({1: 4.95, 2: 4.90, 3: 4.80, 4: 2.5, 9: 4.99}))
+    assert rc.red_ref["order"] == [1, 2, 3, 4] and 9 not in rc.red_ref["progress"]
+    rc.set_red(False, now=1100.0)
+    assert rc.red_ref is not None, "withdrawing the red keeps the reference: the restart needs it"
+    scrambled = {3: 1.1, 1: 1.05, 4: 1.0, 2: 0.9, 9: 1.2}   # all in the pit lane, in any order
+    rc.set_flag("yellow", now=1101.0, field=_Field(scrambled))
+    assert rc.caution.frozen == [1, 2, 3, 4], "the order of the red, not where the cars are standing"
+    assert 4 in rc.caution.lapped() and 1 not in rc.caution.lapped(), "the lapped car stays lapped: no lap given back"
+    order, waved, _ = rc.caution.call_restart({c: p for c, p in scrambled.items() if c != 9})   # (the caller leaves the pace car out)
+    assert order == [1, 2, 3, 4] and waved == [], "and the restart keeps it"
+    assert rc.pass_tick({}, {}, 1.0, 1102.0) == [] and rc.passjudge._flag == rc._red_id, "the judge of the passes holds the grid"
+    rc.set_flag("green", now=1200.0, field=_Field(scrambled))
+    assert rc.red_ref is None
+
+
+def test_a_caution_with_no_red_before_still_freezes_the_order_of_the_moment():
+    rc = rc_with()
+    rc.pace_car = 9
+    rc.set_flag("yellow", now=1.0, field=_Field({1: 3.2, 2: 3.5, 9: 3.6}))
+    assert rc.caution.frozen == [2, 1] and not rc.caution.keep_frozen
+
+
+def test_a_plain_yellow_after_a_red_is_not_a_grid_hold_and_a_second_red_keeps_the_first_reference():
+    rc = rc_with()
+    rc.lap_times = {4: {1: 100.0, 2: 101.0}}
+    rc.set_red(True, now=1000.0, field=_Field({1: 4.95, 2: 4.90}))
+    first = rc.red_ref
+    rc.set_red(True, now=1050.0, field=_Field({2: 1.0, 1: 0.9}))   # pressed twice, cars already in the pits
+    assert rc.red_ref is first
+    rc.set_red(False, now=1100.0)
+    rc.set_flag("yellow", now=1101.0)   # no pace car, no caution: a plain yellow
+    assert rc.caution is None and rc.pass_tick({}, {}, 1.0, 1102.0) == [] and rc.passjudge._flag != rc._red_id
