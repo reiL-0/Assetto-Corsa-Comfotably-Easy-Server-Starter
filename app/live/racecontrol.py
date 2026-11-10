@@ -116,7 +116,9 @@ def red_reference(progress: dict[int, float], lap_times: dict[int, dict[int, flo
     at = lap_times.get(lap, {})
     front = sorted(group, key=lambda c: (at.get(c, math.inf), -progress[c]))   # (a car whose crossing was never seen falls back to its place on the track)
     rest = sorted((c for c in progress if c not in group), key=lambda c: -progress[c])
-    return {"lap": lap, "order": front + rest}
+    synth = {c: lap - 0.0005 * i for i, c in enumerate(front)}   # (the order as a field of progress: what a caution freezes; the lead lap within a lap of its first, the lapped cars a lap or more behind it)
+    synth.update({c: lap - 1.0 - 0.0005 * j for j, c in enumerate(rest)})
+    return {"lap": lap, "order": front + rest, "progress": synth}
 
 
 class RaceControl:
@@ -156,6 +158,7 @@ class RaceControl:
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
         self.red_ref: dict | None = None                     # the F1 way: {"lap": n, "order": [cars]} = the last line every car of the leader's lap had crossed when the red flag came; the restart grid and the lap count come from it
         self.red_near: set[int] = set()                      # cars that were about to cross the line when the red came: that crossing is not a lap they could use to come in
+        self._red_id = 0                                     # which red flag: the id the no-pass judge of the restart uses
         self.yellowjudge = PassJudge(15.0)                   # no overtaking under a plain yellow (the same judge as the VSC/FCY one, its own instance)
         self._yellow_id = 0
         self._was_yellow = False
@@ -284,6 +287,8 @@ class RaceControl:
                 raise ValueError("the mode of a VSC is fixed or delta")
             pen = self._clean_penalty(penalty or DEFAULT_PENALTY)
         with _lock:
+            if flag == "green":
+                self.red_ref = None   # (the restart is over: nobody holds the red order any more)
             if self.formation and source != "formation":   # (a director's flag, an incident: the formation is over and its yellow is no caution: what follows is a flag like any other)
                 self._end_formation()
                 self.flag = "green"
@@ -738,9 +743,14 @@ class RaceControl:
             self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
             self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
+            held = bool(self.red_ref)
+            if held:   # a restart after a red flag: the order is the F1 reference of the red, not where the cars happen to be (all in the pit lane)
+                ref = {c: p for c, p in self.red_ref["progress"].items() if c in progress}
+                low = min(ref.values(), default=0.0) - 1.0
+                progress = {**ref, **{c: low - 0.0005 * i for i, c in enumerate(sorted(c for c in progress if c not in ref))}}
             recent = self.watch.recent_involved(now, INVOLVED_FOR)
             self.watch.clear()
-            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits, pace_only=self.nascar is None, completed_laps=completed_laps)
+            self.caution = Caution(progress, now, involved=recent, penalised={p["car_id"] for p in self.penalties}, pitted=pits, pace_only=self.nascar is None, completed_laps=None if held else completed_laps, keep_frozen=held)   # (held: the laps are the reference's, in its progress; the counters of the moment say nothing of it)
             if self.caution.pace_only:
                 return []   # (no messages of the NASCAR rules: the yellow banner is already out)
             if self.nascar and self.nascar.phase == BREAK:
@@ -1296,9 +1306,13 @@ class RaceControl:
         """The director shows (or withdraws) the red flag: every car must come into the pit lane before it completes `laps` more lap(s), or it gets the black flag. With the field it also takes the F1
         reference (`red_reference`): the restart order and lap come from the last line the whole lead lap had crossed, not from where each car was caught; a car within 5 % of the line is excused its next crossing."""
         with _lock:
+            if on and self.red_since is not None:
+                return   # (already red: a second press must not replace the reference with the order of the pit lane)
             self.red_since = (self.clock.time() if now is None else now) if on else None
             self.red_laps = {c: self._rule("red")["laps"] for c in self.audit_guids if c != self.pace_car} if on else {}
-            self.red_ref, self.red_near = None, set()
+            self.red_near = set()
+            if on:
+                self.red_ref, self._red_id = None, next(_vsc_ids)   # (withdrawing the red keeps the reference: the restart behind the pace car needs it; the next green ends it)
             if on and field is not None and (self.session_ref or {}).get("session_type") == RACE_TYPE:
                 prog = {c: p for c, p in field.snapshot().items() if c != self.pace_car}   # (the copy that is safe from a request thread; `samples()` is for the event loop)
                 self.red_ref = red_reference(prog, self.lap_times)
@@ -1508,13 +1522,15 @@ class RaceControl:
         """One look at the overtaking of a VSC / FCY whose grace is over (app/live/nopass.py). -> [{kind: pass_open | pass_cleared | pass_due, car, applied, flag, ...}] for the caller to announce; `applied` is False
         with the director's kill switch `pass` (the judge only logs). A `pass_due` lists the violation and gives the flag's penalty (the drive-through), once per car and flag."""
         with _lock:
-            active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
+            slowing = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
+            hold = self.caution is not None and self.caution.keep_frozen and self.flag in CAUTION   # the restart of a red flag behind the pace car: the grid order holds
+            active = slowing or hold
             pc = self.pace_car
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_EXEMPT_FOR}
-            events = self.passjudge.step(mono, self.vsc_id, active, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit)
+            events = self.passjudge.step(mono, self.vsc_id if slowing or not hold else self._red_id, active, {c: s for c, s in samples.items() if c != pc}, {c: v for c, v in speeds.items() if c != pc}, in_pit)
             if not events:
                 return []
-            applied, pen, flag = "pass" not in self.auto_off, dict(self.vsc_penalty), self.flag
+            applied, pen, flag = "pass" not in self.auto_off, dict(self.vsc_penalty) if slowing else {"kind": "none", "laps": 0}, self.flag   # (a pass in the restart goes to the director's list: no penalty by itself)
             out: list[dict] = []
             for e in events:
                 base = {"car": e[1], "applied": applied, "flag": flag, "pen": pen}

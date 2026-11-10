@@ -36,7 +36,8 @@ PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader w
 
 
 class Caution:
-    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=(), pace_only: bool = False, completed_laps: dict[int, int] | None = None) -> None:
+    def __init__(self, progress: dict[int, float], now: float, involved=(), penalised=(), pitted=(), pace_only: bool = False, completed_laps: dict[int, int] | None = None, keep_frozen: bool = False) -> None:
+        self.keep_frozen = keep_frozen   # the order was handed in (the F1 reference of a red flag): the restart keeps it, it is not the order of the moment
         self.pace_only = pace_only   # a yellow without NASCAR (practice, qualifying) behind a pace car: only its lap count, the "to go" and the green; no free pass, no wave-around, no judging, pits open
         self.t0 = now
         self.p0 = dict(progress)
@@ -59,7 +60,7 @@ class Caution:
         self._signs: dict[tuple[int, int], int] = {}
         self._since: dict[tuple[int, int], float] = {}
         self.gone: set[int] = set()       # cars that left the track list during the caution (disconnected): the slot may be somebody else's now, it is never judged again
-        self.free_pass = None if pace_only else self._pick_free_pass()
+        self.free_pass = None if pace_only or keep_frozen else self._pick_free_pass()   # (a red-flag restart keeps the order: no free pass)
         if self.free_pass is not None:
             self.allowed.add(self.free_pass)   # it has to make its way up to the pace car through the line
         self._seed(progress)
@@ -116,8 +117,9 @@ class Caution:
 
     def call_restart(self, progress: dict[int, float], pace_progress: float | None = None) -> tuple[list[int], list[int], set[int]]:
         """'To go': the wave-around cars may pass (they are not violators any more) and the restart order is fixed. -> (order, waved, cars that may choose their lane)."""
-        if self.pace_only:   # (nobody was frozen: the restart is the order of the moment)
-            self.waved, self.restart = [], sorted(progress, key=lambda c: -progress[c])
+        if self.pace_only or self.keep_frozen:   # (nobody was frozen: the restart is the order of the moment; or the order was handed in by a red flag: it stays, no wave-around either)
+            now_order = sorted(progress, key=lambda c: -progress[c])
+            self.waved, self.restart = [], ([c for c in self.frozen if c in progress] + [c for c in now_order if c not in self.frozen] if self.keep_frozen else now_order)
             return self.restart, [], set()
         self.waved = self.wave_around(progress, pace_progress)
         self.allowed.update(self.waved)
