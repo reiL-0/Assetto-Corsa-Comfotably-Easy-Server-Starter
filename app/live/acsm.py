@@ -12,7 +12,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from app import csp, supervisor
+from app import csp, practicekeep, supervisor
+from app.live.board import LiveBoard
 from app.content import _read_json, _tracks_dir
 
 router = APIRouter(prefix="/servers/{server_id}/acsm", tags=["acsm-compat"])
@@ -32,6 +33,17 @@ def leaderboard(server_id: int) -> dict:
     track, _, config = csp.clean_track(str(info.get("track", ""))).partition("-")
     out.update(ServerName=info.get("name", ""), Track=track, TrackConfig=config)
     return out
+
+
+@router.get("/api/live-timings/kept.json")
+def kept(server_id: int) -> dict:
+    """The drivers of the practice kept across an idle stop (app/practicekeep.py), as the site's board lists drivers who left. For a stopped
+    (hibernating) server, whose leaderboard.json is a 409 and so shows nobody: the session did not change, only the server went to sleep."""
+    row = practicekeep.load(server_id)
+    board = LiveBoard()
+    if row:
+        practicekeep.seed(board, row.drivers)
+    return {"DisconnectedDrivers": board.leaderboard()["DisconnectedDrivers"]}
 
 
 def _asset(track: str, config: str, rel: str) -> Path:

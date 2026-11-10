@@ -88,6 +88,21 @@ def test_leaderboard_route_is_public_and_409_when_stopped():
         supervisor._instances.pop(71)
 
 
+def test_kept_laps_of_a_sleeping_server_are_served_without_it_running():
+    from app import practicekeep
+    api = TestClient(app)
+    url = f"{V}/servers/72/acsm/api/live-timings/kept.json"
+    assert api.get(url).json() == {"DisconnectedDrivers": []}   # nothing kept: an empty list, not an error
+    b = _board()
+    b.apply({"type": "lap_completed", "car_id": 0, "laptime_ms": 91000, "cuts": 0, "grip_level": 1.0, "leaderboard": [{"car_id": 0, "laptime_ms": 91000, "laps": 1, "has_completed": False}]})
+    practicekeep.save(72, b, 0.9)
+    try:
+        rows = api.get(url).json()["DisconnectedDrivers"]
+        assert rows and rows[0]["CarInfo"]["DriverName"] == "Ana" and rows[0]["Cars"][rows[0]["CarInfo"]["CarModel"]]["BestLap"] > 0, rows
+    finally:
+        practicekeep.clear(72)
+
+
 def test_map_files_come_from_the_servers_content_and_cannot_escape_it():
     tracks = content._tracks_dir()
     (tracks / "magione" / "data").mkdir(parents=True, exist_ok=True)
