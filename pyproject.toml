@@ -31,3 +31,4 @@ extend-exclude = ["clients"]  # runs inside AC's embedded Python 3.3: no f-strin
 
 [tool.pytest.ini_options]
 addopts = "-q"
+pythonpath = ["."]   # CI runs a bare `pytest`: tests import ops.* (test_fieldrec)
