@@ -169,6 +169,6 @@ def test_a_server_with_no_rulebook_takes_its_default_modes_from_the_deployment(m
     from app.config import settings
     for default in ("shadow", "live"):
         monkeypatch.setattr(settings, "flag_modes_default", default)
-        league._FLAG_MODES.clear()
+        league._EFFECTIVE.clear()
         assert set(league.flag_modes(987001).values()) == {default}, default
-    league._FLAG_MODES.clear()
+    league._EFFECTIVE.clear()

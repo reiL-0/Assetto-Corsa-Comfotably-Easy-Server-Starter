@@ -219,13 +219,13 @@ def test_the_dues_of_a_race_never_wait_for_the_next_one_and_never_cross_schedule
 
 def test_the_cached_rule_is_never_an_old_leagues_and_the_monitor_knows_when_to_read_it_again():
     sid = api.post(f"{V}/servers", json={"name": "gb-cache"}).json()["id"]
-    league._GIVE_BACK_RULES.clear()
+    league._EFFECTIVE.clear()
     assert league.give_back_rule_cached(sid) is None and league.give_back_rule_stale(sid) is True, "never read"
-    league._GIVE_BACK_RULES[sid] = (time.time(), {"seconds": 5, "window_s": 30})
+    league._EFFECTIVE[sid] = (time.time(), {"give_back": {"seconds": 5, "window_s": 30}})
     assert league.give_back_rule_cached(sid) == {"seconds": 5, "window_s": 30} and league.give_back_rule_stale(sid) is False
-    league._GIVE_BACK_RULES[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"seconds": 5, "window_s": 30})
+    league._EFFECTIVE[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"give_back": {"seconds": 5, "window_s": 30}})
     assert league.give_back_rule_stale(sid) is True and league.give_back_rule_cached(sid) is not None, "due to be read again, still usable for a while"
-    league._GIVE_BACK_RULES[sid] = (time.time() - 3 * league.CUT_RULE_TTL - 1, {"seconds": 5, "window_s": 30})
+    league._EFFECTIVE[sid] = (time.time() - 3 * league.CUT_RULE_TTL - 1, {"give_back": {"seconds": 5, "window_s": 30}})
     assert league.give_back_rule_cached(sid) is None, "a rule that old is not used: another league's"
 
 

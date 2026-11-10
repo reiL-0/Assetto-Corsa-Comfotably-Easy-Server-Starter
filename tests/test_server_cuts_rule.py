@@ -17,7 +17,7 @@ from app.schemas.servers import SessionIn
 
 @pytest.mark.parametrize('ladder', [None, [0, 5]])
 def test_manual_rule_and_event_precedence(monkeypatch, ladder):
-    monkeypatch.setattr(league, '_CUT_RULES', {})
+    monkeypatch.setattr(league, "_EFFECTIVE", {})
     cut = CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=60, ladder=ladder)
     body = SessionIn(name='manual', track='spa', cars=['car'], cuts_rule=cut)
     assert body.model_dump()['cuts_rule'] == cut.model_dump()
@@ -51,13 +51,13 @@ def test_manual_rule_and_event_precedence(monkeypatch, ladder):
         s.add(championship)
         s.commit()
         league.invalidate_rule_cache(sid)
-        assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
-        assert league.cut_rule(sid).live_only
+        assert league.cut_rule(sid) == expected   # a league that says nothing about cuts does not switch the server's own rule off...
+        assert league.cut_rule(sid).live_only      # ...but it is live only: nothing from it goes to the league's results
         ev.data = {'cuts_rule': None}
         s.add(ev)
         s.commit()
         league.invalidate_rule_cache(sid)
-        assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
+        assert league.cut_rule(sid) == expected
         assert league.cut_rule(sid).live_only
         server2 = Server(name='no cuts', base_port=19100 + (1000 if ladder else 0))
         s.add(server2)
@@ -140,7 +140,7 @@ def test_applied_event_rule_stays_out_of_manual_server_session():
 
 
 def test_cold_default_counts_live_without_dues(monkeypatch):
-    monkeypatch.setattr(league, '_CUT_RULES', {})
+    monkeypatch.setattr(league, "_EFFECTIVE", {})
     monkeypatch.setattr(rc, '_cut_dues_pending', {})
     rule = league.cut_rule_cached(999992)
     assert rule == league.DEFAULT_CUT_RULE and rule.live_only

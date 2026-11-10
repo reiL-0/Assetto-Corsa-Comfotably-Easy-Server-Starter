@@ -440,9 +440,9 @@ def test_applied_rulebook_cannot_be_replaced_during_a_race(live, monkeypatch):
         client.session = {"session_type": 1}
         body.restart = False
         from app import league
-        monkeypatch.setitem(league._FLAG_MODES, sid, (0, {"blue": "live", "danger": "live"}))
+        monkeypatch.setitem(league._EFFECTIVE, sid, (0, {"flag_modes": {"blue": "live", "danger": "live"}}))
         asyncio.run(server_service.apply(s, server, body))
-        assert sid not in league._FLAG_MODES
+        assert sid not in league._EFFECTIVE
         assert server.session["rulebook_snapshot"]["neutralization"]["green_after_laps"] == 6
 
 
