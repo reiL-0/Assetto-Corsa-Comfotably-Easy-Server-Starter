@@ -230,8 +230,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     if body.admin_password is not None:
         srv["ADMIN_PASSWORD"] = body.admin_password
     srv.update(LOOP_MODE=int(body.loop), REVERSED_GRID_RACE_POSITIONS=body.reversed_grid)
-    for key, value in (("SLEEP_TIME", 1), ("REGISTER_TO_LOBBY", 0), ("RACE_OVER_TIME", 180)):
-        srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics; RACE_OVER_TIME written out (stock value): the rest of the grid gets time to cross the line after the winner
+    for key, value in (("SLEEP_TIME", 1), ("REGISTER_TO_LOBBY", 0)):
+        srv.setdefault(key, value)  # without SLEEP_TIME acServer spins a core; without weather it panics
     for sec in ("PRACTICE", "QUALIFY", "RACE"):
         cfg.pop(sec, None)
     if body.practice_min:
@@ -242,6 +242,9 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         cfg["RACE"] = {"NAME": "Race", "LAPS": body.race_laps, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
     elif body.race_min:   # timed race: acServer ends it when the time is up (LAPS=0)
         cfg["RACE"] = {"NAME": "Race", "LAPS": 0, "TIME": body.race_min, "WAIT_TIME": body.race_wait_s, "IS_OPEN": 1}
+    timed = bool(body.race_min) and not body.race_laps
+    if srv.get("RACE_OVER_TIME") in (None, 180):   # (acServer's own default is 30 s when the key is missing: the rest of the grid would not get to cross the line. 10 min in a race by TIME, where the others finish up to a lap behind the winner; 3 min by laps. 180 is the value this manager used to write: it is raised, any other one is somebody's choice)
+        srv["RACE_OVER_TIME"] = 600 if timed else 180
     _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
