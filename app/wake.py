@@ -91,8 +91,10 @@ def facade_info(s: Server) -> dict:
                 "cars": [c for c in str(srv.get("CARS", "")).split(";") if c], "timeofday": 0, "session": 0,
                 "sessiontypes": [t for t, _, _ in sessions], "durations": [d or 0 for _, _, d in sessions], "timeleft": 0,
                 "country": ["na", "na"], "pass": bool(srv.get("PASSWORD")), "timestamp": 0, "json": None, "l": False,
-                "pickup": bool(int(srv.get("PICKUP_MODE_ENABLED", 1))), "tport": ports["udp"], "timed": False, "extra": False,
+                "pickup": bool(int(srv.get("PICKUP_MODE_ENABLED", 1))), "tport": ports["udp"], "timed": False, "extra": False,   # (timed: set from the configuration below, for a snapshot too)
                 "pit": False, "inverted": 0}
+    race = s.config.get("RACE") or {}
+    info["timed"] = bool(race) and not int(race.get("LAPS") or 0)   # a race by TIME (LAPS=0): Content Manager reads the race's duration as minutes only when this is true, else as laps; the snapshot's is the last run's, not this configuration's
     info["cport"] = _ports(s.base_port)["http"]   # the snapshot came from acServer's own HTTP port: players are told ours
     info["extra"] = True   # the lobby flag; Content Manager does NOT use it to find /api/details: that is the " ℹ<port>" marker (lobby_info)
     info.update(clients=0, session=0)

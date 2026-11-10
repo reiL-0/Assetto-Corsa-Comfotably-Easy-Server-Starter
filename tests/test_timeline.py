@@ -187,3 +187,19 @@ def test_race_est_min_is_read_from_the_saved_session():
     assert timeline.race_est(None) == 0 and timeline.race_est(Server(name="x", base_port=1, session=None)) == 0
     assert timeline.race_est(Server(name="x", base_port=1, session={"race_est_min": 60})) == 60
     assert timeline.race_est(Server(name="x", base_port=1, session={"race_est_min": "nope"})) == 0
+
+
+def test_the_lobby_says_timed_from_the_configuration_not_from_the_last_snapshot():
+    import json
+    timed = {**CFG, "RACE": {"NAME": "Race", "LAPS": 0, "TIME": 20, "WAIT_TIME": 60}}
+    for cfg, stale, expected in ((timed, False, True), (CFG, True, False)):
+        sid = _server(cfg)
+        wake._instance_dir(sid).mkdir(parents=True, exist_ok=True)
+        (wake._instance_dir(sid) / "info.json").write_text(json.dumps({"name": "x", "durations": [15, 15, 5], "timed": stale, "session": 0, "timeleft": 5}))
+        with Session(engine) as s:
+            info = wake.facade_info(s.get(Server, sid))
+        assert info["timed"] is expected, "a snapshot of the last run must not decide how Content Manager reads this race's duration (minutes or laps)"
+        assert info["durations"][-1] == (20 if expected else 5)
+    never_run = _server(timed)   # no snapshot at all: built from the configuration
+    with Session(engine) as s:
+        assert wake.facade_info(s.get(Server, never_run))["timed"] is True
