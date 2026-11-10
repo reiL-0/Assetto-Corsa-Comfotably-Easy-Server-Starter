@@ -156,3 +156,13 @@ def test_race_over_time_is_always_written_10_minutes_by_time_3_by_laps_and_a_cho
     assert seen(race_laps=None, race_min=20) == 600, "a race by time: the old 180 is raised to 10 minutes"
     assert seen(race_laps=None, race_min=20, options={"race_over_time": 240}) == 240, "the option wins"
     assert seen(race_laps=None, race_min=20) == 240, "and a choice stays on the next apply that does not mention it"
+
+
+def test_a_session_can_be_unlimited_in_every_kind_and_nothing_goes_beyond():
+    from app.schemas.servers import UNLIMITED_MIN
+    sid = _setup()
+    body = {**BASE, "restart": False, "practice_min": UNLIMITED_MIN, "qualify_min": UNLIMITED_MIN, "race_laps": None, "race_min": UNLIMITED_MIN}
+    cfg = api.post(f"{V}/servers/{sid}/apply", json=body).json()["config"]
+    assert (cfg["PRACTICE"]["TIME"], cfg["QUALIFY"]["TIME"], cfg["RACE"]["TIME"], cfg["RACE"]["LAPS"]) == (UNLIMITED_MIN,) * 3 + (0,)
+    for field in ("practice_min", "qualify_min", "race_min"):
+        assert api.post(f"{V}/servers/{sid}/apply", json={**body, field: UNLIMITED_MIN + 1}).status_code == 422, "more than the protocol carries is refused"
