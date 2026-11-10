@@ -247,7 +247,7 @@ def test_applied_session_keeps_a_versioned_copy_until_the_next_application():
         s.expire_all()
         restored = SessionIn.model_validate(s.get(Server, sid).session)
         assert restored.rulebook_snapshot.neutralization.green_after_laps == 3
-        assert _applied_rulebook(s, sid, c).detectors.flags.blue == "shadow"
+        assert _applied_rulebook(s, sid, c).detectors.flags.blue == "live"
         next_session = session_for(s, ev, 1)
         assert next_session.rulebook_revision != restored.rulebook_revision
         assert next_session.rulebook_snapshot.neutralization.green_after_laps == 7

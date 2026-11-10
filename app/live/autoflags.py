@@ -36,7 +36,7 @@ class AutoFlags:
         self.sequence = 0  # monotonic count, independent of bounded display history
         self.unknown_length = False
         self.uid = next(_uid)                            # which session's engine this is: a driver's screen drops what it holds when this changes
-        self.modes = {"blue": "shadow", "danger": "shadow"}   # `off` types are not decided at all
+        self.modes = {"blue": "live", "danger": "live"}   # `off` types are not decided at all
         self.last: float | None = None                   # monotonic time of the last look (the age of what is served)
         self.gen: dict[int, int] = {}                    # slot -> generation of the slot at the last look
         self.pace_ok = None                              # callable(behind, ahead, open_already) -> bool: the blue only shows when the car behind has the pace to catch the other (app/live/flagpace.py); None = no gate

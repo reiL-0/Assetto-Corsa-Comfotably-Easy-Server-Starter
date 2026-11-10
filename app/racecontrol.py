@@ -393,7 +393,7 @@ def autoflags_tick(now: float) -> None:
         cars = {i: c for i, c in inst.acsp.cars.items() if (c.get("driver_guid") or "") not in out}
         speeds = {i: s for i, c in cars.items() if (s := speed_kmh(c)) is not None}
         samples = {c: s for c, s in inst.acsp.field.samples().items() if c in cars}
-        modes = flag_modes_peek(inst.server_id) or {"blue": "shadow", "danger": "shadow", "yellow": "shadow", "meatball": "shadow", "black": "shadow", "red": "shadow"}
+        modes = flag_modes_peek(inst.server_id) or {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
         if rc.flag_modes != modes:
             rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)

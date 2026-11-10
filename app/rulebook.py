@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from app.models import DEFAULT_POINTS_SYSTEM, Championship
 
@@ -153,14 +153,20 @@ class RedRule(_Strict):
 
 
 class FlagsRule(_Strict):
-    """The flags that need no director (app/live/autoflags.py). `shadow` (the default) decides and writes down, shows nothing; `live` shows it to the driver; `off` does not even decide."""
+    """The flags that need no director (app/live/autoflags.py): `live` decides and shows it to the driver (and sanctions); `off` does not even decide. There is no shadow mode: a rulebook saved with
+    `shadow` (the old default) reads as `live`."""
 
-    blue: Literal["off", "shadow", "live"] = "shadow"
-    danger: Literal["off", "shadow", "live"] = "shadow"
-    yellow: Literal["off", "shadow", "live"] = "shadow"
-    meatball: Literal["off", "shadow", "live"] = "shadow"
-    black: Literal["off", "shadow", "live"] = "shadow"   # (black and white and black: one switch)
-    red: Literal["off", "shadow", "live"] = "shadow"
+    blue: Literal["off", "live"] = "live"
+    danger: Literal["off", "live"] = "live"
+    yellow: Literal["off", "live"] = "live"
+    meatball: Literal["off", "live"] = "live"
+    black: Literal["off", "live"] = "live"   # (black and white and black: one switch)
+    red: Literal["off", "live"] = "live"
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _no_shadow(cls, v):
+        return "live" if v == "shadow" else v
 
 
 class Detectors(_Strict):

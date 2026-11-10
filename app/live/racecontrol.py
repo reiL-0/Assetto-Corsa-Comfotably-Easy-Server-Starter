@@ -172,7 +172,7 @@ class RaceControl:
         self._neutralization_sc = False
         self._sc_cooldown_until = 0.0
         self.neutralization_excluded: set[int] = set()
-        self.flag_modes = {"blue": "shadow", "danger": "shadow"}   # off | shadow | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
+        self.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # off | live per automatic flag: the league's rulebook, set by the monitor from its cache (never `live` without a fresh reading)
         self.auto_off: set[str] = set()         # the director's kill switch per type (blue, danger): forces it off in real time; the director's choice outlives the session
         self.drs: Drs | None = None             # the DRS rules of the race (app/live/drs.py): set up by `drs_tick` while the league's rule is on
         self.gb_rule: dict | None = None        # {seconds, window_s}: set by the monitor from the league's rule (the cache: no database here)
@@ -1295,7 +1295,7 @@ class RaceControl:
         """The orange disc: a car whose own game reports `damage_pct` % damage or more (and, with `use_speed`, one crawling far below the cars around it) must come into the pits; see `_flags_lap` for what follows."""
         pc = self.pace_car
         rule = self._rule("meatball")
-        mode = self.flag_modes.get("meatball", "shadow")
+        mode = self.flag_modes.get("meatball", "live")
         if not (racing and mode != "off" and "meatball" not in self.auto_off):
             return
         wanted: dict[int, str] = {}   # car -> why
@@ -1328,7 +1328,7 @@ class RaceControl:
         """No overtaking under a plain yellow (the judge of the VSC/FCY, its own instance): whoever passes owes the place for `window_s` s or commits an offence of the `yellow` rule. Not under a NASCAR caution (it has its own)."""
         with _lock:
             rule = self._rule("yellow")
-            mode = self.flag_modes.get("yellow", "shadow")
+            mode = self.flag_modes.get("yellow", "live")
             yellow = self.flag == "yellow"
             if yellow and not self._was_yellow:
                 self._yellow_id += 1

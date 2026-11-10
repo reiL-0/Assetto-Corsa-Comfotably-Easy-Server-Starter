@@ -396,7 +396,7 @@ def drs_rule_stale(server_id: int) -> bool:
 
 
 def flag_modes(server_id: int) -> dict:
-    """{blue, danger}: off | shadow | live, from the rulebook of the league event running on this server; both `shadow` when no league event runs. Cached like `give_back_rule`: from a request thread, never from the event loop."""
+    """{blue, danger, ...}: off | live, from the rulebook of the league event running on this server; `live` when nothing says otherwise. Cached like `give_back_rule`: from a request thread, never from the event loop."""
     hit = _FLAG_MODES.get(server_id)
     if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
         return hit[1]
@@ -404,7 +404,7 @@ def flag_modes(server_id: int) -> dict:
         hit = _FLAG_MODES.get(server_id)
         if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
             return hit[1]
-        modes = {k: settings.flag_modes_default for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # (no applied rulebook: the server's default, "shadow" unless the deployment says otherwise)
+        modes = {k: settings.flag_modes_default for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # (no applied rulebook: the server's default, "live" unless the deployment says otherwise)
         with Session(engine) as s:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
