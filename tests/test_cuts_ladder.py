@@ -449,7 +449,7 @@ def test_zero_cut_lap_clears_pit_and_pace_car_stays_excluded(live, monkeypatch):
 
 @pytest.mark.parametrize('session_type', [1, 2])
 @pytest.mark.parametrize('manual', [False, True])
-def test_informational_cuts_never_enter_ladder(monkeypatch, session_type, manual):
+def test_practice_and_qualifying_count_only_the_drivers_own_cuts(monkeypatch, session_type, manual):
     from app import league
     from types import SimpleNamespace
     sid, client = 906, SimpleNamespace(session={'session_type': session_type})
@@ -465,7 +465,8 @@ def test_informational_cuts_never_enter_ladder(monkeypatch, session_type, manual
         live_rc.on_cuts(sid, client.session, 4, 1, True)
     live_rc.on_cuts(sid, client.session, 3, 20, False)
     view = rc.cuts_view(informational_rule)
-    assert view == {'cuts': {'3': 10}, 'cuts_rule': {k: informational_rule[k] for k in ('cap', 'max', 'per', 'step')}, 'cuts_info': True}
+    assert view['cuts'] == {'3': 10} and 'cuts_info' not in view, 'only the drivers own CSP reports count, not the pace car, not the native ones'
+    assert view['cuts_rule'] == {k: informational_rule[k] for k in ('cap', 'max', 'per', 'step')}
     assert rc.rev > rev
     assert not rc.cuts_emitted and not rc.dt_open and not rc.penalties
     assert not rc.cuts_totals and not live_rc.pending_cut_dues()
@@ -504,13 +505,24 @@ def test_other_sessions_ignore_cuts(monkeypatch, session):
 
 @pytest.mark.parametrize("session_type", [1, 2, 3, 0])
 @pytest.mark.parametrize("ladder", [None, [], [0, 5, 5, 10]])
-def test_ladder_payload_only_in_race(session_type, ladder):
+def test_ladder_payload_in_every_session_with_a_ladder(session_type, ladder):
     rc = live_rc.RaceControl({"session_type": session_type})
     current = {k: v for k, v in RULE.items() if k != "ladder"}
     if ladder is not None:
         current["ladder"] = ladder
     view = rc.cuts_view(current)
-    assert ("cuts_ladder" in view) == (session_type == 3 and bool(ladder))
+    assert ("cuts_ladder" in view) == (session_type in (1, 2, 3) and bool(ladder))
     if "cuts_ladder" in view:
         assert view["cuts_ladder"] == ladder
         assert set(view["cuts_rule"]) == {"cap", "max", "per", "step"}
+
+
+@pytest.mark.parametrize("session_type", [1, 2])
+def test_a_ladder_round_in_practice_or_qualifying_is_a_live_drive_through_and_never_a_due(session_type):
+    rc = live_rc.RaceControl({"session_type": session_type})
+    rc.server_id = 907
+    live_rc._cut_dues_pending.clear()
+    rc.add_cuts(3, 3, True, {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5]}, "G907")   # a rule that is NOT live-only: the session decides
+    assert rc.penalties and rc.dt_open, "the drive-through is live"
+    assert not live_rc.pending_cut_dues(), "nothing queued for a result: it would count in the race of the same event"
+    assert rc.conduct.get("G907") == 1, "and the offence counts for the conduct (black flag)"
