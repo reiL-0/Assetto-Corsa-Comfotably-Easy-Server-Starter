@@ -166,3 +166,8 @@ def test_a_session_can_be_unlimited_in_every_kind_and_nothing_goes_beyond():
     assert (cfg["PRACTICE"]["TIME"], cfg["QUALIFY"]["TIME"], cfg["RACE"]["TIME"], cfg["RACE"]["LAPS"]) == (UNLIMITED_MIN,) * 3 + (0,)
     for field in ("practice_min", "qualify_min", "race_min"):
         assert api.post(f"{V}/servers/{sid}/apply", json={**body, field: UNLIMITED_MIN + 1}).status_code == 422, "more than the protocol carries is refused"
+
+
+def test_unlimited_fits_acservers_32_bit_millisecond_clock():
+    from app.schemas.servers import UNLIMITED_MIN
+    assert UNLIMITED_MIN * 60 * 1000 < 2 ** 31, "65535 min measured on a real acServer: timeleft overflowed to a negative number and the session would end at once"
