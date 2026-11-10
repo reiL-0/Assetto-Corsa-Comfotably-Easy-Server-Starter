@@ -10,6 +10,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import json
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import func
@@ -305,6 +307,51 @@ def set_csp_scripts(server_id: int, body: CspScriptsIn, sess: SessionDep) -> Ser
     sess.commit()
     sess.refresh(s)
     return _out(s)
+
+
+class RulesIn(BaseModel):
+    preset: str | None = None   # a rulebook preset name (GET /championships/rulebook/presets) the server starts from; None = the defaults
+    detectors: dict = Field(default_factory=dict)   # only what this server changes over the preset: {drs: {...}, cuts: {...}, flags: {yellow: "off"}, blue: {...}, ...} (app/rulebook.py Detectors)
+
+
+def _rules_view(s: Server) -> dict:
+    from app import league
+    from app.rulebook import PRESETS
+    det, _ = league.server_detectors(s)
+    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "effective": det.model_dump(), "presets": sorted(PRESETS)}
+
+
+@router.get("/{server_id}/rules")
+def get_rules(server_id: int, sess: SessionDep) -> dict:
+    """The race rules of this SERVER (flags, DRS, track limits, give-back): its preset, what it changed over it, and the result. They apply to every session it runs, with or without a league; a league
+    event only overrides what its rulebook says (app/league.py `effective_rules`)."""
+    return _rules_view(_get(sess, server_id))
+
+
+@router.put("/{server_id}/rules")
+def set_rules(server_id: int, body: RulesIn, sess: SessionDep) -> dict:
+    """Replace this server's rules. Refused while a race is running on it (a rule must not change under the drivers); the live race control reads the new ones within 30 s."""
+    from pydantic import ValidationError
+    from app import league
+    from app.rulebook import PRESETS, Detectors
+    s = _get(sess, server_id)
+    if len(json.dumps(body.detectors)) > 20000:
+        raise HTTPException(422, "rules too large")
+    if body.preset is not None and body.preset not in PRESETS:
+        raise HTTPException(422, f"unknown preset {body.preset!r}")
+    try:
+        Detectors.model_validate(league._deep_merge(PRESETS[body.preset].detectors.model_dump() if body.preset else {}, body.detectors))
+    except ValidationError as e:
+        raise HTTPException(422, str(e.errors(include_url=False, include_context=False)[:3])) from e
+    inst = supervisor.get(server_id)
+    if inst and inst.running and inst.acsp and (inst.acsp.session or {}).get("session_type") == 3:
+        raise HTTPException(409, "race in progress: the rules are frozen")
+    s.rules = {"preset": body.preset, "detectors": body.detectors} if (body.preset or body.detectors) else None
+    sess.add(s)
+    sess.commit()
+    sess.refresh(s)
+    league.invalidate_rule_cache(server_id)
+    return _rules_view(s)
 
 
 @router.put("/{server_id}/limits", response_model=ServerOut)

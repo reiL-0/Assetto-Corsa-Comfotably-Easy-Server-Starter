@@ -49,6 +49,7 @@ class Server(SQLModel, table=True):
     csp_extra: str = ""  # Custom Shaders Patch extra options (INI) hidden at the end of the welcome message (app/csp.py); kept across sessions
     csp_off: str = ""  # OPR CSP scripts switched off for this server, "hub,trainer" ("" = all on, also on a server made later; app/csp.py `extra_for`)
     session: dict | None = Field(default=None, sa_type=JSON)  # the last servers.SessionIn applied (no admin password): what the panel edits and the calendar starts from
+    rules: dict | None = Field(default=None, sa_type=JSON)  # the server's own race rules (app/league.py `server_detectors`): {preset: a rulebook preset name | None, detectors: {only what this server changed}}; never rewritten by an apply
     integrity: str = "warn"  # off | warn | require: what to do when the content differs from its seal (app/integrity.py)
     integrity_extras: bool = False  # also verify the sealed extras (plugins, other files) before starting
     anchor_index: int | None = None  # the last session start seen (app/timeline.py): which session...

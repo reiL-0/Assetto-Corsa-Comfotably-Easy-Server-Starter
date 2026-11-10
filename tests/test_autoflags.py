@@ -146,11 +146,12 @@ def test_a_screen_gets_only_live_types_from_a_fresh_look_for_its_own_slot():
     assert rc.auto_for(1, 0, 101.2) is None, "not under green"
 
 
-def test_the_rulebook_defaults_to_shadow_and_a_new_session_keeps_the_directors_switch():
+def test_the_rulebook_defaults_to_live_and_an_old_shadow_reads_as_live():
     from app.rulebook import Rulebook
 
-    assert Rulebook().detectors.flags.model_dump() == {k: "shadow" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}, "every flag rule is born in shadow"
-    assert Rulebook.model_validate({"detectors": {"flags": {"blue": "live"}}}).detectors.flags.danger == "shadow"
+    assert Rulebook().detectors.flags.model_dump() == {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}, "every flag rule is born live: there is no shadow"
+    assert Rulebook.model_validate({"detectors": {"flags": {"blue": "off"}}}).detectors.flags.danger == "live"
+    assert Rulebook.model_validate({"detectors": {"flags": {"blue": "shadow"}}}).detectors.flags.blue == "live", "a rulebook saved in the shadow days"
     import pytest
     with pytest.raises(Exception):
         Rulebook.model_validate({"detectors": {"flags": {"blue": "maybe"}}})
@@ -168,6 +169,6 @@ def test_a_server_with_no_rulebook_takes_its_default_modes_from_the_deployment(m
     from app.config import settings
     for default in ("shadow", "live"):
         monkeypatch.setattr(settings, "flag_modes_default", default)
-        league._FLAG_MODES.clear()
+        league._EFFECTIVE.clear()
         assert set(league.flag_modes(987001).values()) == {default}, default
-    league._FLAG_MODES.clear()
+    league._EFFECTIVE.clear()

@@ -145,7 +145,7 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
     assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, the cars are judged by the delta of their speed"
     blk0 = rc.delta_block("gt3")
-    assert blk0 is not None and "min_ms" not in blk0 and blk0["pace_kmh"] == 80 and blk0["band_kmh"] == rc.tolerance_kmh and blk0["credit"] == 3.0 and rc.auto_live() == ["vsc"], "no reference lap: a virtual car at the pace, no track length needed"
+    assert blk0 is not None and "min_ms" not in blk0 and blk0["pace_kmh"] == 80 and blk0["band_kmh"] == rc.tolerance_kmh and blk0["credit"] == 3.0 and "vsc" in rc.auto_live(), "no reference lap: a virtual car at the pace, no track length needed"
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
@@ -156,7 +156,7 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert blk["mode"] == "delta" and blk["min_ms"] == frozen["gt3"] and blk["tol"] == 0.2
     assert "min_ms" not in rc.delta_block("lmp") and rc.delta_block("lmp")["pace_kmh"] == 80   # lmp has no reference lap: the delta of its speed
     assert rc.delta_block(None)["pace_kmh"] == 80
-    assert rc.auto_live() == ["vsc"] and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
+    assert "vsc" in rc.auto_live() and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
     # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference lap: the delta of its speed) drives at 120 km/h > 85 km/h
     bad = {1: lambda p: speed(p) / 1.10, 3: lambda p: speed(p) / 1.60, 4: lambda p: 120 / 3.6}
     out, p = _field(rc, bad, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.30, 3: 0.30, 4: 0.30})   # the grace (5 s)

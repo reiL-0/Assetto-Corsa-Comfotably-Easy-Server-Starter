@@ -237,256 +237,122 @@ class _ManualDrsRule(dict):
 DEFAULT_CUT_RULE = {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5, 5, 10]}
 
 
-_CUT_RULES: dict[int, tuple[float, dict | None]] = {}   # server id -> (when it was read, the rule)
-_GIVE_BACK_RULES: dict[int, tuple[float, dict | None]] = {}
-_NEUTRALIZATION_RULES: dict[int, tuple[float, dict]] = {}
-_DRS_RULES: dict[int, tuple[float, dict | None]] = {}
-_FLAG_RULES: dict[int, tuple[float, dict]] = {}
-_FLAG_MODES: dict[int, tuple[float, dict]] = {}
+_EFFECTIVE: dict[int, tuple[float, dict]] = {}   # server id -> (when it was read, everything the live race control takes from the rules)
 _cut_rule_lock = threading.Lock()
 CUT_RULE_TTL = 30.0
+FLAG_RULE_KINDS = ("blue", "yellow", "meatball", "black", "red")
+FLAG_MODE_KINDS = ("blue", "danger", "yellow", "meatball", "black", "red")
 
 
 def invalidate_rule_cache(server_id: int) -> None:
-    """An applied session has a new snapshot; discard the previous session's rules."""
+    """An applied session, or new rules of the server, have a new snapshot; discard what was read."""
     with _cut_rule_lock:
-        for cache in (_CUT_RULES, _GIVE_BACK_RULES, _FLAG_MODES, _NEUTRALIZATION_RULES, _DRS_RULES, _FLAG_RULES):
-            cache.pop(server_id, None)
+        _EFFECTIVE.pop(server_id, None)
 
 
-def cut_rule(server_id: int) -> dict | None:
-    """Running event rules take precedence; absent rules use the live-only default.
-    Cached under the rule lock; refreshed by request threads, never the live event loop.
-    """
-    hit = _CUT_RULES.get(server_id)
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def server_detectors(server: Server | None):
+    """The detectors of a SERVER, with no league: the category preset (`rules.preset`, one of app/rulebook.py PRESETS) under the server's own settings (`rules.detectors`, only what it changed), under the
+    old manual-session fields (`session.cuts_rule` / `session.drs_rule`, kept so nothing saved before this moves). Plain `Detectors()` (everything live) when it has nothing. Returns (detectors, the keys the
+    server set itself)."""
+    from app.rulebook import PRESETS, CutRule, Detectors, DrsRule
+    rules = (server.rules or {}) if server else {}
+    session = (server.session or {}) if server else {}
+    preset = PRESETS.get(rules.get("preset") or "")
+    own = rules.get("detectors") or {}
+    det = Detectors.model_validate(_deep_merge(preset.detectors.model_dump() if preset else {}, own))
+    if "cuts" not in own and not (preset and preset.detectors.cuts) and session.get("cuts_rule") is not None:
+        det.cuts = CutRule.model_validate(session["cuts_rule"])
+    if "drs" not in own and not (preset and preset.detectors.drs) and session.get("drs_rule") is not None:
+        det.drs = DrsRule.model_validate(session["drs_rule"])
+    return det, set(own) | (preset.detectors.model_fields_set if preset else set())
+
+
+def effective_rules(server_id: int) -> dict:
+    """EVERYTHING the live race control takes from the rules of this server, from ONE read of the database and ONE cache (CUT_RULE_TTL): from a request thread or a worker, never the event loop.
+    Layers, each over the one before: the defaults (everything live) < the category preset < the server's own settings < the rulebook of the league event running on it (its cuts and DRS only when it has
+    them: a league that says nothing about DRS does not switch the server's off). No event running = the server's rules, which always apply: sessions are sanctioned whoever starts them, with or without a league.
+    {cut, give_back, drs, flag_rules, flag_modes, neutralization}."""
+    hit = _EFFECTIVE.get(server_id)
     if hit and time.time() - hit[0] < CUT_RULE_TTL:
         return hit[1]
     with _cut_rule_lock:   # (one read at a time: requests that find the cache stale together do not all go to the database, and an older read never replaces a newer one)
-        hit = _CUT_RULES.get(server_id)
+        hit = _EFFECTIVE.get(server_id)
         if hit and time.time() - hit[0] < CUT_RULE_TTL:
             return hit[1]
-        rule = _ManualCutRule(DEFAULT_CUT_RULE)
         with Session(engine) as s:
             sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
             ev = s.get(Event, sc.event_id) if sc else None
             c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
             rb = _applied_rulebook(s, server_id, c, ev)
-            cut = rb.detectors.cuts if rb else None
-            if sc is None:
-                from app.rulebook import CutRule
-
-                server = s.get(Server, server_id)
-                raw = (server.session or {}).get("cuts_rule") if server else None
-                cut = CutRule.model_validate(raw) if raw is not None else None
+            server = s.get(Server, server_id)
+            own, set_here = server_detectors(server)
+            det = rb.detectors.model_copy(deep=True) if rb else own
+            cut_from_server = drs_from_server = rb is None   # (a rule the SERVER brings is live only: no penalty goes to a league's results from it)
+            if rb:   # the league decides only what it says: a section it left as the default (or, cuts and DRS, empty) is the server's
+                plain = type(det)()
+                for name in type(det).model_fields:
+                    if getattr(det, name) == getattr(plain, name):
+                        setattr(det, name, getattr(own, name))
+                cut_from_server, drs_from_server = rb.detectors.cuts is None and own.cuts is not None, rb.detectors.drs is None and own.drs is not None
+            cut = det.cuts
+            cut_rule = _ManualCutRule(DEFAULT_CUT_RULE)
             if cut:
-                rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s) if rb else cut.max_seconds}
+                cut_rule = {"max": cut.tolerance, "per": cut.cuts_per_step, "step": cut.step_seconds, "cap": min(cut.max_seconds, rb.neutralization.max_auto_time_penalty_s) if rb and not cut_from_server else cut.max_seconds}
                 if cut.ladder is not None:
-                    rule["ladder"] = list(cut.ladder)
-                if sc is None:
-                    rule = _ManualCutRule(rule)
-        if len(_CUT_RULES) > 64:
-            _CUT_RULES.clear()
-        _CUT_RULES[server_id] = (time.time(), rule)
-        return rule
-
-
-def give_back_rule(server_id: int) -> dict | None:
-    """The rule of the advantage gained off the track of the league event running on this server: {seconds, window_s}; None when no league event runs or the league switched it off. Cached like `cut_rule`
-    (CUT_RULE_TTL, one read at a time): from a request thread, never from the event loop."""
-    hit = _GIVE_BACK_RULES.get(server_id)
-    if hit and time.time() - hit[0] < CUT_RULE_TTL:
-        return hit[1]
-    with _cut_rule_lock:
-        hit = _GIVE_BACK_RULES.get(server_id)
-        if hit and time.time() - hit[0] < CUT_RULE_TTL:
-            return hit[1]
-        rule = None
-        with Session(engine) as s:
-            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
-            ev = s.get(Event, sc.event_id) if sc else None
-            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c, ev)
-            gb = rb.detectors.give_back if rb else None
-            if gb and gb.enabled:
-                rule = {"seconds": gb.seconds, "window_s": gb.window_s}
-        if len(_GIVE_BACK_RULES) > 64:
-            _GIVE_BACK_RULES.clear()
-        _GIVE_BACK_RULES[server_id] = (time.time(), rule)
-        return rule
-
-
-def drs_rule(server_id: int) -> dict | None:
-    """The DRS rule (app/rulebook.py `DrsRule`, as a dict) of the league event running on this server, or of the manual session's own `drs_rule`; None = no DRS rules. Cached like `give_back_rule`:
-    from a request thread or a worker, never from the event loop."""
-    hit = _DRS_RULES.get(server_id)
-    if hit and time.time() - hit[0] < CUT_RULE_TTL:
-        return hit[1]
-    with _cut_rule_lock:
-        hit = _DRS_RULES.get(server_id)
-        if hit and time.time() - hit[0] < CUT_RULE_TTL:
-            return hit[1]
-        rule = None
-        with Session(engine) as s:
-            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
-            ev = s.get(Event, sc.event_id) if sc else None
-            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c, ev)
-            drs = rb.detectors.drs if rb else None
-            if sc is None:   # a manual session (no schedule): the rule the panel put in its own settings
-                from app.rulebook import DrsRule
-                server = s.get(Server, server_id)
-                raw = (server.session or {}).get("drs_rule") if server else None
-                drs = DrsRule.model_validate(raw) if raw is not None else None
-            if drs:
-                rule = _ManualDrsRule(drs.model_dump()) if sc is None else drs.model_dump()
-        if len(_DRS_RULES) > 64:
-            _DRS_RULES.clear()
-        _DRS_RULES[server_id] = (time.time(), rule)
-        return rule
-
-
-FLAG_RULE_KINDS = ("blue", "yellow", "meatball", "black", "red")
-
-
-def flag_rules(server_id: int) -> dict:
-    """The rules of the flags (app/rulebook.py: BlueRule, YellowRule, MeatballRule, BlackRule, RedRule, each as a dict) of the league event running on this server; the defaults when no rulebook applies.
-    Cached like `drs_rule`: from a request thread or a worker, never the event loop."""
-    hit = _FLAG_RULES.get(server_id)
-    if hit and time.time() - hit[0] < CUT_RULE_TTL:
-        return hit[1]
-    with _cut_rule_lock:
-        hit = _FLAG_RULES.get(server_id)
-        if hit and time.time() - hit[0] < CUT_RULE_TTL:
-            return hit[1]
-        from app.rulebook import Detectors
-        det = Detectors()
-        with Session(engine) as s:
-            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
-            ev = s.get(Event, sc.event_id) if sc else None
-            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c, ev)
+                    cut_rule["ladder"] = list(cut.ladder)
+                if cut_from_server:
+                    cut_rule = _ManualCutRule(cut_rule)
+            gb = det.give_back
+            give_back = {"seconds": gb.seconds, "window_s": gb.window_s} if gb.enabled and (rb is not None or "give_back" in set_here) else None
+            drs = (_ManualDrsRule(det.drs.model_dump()) if drs_from_server else det.drs.model_dump()) if det.drs else None
+            modes = det.flags.model_dump() if (rb is not None or "flags" in set_here) else {k: settings.flag_modes_default for k in FLAG_MODE_KINDS}
+            neutral = {"mode": "off"}
             if rb:
-                det = rb.detectors
-        rules = {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}
-        if len(_FLAG_RULES) > 64:
-            _FLAG_RULES.clear()
-        _FLAG_RULES[server_id] = (time.time(), rules)
-        return rules
+                neutral = rb.neutralization.model_dump()
+                neutral["category"] = (server.session or {}).get("category", "") if server else ""
+                neutral["rulebook_revision"] = (server.session or {}).get("rulebook_revision") if server else None
+        out = {"cut": cut_rule, "give_back": give_back, "drs": drs, "flag_rules": {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}, "flag_modes": modes, "neutralization": neutral}
+        if len(_EFFECTIVE) > 64:
+            _EFFECTIVE.clear()
+        _EFFECTIVE[server_id] = (time.time(), out)
+        return out
 
 
-def flag_rules_cached(server_id: int) -> dict | None:
-    hit = _FLAG_RULES.get(server_id)
-    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
+def _cached(server_id: int, key: str):
+    """What `effective_rules` read last (no database, no waiting) or None when it is missing or old (3 x the TTL): the monitor then does NOT show anything live."""
+    hit = _EFFECTIVE.get(server_id)
+    return hit[1][key] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
 
 
-def flag_rules_stale(server_id: int) -> bool:
-    hit = _FLAG_RULES.get(server_id)
+def rules_stale(server_id: int) -> bool:
+    """Whether the cached rules of this server are missing or due to be read again (the monitor then reads them in a worker thread)."""
+    hit = _EFFECTIVE.get(server_id)
     return not hit or time.time() - hit[0] >= CUT_RULE_TTL
 
 
-def drs_rule_cached(server_id: int) -> dict | None:
-    """What `drs_rule` read last (no database, no waiting): for the monitor, which runs on the event loop."""
-    hit = _DRS_RULES.get(server_id)
-    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None
-
-
-def drs_rule_stale(server_id: int) -> bool:
-    hit = _DRS_RULES.get(server_id)
-    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
-
-
-def flag_modes(server_id: int) -> dict:
-    """{blue, danger}: off | shadow | live, from the rulebook of the league event running on this server; both `shadow` when no league event runs. Cached like `give_back_rule`: from a request thread, never from the event loop."""
-    hit = _FLAG_MODES.get(server_id)
-    if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
-        return hit[1]
-    with _cut_rule_lock:
-        hit = _FLAG_MODES.get(server_id)
-        if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
-            return hit[1]
-        modes = {k: settings.flag_modes_default for k in ("blue", "danger", "yellow", "meatball", "black", "red")}   # (no applied rulebook: the server's default, "shadow" unless the deployment says otherwise)
-        with Session(engine) as s:
-            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
-            ev = s.get(Event, sc.event_id) if sc else None
-            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c, ev)
-            if rb:
-                modes = rb.detectors.flags.model_dump()
-        if len(_FLAG_MODES) > 64:
-            _FLAG_MODES.clear()
-        _FLAG_MODES[server_id] = (time.monotonic(), modes)
-        return modes
-
-
-def flag_modes_cached(server_id: int) -> dict | None:
-    """What `flag_modes` read last (no database, no waiting) or None when it is missing or old (3 x the TTL): the monitor then does NOT show anything live."""
-    hit = _FLAG_MODES.get(server_id)
-    return hit[1] if hit and time.monotonic() - hit[0] < 3 * CUT_RULE_TTL else None
-
-
-def flag_modes_stale(server_id: int) -> bool:
-    hit = _FLAG_MODES.get(server_id)
-    return not hit or time.monotonic() - hit[0] >= CUT_RULE_TTL
-
-
-def neutralization_rule(server_id: int) -> dict:
-    """Applied neutralization thresholds and category, cached like flags; no event means off."""
-    hit = _NEUTRALIZATION_RULES.get(server_id)
-    if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
-        return hit[1]
-    with _cut_rule_lock:
-        hit = _NEUTRALIZATION_RULES.get(server_id)
-        if hit and time.monotonic() - hit[0] < CUT_RULE_TTL:
-            return hit[1]
-        modes = {"mode": "off"}
-        with Session(engine) as s:
-            sc = s.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
-            ev = s.get(Event, sc.event_id) if sc else None
-            c = s.get(Championship, ev.league_id) if ev and ev.league_id else None
-            rb = _applied_rulebook(s, server_id, c, ev)
-            if rb:
-                modes = rb.neutralization.model_dump()
-                server = s.get(Server, server_id)
-                modes["category"] = (server.session or {}).get("category", "") if server else ""
-                modes["rulebook_revision"] = (server.session or {}).get("rulebook_revision") if server else None
-        if len(_NEUTRALIZATION_RULES) > 64:
-            _NEUTRALIZATION_RULES.clear()
-        _NEUTRALIZATION_RULES[server_id] = (time.monotonic(), modes)
-        return modes
-
-
-def neutralization_rule_cached(server_id: int) -> dict | None:
-    """What `neutralization_rule` read last (no database, no waiting) or None when it is missing or old (3 x the TTL): the monitor then does NOT show anything live."""
-    hit = _NEUTRALIZATION_RULES.get(server_id)
-    return hit[1] if hit and time.monotonic() - hit[0] < 3 * CUT_RULE_TTL else None
-
-
-def neutralization_rule_stale(server_id: int) -> bool:
-    hit = _NEUTRALIZATION_RULES.get(server_id)
-    return not hit or time.monotonic() - hit[0] >= CUT_RULE_TTL
-
-
-def give_back_rule_cached(server_id: int) -> dict | None:
-    """What `give_back_rule` read last (no database, no waiting): for the monitor, which runs on the event loop."""
-    hit = _GIVE_BACK_RULES.get(server_id)
-    return hit[1] if hit and time.time() - hit[0] < 3 * CUT_RULE_TTL else None   # (never an old league's rule: the monitor refreshes it every CUT_RULE_TTL)
-
-
-def give_back_rule_stale(server_id: int) -> bool:
-    """Whether the cached rule of this server is missing or due to be read again (the monitor then reads it in a worker thread)."""
-    hit = _GIVE_BACK_RULES.get(server_id)
-    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
-
-
-def cut_rule_stale(server_id: int) -> bool:
-    hit = _CUT_RULES.get(server_id)
-    return not hit or time.time() - hit[0] >= CUT_RULE_TTL
-
-
+# The one-rule views the callers already use (the live race control asks for each by name):
+def cut_rule(server_id: int) -> dict | None: return effective_rules(server_id)["cut"]
+def give_back_rule(server_id: int) -> dict | None: return effective_rules(server_id)["give_back"]
+def drs_rule(server_id: int) -> dict | None: return effective_rules(server_id)["drs"]
+def flag_rules(server_id: int) -> dict: return effective_rules(server_id)["flag_rules"]
+def flag_modes(server_id: int) -> dict: return effective_rules(server_id)["flag_modes"]
+def neutralization_rule(server_id: int) -> dict: return effective_rules(server_id)["neutralization"]
+def flag_rules_cached(server_id: int) -> dict | None: return _cached(server_id, "flag_rules")
+def drs_rule_cached(server_id: int) -> dict | None: return _cached(server_id, "drs")
+def flag_modes_cached(server_id: int) -> dict | None: return _cached(server_id, "flag_modes")
+def neutralization_rule_cached(server_id: int) -> dict | None: return _cached(server_id, "neutralization")
+def give_back_rule_cached(server_id: int) -> dict | None: return _cached(server_id, "give_back")
 def cut_rule_cached(server_id: int) -> dict | None:
-    """What `cut_rule` read last, with no database and no waiting (live-only default before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
-    hit = _CUT_RULES.get(server_id)
-    return hit[1] if hit and hit[1] is not None else _ManualCutRule(DEFAULT_CUT_RULE)
+    """With no database and no waiting (the live-only default before the first read): for the places that must not do I/O, as the state snapshot taken under the race-control lock."""
+    return _cached(server_id, "cut") or _ManualCutRule(DEFAULT_CUT_RULE)
+flag_rules_stale = drs_rule_stale = flag_modes_stale = neutralization_rule_stale = give_back_rule_stale = cut_rule_stale = rules_stale
 
 
 def _qualy_grid(sess: Session, c: Championship, server_id: int, filename: str, parsed: dict) -> None:

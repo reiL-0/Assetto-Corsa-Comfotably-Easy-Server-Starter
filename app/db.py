@@ -218,6 +218,12 @@ def _m014_result_rulebook_snapshot(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "championship_events" ADD COLUMN "rulebook_snapshot" JSON')
 
 
+def _m015_server_rules(con: sqlite3.Connection) -> None:
+    """The server's own race rules; NULL = nothing set (the defaults and the old manual-session fields apply, as before)."""
+    if "rules" not in {row[1] for row in con.execute('PRAGMA table_info("servers")')}:
+        con.execute('ALTER TABLE "servers" ADD COLUMN "rules" JSON')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -233,6 +239,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (12, _m012_server_csp_off),
     (13, _m013_cut_dues),
     (14, _m014_result_rulebook_snapshot),
+    (15, _m015_server_rules),
 ]
 
 

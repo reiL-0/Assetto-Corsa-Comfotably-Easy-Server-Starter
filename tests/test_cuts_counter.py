@@ -37,10 +37,10 @@ def _league_event(sid, rules):
 
 def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
     sid = api.post(f"{V}/servers", json={"name": "cuts-rule"}).json()["id"]
-    league._CUT_RULES.clear()
+    league._EFFECTIVE.clear()
     assert league.cut_rule(sid) == league.DEFAULT_CUT_RULE
     _league_event(sid, RULE)
-    league._CUT_RULES.clear()
+    league._EFFECTIVE.clear()
     assert league.cut_rule(sid) == {"max": 0, "per": 1, "step": 5, "cap": 10}, "the older field has no free cuts"
     with Session(engine) as s:   # a rulebook's own rule: 5 cuts are free
         for c in s.exec(__import__("sqlmodel").select(Championship)).all():
@@ -48,15 +48,15 @@ def test_the_rule_is_the_one_of_the_league_event_running_on_the_server():
                 c.rulebook = Rulebook(detectors=Detectors(cuts=CutRule(tolerance=5, cuts_per_step=1, step_seconds=5, max_seconds=15))).model_dump()
                 s.add(c)
         s.commit()
-    league._CUT_RULES.clear()
+    league._EFFECTIVE.clear()
     assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 10}
     sid2 = api.post(f"{V}/servers", json={"name": "cuts-no-rule"}).json()["id"]
     _league_event(sid2, None)
-    league._CUT_RULES.clear()
+    league._EFFECTIVE.clear()
     assert league.cut_rule(sid2) == league.DEFAULT_CUT_RULE
-    league._CUT_RULES[sid] = (time.time(), {"max": 9, "per": 2, "step": 3, "cap": 9})
+    league._EFFECTIVE[sid] = (time.time(), {"cut": {"max": 9, "per": 2, "step": 3, "cap": 9}})
     assert league.cut_rule(sid) == {"max": 9, "per": 2, "step": 3, "cap": 9}, "read at most every CUT_RULE_TTL s"
-    league._CUT_RULES[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"max": 9, "per": 2, "step": 3, "cap": 9})
+    league._EFFECTIVE[sid] = (time.time() - league.CUT_RULE_TTL - 1, {"cut": {"max": 9, "per": 2, "step": 3, "cap": 9}})
     assert league.cut_rule(sid) == {"max": 5, "per": 1, "step": 5, "cap": 10}, "and read again after it"
 
 
@@ -107,7 +107,7 @@ def test_stale_rules_are_read_once_by_concurrent_requests_and_the_snapshot_never
     import threading
     sid = api.post(f"{V}/servers", json={"name": "cuts-threads"}).json()["id"]
     _league_event(sid, RULE)
-    league._CUT_RULES.clear()
+    league._EFFECTIVE.clear()
     reads = []
     real = league.Session
 

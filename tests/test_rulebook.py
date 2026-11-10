@@ -161,7 +161,7 @@ def test_migration_006_adds_the_column_and_leaves_every_league_on_its_older_rule
     db.init_db()
     con = sqlite3.connect(path)
     assert con.execute("SELECT id, name, rulebook FROM championships").fetchall() == [(1, "Vieja", None)]
-    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert [r[0] for r in con.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     db.init_db()   # rerun
 
 
@@ -247,7 +247,7 @@ def test_applied_session_keeps_a_versioned_copy_until_the_next_application():
         s.expire_all()
         restored = SessionIn.model_validate(s.get(Server, sid).session)
         assert restored.rulebook_snapshot.neutralization.green_after_laps == 3
-        assert _applied_rulebook(s, sid, c).detectors.flags.blue == "shadow"
+        assert _applied_rulebook(s, sid, c).detectors.flags.blue == "live"
         next_session = session_for(s, ev, 1)
         assert next_session.rulebook_revision != restored.rulebook_revision
         assert next_session.rulebook_snapshot.neutralization.green_after_laps == 7
