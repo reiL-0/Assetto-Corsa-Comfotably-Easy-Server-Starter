@@ -137,6 +137,9 @@ class NascarSessionIn(BaseModel):
     shares: list[Annotated[float, Field(gt=0, le=MAX_SHARE, allow_inf_nan=False)]] | None = Field(default=None, min_length=1, max_length=MAX_SHARES)
 
 
+UNLIMITED_MIN = 65535   # «unlimited» session time: acServer has no such switch, the session simply never runs out (the protocol carries minutes in 16 bits)
+
+
 class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
@@ -154,10 +157,10 @@ class SessionIn(BaseModel):
     locked: bool = False  # only the Steam IDs in `entries` may join (LOCKED_ENTRY_LIST)
     pickup: bool = True  # drivers without a reserved slot pick a free one on joining
     welcome: str = Field(default="", max_length=2000)  # shown to a driver when joining (the session's rules, the league's link...)
-    practice_min: int | None = Field(default=None, ge=0, le=720)
-    qualify_min: int | None = Field(default=None, ge=0, le=720)
+    practice_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)   # minutes; UNLIMITED_MIN (65535, the most the game's protocol carries: 45 days) is «unlimited»
+    qualify_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)
     race_laps: int | None = Field(default=None, ge=0, le=999)
-    race_min: int | None = Field(default=None, ge=0, le=1440)  # a timed race (endurance) instead of laps; not both
+    race_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)  # a timed race (endurance) instead of laps; not both; UNLIMITED_MIN = no end
     race_est_min: int | None = Field(default=None, ge=0, le=1440)  # how long a race BY LAPS lasts for the session clock of a stopped server (app/timeline.py): 0 = the default of 20 minutes; left out = the server keeps the one it has. Not sent to acServer
     car_counts: dict[str, Annotated[int, Field(strict=True, ge=0, le=MAX_SLOTS)]] | None = None   # open slots per model («5 of this, 2 of that»); then `cars` and `max_clients` follow from it. Ignored with `entries`
     pace_steam_id: str | None = Field(default=None, pattern=r"^[0-9]{17}$")   # the pace car's driver (SteamID): named once when the server starts or the session is applied; the director can change it afterwards
