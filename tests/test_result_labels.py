@@ -22,12 +22,12 @@ def _put(sid, name, body):
 
 
 def test_labels_by_case():
-    assert result_label("2026_11_11_5_13_RACE.json", "OPR 1", "Spa", "Liga GT", "GT3 Fecha 3").startswith("GT3 Fecha 3 · Liga GT · Race · 11/11 ")
-    assert result_label("2026_11_11_5_13_RACE.json", "OPR 1", "Spa", "Liga GT", None).startswith("Liga GT · Spa · Race · ")
-    assert result_label("2026_11_11_4_40_QUALIFY.json", "OPR 1", "Monza", None, None).startswith("OPR 1 · Monza · Quali · ")
-    assert result_label("2026_11_11_4_25_PRACTICE.json", "OPR 1", None, None, None).startswith("OPR 1 · pista desconocida · Practice · ")
+    assert result_label("2026_11_11_5_13_RACE.json", "OPR 1", "Spa", "Liga GT", "GT3 Fecha 3")== "GT3 Fecha 3 · Liga GT · Race"
+    assert result_label("2026_11_11_5_13_RACE.json", "OPR 1", "Spa", "Liga GT", None)== "Liga GT · Spa · Race"
+    assert result_label("2026_11_11_4_40_QUALIFY.json", "OPR 1", "Monza", None, None)== "OPR 1 · Monza · Quali"
+    assert result_label("2026_11_11_4_25_PRACTICE.json", "OPR 1", None, None, None)== "OPR 1 · pista desconocida · Practice"
     assert result_label("race1.json", "OPR 1", "Spa", None, None) == "race1.json", "not a dated result file: shown as it is"
-    assert result_label("2026_11_11_5_13_RACE.json", "S", "T", None, None).endswith(" CDMX")
+    assert ":" not in result_label("2026_11_11_5_13_RACE.json", "S", "T", None, None), "no date in the label: the browser adds it from started_at"
 
 
 def test_start_reads_unpadded_hours_and_rejects_nonsense():
@@ -44,7 +44,7 @@ def test_details_are_newest_first_by_date_not_by_text_and_a_broken_file_does_not
     names = [r["filename"] for r in client.get(f"/api/v1/servers/{sid}/results?details=1").json()]
     assert names == ["2026_11_11_10_0_RACE.json", "2026_11_11_5_13_RACE.json", "2026_11_11_4_40_QUALIFY.json", "2026_11_11_3_0_PRACTICE.json"]
     rows = {r["filename"]: r for r in client.get(f"/api/v1/servers/{sid}/results?details=1").json()}
-    assert rows["2026_11_11_10_0_RACE.json"]["label"].startswith("Labels · rt spa (gp) · Race · ") and "pista desconocida" in rows["2026_11_11_4_40_QUALIFY.json"]["label"] and "pista desconocida" in rows["2026_11_11_3_0_PRACTICE.json"]["label"]
+    assert rows["2026_11_11_10_0_RACE.json"]["label"]== "Labels · rt spa (gp) · Race" and "pista desconocida" in rows["2026_11_11_4_40_QUALIFY.json"]["label"] and "pista desconocida" in rows["2026_11_11_3_0_PRACTICE.json"]["label"]
     assert client.get(f"/api/v1/servers/{sid}/results").json() == sorted(names), "without ?details the list is the file names, as before"
 
 
@@ -59,4 +59,4 @@ def test_a_counted_result_shows_its_league_and_event_title():
         s.add(ChampionshipEvent(championship_id=cid, server_id=sid, filename="2026_11_11_5_13_RACE.json", event_id=ev.id, session_type="Race"))
         s.commit()
     r = client.get(f"/api/v1/servers/{sid}/results?details=1").json()[0]
-    assert r["label"].startswith("GT3 Fecha 3 · Liga GT · Race · ") and r["league"] == "Liga GT" and r["title"] == "GT3 Fecha 3"
+    assert r["label"]== "GT3 Fecha 3 · Liga GT · Race" and r["started_at"].endswith("+00:00") and r["league"] == "Liga GT" and r["title"] == "GT3 Fecha 3"
