@@ -185,3 +185,11 @@ def test_danger_warns_earlier_the_faster_the_driver_comes_and_for_a_crawling_car
     for i in range(5):
         run(af2, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 100.0}, now=96.0 + i)
     assert af2.danger == {}, "at 100 km/h 550 m is still too far (278 m of road in 10 s, the floor is 400 m)"
+
+
+def test_nascar_keeps_the_old_danger_thresholds():
+    af = AutoFlags(); af.nascar = True
+    run(af, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 200.0}, now=90.0)
+    for i in range(5):
+        run(af, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 200.0}, now=96.0 + i)
+    assert af.danger == {}, "18 km/h is not stopped and 550 m is beyond 400 m"

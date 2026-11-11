@@ -1086,6 +1086,7 @@ class RaceControl:
             racing = self._sanctioned() and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
+            self.autoflags.nascar = bool(self.nascar)
             self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
             if self.nascar or not self._is_race():
                 self.autoflags.modes["blue"] = "off"   # NASCAR: a lapped car need not give way; outside a race nobody laps anybody (the laps of a car are only how many it has driven)

@@ -371,6 +371,8 @@ def incident_tick(now: float) -> None:
         rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off" or fieldrec.enabled(inst.server_id))
         if not rc:
             continue
+        if rc.nascar and rule.get("mode", "off") != "off":
+            rule = {**rule, "mode": "off"}   # (a NASCAR race has its own cautions: the automatic VSC/FCY and its green never touch it)
         if rc.neutralization_rule != rule:
             rc.audit("mode_change", previous=rc.neutralization_rule, rule=rule, executed=True)
         rc.neutralization_rule = rule

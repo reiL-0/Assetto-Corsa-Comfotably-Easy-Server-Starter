@@ -322,6 +322,8 @@ def effective_rules(server_id: int) -> dict:
                 preset = PRESETS.get(srules.get("preset") or "")
                 neutral = Neutralization.model_validate(_deep_merge(preset.neutralization.model_dump() if preset else {}, srules.get("neutralization") or {})).model_dump()
                 neutral["rulebook_revision"] = None
+            if (server.session or {}).get("nascar") if server else False:
+                neutral["mode"] = "off"   # stages = a NASCAR race, whatever the league says: NASCAR has its own cautions (app/live/caution.py) and no automatic VSC/FCY touches it
             neutral["category"] = (server.session or {}).get("category") or (server.rules or {}).get("preset") or "" if server else ""
         out = {"cut": cut_rule, "give_back": give_back, "drs": drs, "flag_rules": {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}, "flag_modes": modes, "neutralization": neutral}
         if len(_EFFECTIVE) > 64:

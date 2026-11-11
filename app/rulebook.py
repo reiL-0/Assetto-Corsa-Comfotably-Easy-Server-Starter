@@ -273,4 +273,8 @@ PRESETS: dict[str, Rulebook] = {
         ],
         detectors=Detectors(cuts=CutRule(tolerance=2, cuts_per_step=1, step_seconds=5, max_seconds=600, ladder=[0, 5, 5, 10])),
     ),
+    # Server presets by category (a server picks one in /rules; a league may copy it): what changes is the automatic neutralization. Formula: VSC for a stopped car, as in F1; GT and WEC: full course yellow.
+    "formula": Rulebook(preset="formula", neutralization=Neutralization(default_mode="VSC")),
+    "gt": Rulebook(preset="gt", neutralization=Neutralization(default_mode="FCY")),
+    "wec": Rulebook(preset="wec", neutralization=Neutralization(default_mode="FCY")),
 }

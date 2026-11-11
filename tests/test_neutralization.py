@@ -759,3 +759,25 @@ def test_a_server_without_league_has_neutralization_live_and_its_own_settings_wi
         db.add(server); db.commit()
         invalidate_rule_cache(sid)
         assert effective_rules(sid)["neutralization"]["mode"] == "off"
+
+
+def test_a_nascar_server_never_gets_automatic_neutralization_and_a_category_preset_sets_the_mode():
+    from sqlmodel import Session
+    from app.db import engine
+    from app.league import effective_rules, invalidate_rule_cache
+    from app.models import Server
+    with Session(engine) as db:
+        server = Server(name="Neutralization nascar", base_port=15557, rules={"preset": "gt"}, session={"nascar": {"total": 100}})
+        db.add(server); db.commit(); db.refresh(server)
+        sid = server.id
+        invalidate_rule_cache(sid)
+        assert effective_rules(sid)["neutralization"]["mode"] == "off", "stages = NASCAR: its own cautions, whatever the preset"
+        server.session = {}
+        db.add(server); db.commit()
+        invalidate_rule_cache(sid)
+        n = effective_rules(sid)["neutralization"]
+        assert n["mode"] == "live" and n["default_mode"] == "FCY" and n["category"] == "gt"
+        server.rules = {"preset": "formula"}
+        db.add(server); db.commit()
+        invalidate_rule_cache(sid)
+        assert effective_rules(sid)["neutralization"]["default_mode"] == "VSC"
