@@ -348,6 +348,7 @@ def result_track(path: Path) -> str | None:
             d = json.loads(path.read_text(encoding="utf-8-sig"))
             track, cfg = csp.clean_track(d.get("TrackName")), d.get("TrackConfig")
             track, cfg = track if isinstance(track, str) else None, cfg if isinstance(cfg, str) else None   # a hand-edited file may hold anything: only text goes into a label
+            track = track.replace("_", " ").strip() if track else track   # «rt_zolder» -> «rt zolder»
             _track_cache[key] = f"{track} ({cfg})" if track and cfg else track or None
         return _track_cache[key]
     except (OSError, ValueError, AttributeError):

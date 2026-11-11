@@ -37,14 +37,14 @@ def test_start_reads_unpadded_hours_and_rejects_nonsense():
 
 def test_details_are_newest_first_by_date_not_by_text_and_a_broken_file_does_not_break_the_list():
     sid = client.post("/api/v1/servers", json={"name": "Labels"}).json()["id"]
-    _put(sid, "2026_11_11_10_0_RACE.json", {"Type": "Race", "TrackName": "spa", "TrackConfig": "gp"})
+    _put(sid, "2026_11_11_10_0_RACE.json", {"Type": "Race", "TrackName": "rt_spa", "TrackConfig": "gp"})
     _put(sid, "2026_11_11_5_13_RACE.json", {"Type": "Race", "TrackName": "monza"})   # text order puts this AFTER the 10:00 one; by date it is before
     _put(sid, "2026_11_11_4_40_QUALIFY.json", "")   # empty: no track, still listed
     _put(sid, "2026_11_11_3_0_PRACTICE.json", {"Type": "Practice", "TrackName": 42, "TrackConfig": ["x"]})   # wrong types: no track, no 500 for the whole list
     names = [r["filename"] for r in client.get(f"/api/v1/servers/{sid}/results?details=1").json()]
     assert names == ["2026_11_11_10_0_RACE.json", "2026_11_11_5_13_RACE.json", "2026_11_11_4_40_QUALIFY.json", "2026_11_11_3_0_PRACTICE.json"]
     rows = {r["filename"]: r for r in client.get(f"/api/v1/servers/{sid}/results?details=1").json()}
-    assert rows["2026_11_11_10_0_RACE.json"]["label"].startswith("Labels · spa (gp) · Race · ") and "pista desconocida" in rows["2026_11_11_4_40_QUALIFY.json"]["label"] and "pista desconocida" in rows["2026_11_11_3_0_PRACTICE.json"]["label"]
+    assert rows["2026_11_11_10_0_RACE.json"]["label"].startswith("Labels · rt spa (gp) · Race · ") and "pista desconocida" in rows["2026_11_11_4_40_QUALIFY.json"]["label"] and "pista desconocida" in rows["2026_11_11_3_0_PRACTICE.json"]["label"]
     assert client.get(f"/api/v1/servers/{sid}/results").json() == sorted(names), "without ?details the list is the file names, as before"
 
 
