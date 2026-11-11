@@ -291,7 +291,9 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             continue
         nonrun = non_racing_for(sess, e.server_id, e.filename)
         pens = penalties_for(sess, e.server_id, e.filename)
-        parsed = apply_penalties(parse_result_file(p), pens, nonrun)
+        raw = parse_result_file(p)
+        raw["classification"] = [entry for entry in raw["classification"] if entry["driver_guid"] not in nonrun]
+        parsed = apply_penalties(raw, pens, nonrun)
         scoring = parsed["type"] == "Race" and e.scores   # a practice counted without points is only listed. ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
         rows = []
         stage_places = _stage_places(parsed, nonrun) if scoring and stage_table else {}   # {steam id: [(stage, place)]}: the first of the order at the end of each stage but the last

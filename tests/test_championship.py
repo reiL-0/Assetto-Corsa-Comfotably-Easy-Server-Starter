@@ -16,6 +16,24 @@ def _write_race_result(server_id: int, filename: str, results: list[dict]) -> No
     (d / filename).write_text(json.dumps({"Type": "Race", "TrackName": "spa", "Result": results, "Laps": []}))
 
 
+def test_non_racing_director_does_not_occupy_places_or_take_points():
+    sid = client.post("/api/v1/servers", json={"name": "Non-racing"}).json()["id"]
+    _write_race_result(sid, "race.json", [
+        {"DriverName": "Ann", "DriverGuid": "76561190000000001", "TotalTime": 100},
+        {"DriverName": "Director", "DriverGuid": "76561190000000009", "TotalTime": 101},
+        {"DriverName": "Bob", "DriverGuid": "76561190000000002", "TotalTime": 102},
+    ])
+    cid = client.post("/api/v1/championships", json={"name": "Director test"}).json()["id"]
+    assert client.post(f"/api/v1/championships/{cid}/members", json={
+        "guid": "76561190000000009", "name": "Director", "non_racing": True}).status_code == 200
+    assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "race.json"}).status_code == 201
+    race = client.get(f"/api/v1/championships/{cid}/races").json()[0]
+    assert [(r["driver_name"], r["position"], r["points"]) for r in race["classification"]] == [
+        ("Ann", 1, 25), ("Bob", 2, 18)]
+    assert {r["driver_name"]: r["points"] for r in client.get(f"/api/v1/championships/{cid}/standings").json()} == {
+        "Ann": 25, "Bob": 18}
+
+
 def test_championship_standings_across_two_races():
     sid = client.post("/api/v1/servers", json={"name": "ChampServer"}).json()["id"]
 
