@@ -132,6 +132,32 @@ def test_only_assetto_corsa_wakes_the_server(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_a_stopped_server_books_the_slot_of_the_driver_who_asks(monkeypatch):
+    """Locked list, no pickup: Content Manager disables Join («Wait for the next booking») unless /JSON|<steam id> comes back with that driver's slot booked."""
+    _setup(monkeypatch)
+    sid, port = _plain_server("always", SERVER={"NAME": "Liga", "TRACK": "monza", "CONFIG_TRACK": "", "CARS": "bmw_m3", "MAX_CLIENTS": 3})
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.entry_list = [{"MODEL": "bmw_m3", "SKIN": "a", "GUID": "111;222"}, {"MODEL": "bmw_m3", "SKIN": "b", "GUID": "333"}, {"MODEL": "bmw_m3", "SKIN": "c"}]
+        db.add(srv)
+        db.commit()
+
+    async def asked(path: str) -> list[bool]:
+        return [c["IsRequestedGUID"] for c in json.loads((await _http_get(port + 1, path))[1])["Cars"]]
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()
+        assert await asked("/JSON|222") == [True, False, False]       # one of the «;» GUIDs of the first slot
+        assert await asked("/JSON%7C333") == [False, True, False]     # (the pipe may come percent-encoded)
+        assert await asked("/JSON|444") == [False, False, False]      # not on the list: nothing booked for them
+        assert await asked("/JSON|222?x=1") == [True, False, False]   # a query string is not part of the id
+        assert await asked("/JSON|-1") == [False, False, False] and await asked("/JSON|") == [False, False, False]   # Content Manager without Steam asks with -1; an empty id books nothing
+        w.close()
+
+    asyncio.run(scenario())
+
+
 def test_a_stopped_server_looks_open_and_empty(monkeypatch):
     woken = _setup(monkeypatch)
     sid, port = _plain_server("always", SERVER={"NAME": "Prácticas", "TRACK": "monza", "CONFIG_TRACK": "", "CARS": "bmw_m3", "MAX_CLIENTS": 2,

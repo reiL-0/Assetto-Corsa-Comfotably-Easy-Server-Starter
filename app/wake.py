@@ -30,6 +30,7 @@ import socket
 import struct
 import time
 import urllib.request
+from urllib.parse import unquote
 from email.utils import formatdate
 from pathlib import Path
 
@@ -107,10 +108,13 @@ def facade_info(s: Server) -> dict:
     return info
 
 
-def facade_cars(s: Server) -> dict:
-    """Body of /JSON|<guid>: the entry list's cars and skins, nobody connected (checked byte for byte against the running acServer's)."""
+def facade_cars(s: Server, guid: str = "") -> dict:
+    """Body of /JSON|<guid>: the entry list's cars and skins, nobody connected (checked byte for byte against the running acServer's).
+    `IsRequestedGUID` is the slot booked for the asker (its GUID, one of the `;`-separated ones, is the one in the path): Content Manager takes a
+    server without pickup (every locked league event) as «Wait for the next booking», with Join disabled, unless one slot comes back booked for the player."""
     return {"Cars": [{"Model": e.get("MODEL", ""), "Skin": e.get("SKIN", ""), "DriverName": e.get("DRIVERNAME", ""), "DriverTeam": e.get("TEAM", ""),
-                      "DriverNation": "", "IsConnected": False, "IsRequestedGUID": False, "IsEntryList": True}   # acServer says True for every slot of the entry list, named or not
+                      "DriverNation": "", "IsConnected": False, "IsRequestedGUID": bool(guid) and guid in str(e.get("GUID", "")).split(";"),
+                      "IsEntryList": True}   # acServer says True for every slot of the entry list, named or not
                      for e in s.entry_list]}
 
 
@@ -215,7 +219,7 @@ def _http_handler(server_id: int, ac_seen):
                         except ValueError:
                             pass
                 else:
-                    body = _dump(lobby_info(s, facade_info(s))) if path.startswith("/INFO") else _dump(facade_cars(s)) if path.startswith("/JSON") else ""
+                    body = _dump(lobby_info(s, facade_info(s))) if path.startswith("/INFO") else _dump(facade_cars(s, unquote(path.partition("?")[0]).partition("|")[2])) if path.startswith("/JSON") else ""
                     data = body.encode()
                 date = formatdate(usegmt=True)
                 writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: {ctype}\r\n".encode()
