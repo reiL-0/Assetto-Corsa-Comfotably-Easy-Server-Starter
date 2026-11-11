@@ -76,11 +76,26 @@ def test_dynamic_track_section():
 
 def test_options_are_range_checked():
     sid = _setup()
-    for bad in ({"abs_allowed": 3}, {"sun_angle": 81}, {"sun_angle": -81}, {"damage_multiplier": 101}, {"allowed_tyres_out": 5},
+    for bad in ({"abs_allowed": 3}, {"sun_angle": 81}, {"sun_angle": -81}, {"damage_multiplier": 1001},
+                {"fuel_rate": 1001}, {"tyre_wear_rate": 1001}, {"allowed_tyres_out": 5},
                 {"legal_tyres": "SV;../x"}, {"blacklist_mode": 3}, {"client_send_interval_hz": 5}, {"vote_duration": 0},
                 {"weather": [{"graphics": "bad name!"}]}, {"weather": [{"ambient": 99}]}, {"weather": [{}] * 11},
                 {"dynamic_track": {"session_start": 101}}):
         assert _apply(sid, **bad).status_code == 422, bad
+
+
+def test_options_allow_high_multipliers_for_damage_and_wear():
+    sid = _setup()
+    r = _apply(sid, damage_multiplier=250, fuel_rate=700, tyre_wear_rate=800)
+    assert r.status_code == 200
+    srv = r.json()["config"]["SERVER"]
+    assert srv["DAMAGE_MULTIPLIER"] == 250
+    assert srv["FUEL_RATE"] == 700
+    assert srv["TYRE_WEAR_RATE"] == 800
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    assert "DAMAGE_MULTIPLIER=250" in ini
+    assert "FUEL_RATE=700" in ini
+    assert "TYRE_WEAR_RATE=800" in ini
 
 
 def test_saved_event_keeps_the_options():

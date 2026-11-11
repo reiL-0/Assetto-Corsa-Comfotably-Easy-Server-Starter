@@ -204,6 +204,184 @@ def test_a_stopped_server_looks_open_and_empty(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_pending_event_is_visible_in_all_cm_routes_without_loading_or_alerts(monkeypatch):
+    _setup(monkeypatch)
+    sid, port = _plain_server("always", SERVER={"NAME": "Old", "TRACK": "monza", "CARS": "old"}, PRACTICE={"TIME": 10})
+    eid = client.post("/api/v1/events", json={"title": "Next", "session": {
+        "name": "Next", "track": "spa", "cars": ["bmw_m3"], "practice_min": 12,
+        "race_laps": 8, "welcome": "New rules", "entries": [{"model": "bmw_m3", "guid": "76561190000000001", "driver_name": "Driver"}],
+        "locked": True, "pickup": False}}).json()["id"]
+    r = client.post("/api/v1/schedules", json={"event_id": eid, "server_id": sid,
+                    "start_at": time.time() + 600, "reminders": [], "duration_min": 60})
+    assert r.status_code == 201, r.text
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()
+        info = json.loads((await _http_get(port + 1, "/INFO"))[1])
+        cars = json.loads((await _http_get(port + 1, "/JSON|76561190000000001"))[1])["Cars"]
+        det = json.loads((await _http_get(port + 1, "/api/details"))[1])
+        assert info["name"] == f"Next ℹ{port + 1}" and info["track"] == "spa"
+        assert info["sessiontypes"] == [1, 3] and info["durations"] == [12, 8]
+        assert info["maxclients"] == 1 and info["pickup"] is False
+        assert cars[0]["IsRequestedGUID"] and cars[0]["Model"] == "bmw_m3"
+        assert det["description"] == "New rules" and det["track"] == "spa"
+        w.close()
+
+    asyncio.run(scenario())
+    from app.models import Schedule
+    with Session(engine) as db:
+        assert db.get(Schedule, r.json()["id"]).loaded is False
+
+
+def test_loading_image_validates_bytes_and_exposes_public_url(monkeypatch):
+    _setup(monkeypatch)
+    sid, port = _plain_server("always", SERVER={"NAME": "Image", "TRACK": "spa", "CARS": "bmw"})
+    path = f"/api/v1/servers/{sid}/loading-image"
+    assert client.post(path, content=b"not an image").status_code == 400
+    assert client.post(path, content=b"x" * (1024 * 1024 + 1)).status_code == 413
+    assert TestClient(app).post(path, content=b"not an image").status_code == 401
+    assert client.get(path).json() == {"uploaded": False}
+    # Minimal valid PNG: complete IHDR, IDAT, IEND with checked CRCs.
+    import struct
+    import zlib
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"\0\0\0\0")) + chunk(b"IEND", b""))
+    # Also verify RGBA (color type 6) works
+    png_rgba = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\0" * 18)) + chunk(b"IEND", b""))
+    assert client.post(path, content=png_rgba).status_code == 200
+    assert client.post(path, content=png).status_code == 200
+    assert client.get(path).json() == {"uploaded": True}
+    for payload in (zlib.compress(b"\0"), zlib.compress(b"\0" * 18)[:-2]):
+        malformed = png_rgba[:33] + chunk(b"IDAT", payload) + chunk(b"IEND", b"")
+        assert client.post(path, content=malformed).status_code == 400
+    assert client.get(path).json() == {"uploaded": True}
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()
+        host = f"127.0.0.1:{port + 1}"
+        r, wr = await asyncio.open_connection("127.0.0.1", port + 1)
+        wr.write(f"GET /api/details HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+        header = await r.readuntil(b"\r\n\r\n")
+        body = await r.readexactly(int(next(x.split(b":")[1] for x in header.split(b"\r\n") if x.lower().startswith(b"content-length"))))
+        wr.close()
+        assert json.loads(body)["loadingImageUrl"] == f"http://{host}/loading-image"
+
+        # Wrong port in host header must omit loadingImageUrl
+        r, wr = await asyncio.open_connection("127.0.0.1", port + 1)
+        wr.write(f"GET /api/details HTTP/1.1\r\nHost: 127.0.0.1:9999\r\nConnection: close\r\n\r\n".encode())
+        header = await r.readuntil(b"\r\n\r\n")
+        body = await r.readexactly(int(next(x.split(b":")[1] for x in header.split(b"\r\n") if x.lower().startswith(b"content-length"))))
+        wr.close()
+        assert "loadingImageUrl" not in json.loads(body)
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port + 1)
+        writer.write(b"GET /loading-image HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        image_headers = await reader.readuntil(b"\r\n\r\n")
+        image_body = await reader.readexactly(int(next(x.split(b":")[1] for x in image_headers.split(b"\r\n") if x.lower().startswith(b"content-length"))))
+        writer.close()
+        assert b"image/png" in image_headers and image_body == png
+        w.close()
+    asyncio.run(scenario())
+
+
+def test_preview_track_matches_the_real_csp_requirement(monkeypatch):
+    from app import csp
+    from app.config import settings
+    from app.schemas.servers import SessionIn
+    monkeypatch.setattr(settings, "csp_hub", True)
+    monkeypatch.setattr(settings, "csp_min_build", 3898)
+    s = Server(id=1, name="CSP", base_port=9600, config={"SERVER": {}}, entry_list=[], csp_off="")
+    plan = SessionIn(name="Next", track="spa", cars=["bmw"], practice_min=10)
+    assert wake._preview_server(s, plan).config["SERVER"]["TRACK"] == "csp/3898/../spa"
+    s.csp_off = "hub"
+    assert csp.min_build_for(s.csp_off) == 0
+    assert wake._preview_server(s, plan).config["SERVER"]["TRACK"] == "spa"
+
+
+def test_content_manager_hibernation_and_loading_image_e2e(monkeypatch):
+    """Verify Content Manager full query flow (INFO -> details -> JSON|guid -> loading image) against hibernation facade."""
+    _setup(monkeypatch)
+    sid, port = _plain_server("always", SERVER={"NAME": "OPR Champ", "TRACK": "monza", "CARS": "bmw"}, PRACTICE={"TIME": 10})
+    guid = "76561198000000001"
+    eid = client.post("/api/v1/events", json={
+        "title": "Round 1",
+        "session": {
+            "name": "GT3 Round 1",
+            "track": "spa",
+            "track_config": "",
+            "cars": ["bmw_m3_gt2"],
+            "practice_min": 15,
+            "qualify_min": 10,
+            "race_laps": 12,
+            "welcome": "[b]OPR GT3 Championship[/b]\n[color=#00d2be]Respetad los límites de pista.[/color]",
+            "entries": [{"model": "bmw_m3_gt2", "guid": guid, "driver_name": "Juan Arias"}],
+            "locked": True,
+            "pickup": False,
+        },
+    }).json()["id"]
+
+    client.post("/api/v1/schedules", json={
+        "event_id": eid, "server_id": sid, "start_at": time.time() + 600, "reminders": [], "duration_min": 60,
+    })
+
+    import struct
+    import zlib
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff)
+    png_rgba = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 32, 32, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\0" * (32 * (1 + 32 * 4)))) + chunk(b"IEND", b""))
+    assert client.post(f"/api/v1/servers/{sid}/loading-image", content=png_rgba).status_code == 200
+
+    async def scenario():
+        w = wake.Waker()
+        await w.sync()
+        http_port = port + 1
+        host = f"127.0.0.1:{http_port}"
+
+        # 1. Content Manager queries /INFO
+        r, wr = await asyncio.open_connection("127.0.0.1", http_port)
+        wr.write(f"GET /INFO HTTP/1.1\r\nHost: {host}\r\nUser-Agent: AssettoCorsaClient\r\nConnection: close\r\n\r\n".encode())
+        headers = await r.readuntil(b"\r\n\r\n")
+        body = json.loads(await r.read())
+        wr.close()
+        assert f"ℹ{http_port}" in body["name"] and body["track"] == "spa" and body["pickup"] is False
+        assert body["sessiontypes"] == [1, 2, 3] and body["durations"] == [15, 10, 12]
+
+        # 2. Content Manager queries /api/details
+        r, wr = await asyncio.open_connection("127.0.0.1", http_port)
+        wr.write(f"GET /api/details?guid={guid} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+        headers = await r.readuntil(b"\r\n\r\n")
+        body = json.loads(await r.read())
+        wr.close()
+        assert "[b]OPR GT3 Championship[/b]" in body["description"]
+        assert body["loadingImageUrl"] == f"http://{host}/loading-image"
+
+        # 3. Content Manager queries /JSON|<guid> to check booked slot for locked league
+        r, wr = await asyncio.open_connection("127.0.0.1", http_port)
+        wr.write(f"GET /JSON|{guid} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+        headers = await r.readuntil(b"\r\n\r\n")
+        body = json.loads(await r.read())
+        wr.close()
+        booked = [c for c in body["Cars"] if c["IsRequestedGUID"]]
+        assert len(booked) == 1 and booked[0]["Model"] == "bmw_m3_gt2" and booked[0]["DriverName"] == "Juan Arias"
+
+        # 4. Content Manager downloads loading image for join screen
+        r, wr = await asyncio.open_connection("127.0.0.1", http_port)
+        wr.write(f"GET /loading-image HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+        headers = await r.readuntil(b"\r\n\r\n")
+        img_data = await r.read()
+        wr.close()
+        assert img_data == png_rgba and b"image/png" in headers
+        w.close()
+
+    asyncio.run(scenario())
+
+
 def test_cooldown_and_limits_and_wake_modes(monkeypatch):
     woken = _setup(monkeypatch)
     off, _ = _plain_server("off")
