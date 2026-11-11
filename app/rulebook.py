@@ -27,6 +27,7 @@ class _Strict(BaseModel):
 class Scoring(_Strict):
     table: list[int] = Field(default_factory=lambda: list(DEFAULT_POINTS_SYSTEM), max_length=100)   # points for 1st, 2nd...
     stage_points: list[int] = Field(default_factory=list, max_length=40)   # NASCAR: points for the 1st, 2nd... of the order at the end of every stage that is not the last ([] = none)
+    min_laps_pct: int = Field(default=0, ge=0, le=100)   # a driver who completed fewer than this % of the winner's laps does not score (DNF); 0 = no minimum. Whoever drove no lap (DNS) never scores
 
 
 class CatalogueItem(_Strict):

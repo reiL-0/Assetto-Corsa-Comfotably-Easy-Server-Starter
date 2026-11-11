@@ -281,7 +281,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
         select(ChampionshipEvent).where(ChampionshipEvent.championship_id == c.id).order_by(ChampionshipEvent.id)
     ).all()
 
-    table, stage_table = effective(c).scoring.table, effective(c).scoring.stage_points
+    table, stage_table, min_pct = effective(c).scoring.table, effective(c).scoring.stage_points, effective(c).scoring.min_laps_pct
     titles = {ev.id: ev.title for ev in sess.exec(select(Event).where(Event.id.in_({e.event_id for e in events if e.event_id}))).all()}   # acServer writes no Name: the race is called what the event that ran it was
     totals: dict[str, dict] = {}
     races: list[dict] = []
@@ -296,16 +296,20 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
         rows = []
         stage_places = _stage_places(parsed, nonrun) if scoring and stage_table else {}   # {steam id: [(stage, place)]}: the first of the order at the end of each stage but the last
         staged: set[str] = set()
+        laps_known = any(x["laps"] for x in parsed["classification"])   # (a result with no lap data cannot say who drove: no lap rule then)
+        need = -(-max((x["laps"] for x in parsed["classification"] if not x["disqualified"]), default=0) * min_pct // 100)   # laps for the minimum: the % of the winner's, rounded up
         for entry in parsed["classification"]:
             guid = entry["driver_guid"]
             pos = entry["position"]  # after penalties; None = disqualified, scores nothing
-            counts = scoring and guid and guid not in nonrun   # the safety car, the race director and the caster do not score
-            points = table[pos - 1] if counts and pos and pos <= len(table) else 0
-            stages = stage_places.get(guid, []) if counts and guid not in staged else []   # (a driver listed twice gets their stages once)
+            dns = bool(scoring and laps_known and not entry["laps"])   # in the result but drove no lap: not in the race, scores nothing and does not count as a race
+            dnf = bool(scoring and laps_known and entry["laps"] and entry["laps"] < need)   # drove, but less than the league's minimum: classified, no points
+            counts = scoring and guid and guid not in nonrun and not dns   # the safety car, the race director and the caster do not score
+            points = table[pos - 1] if counts and not dnf and pos and pos <= len(table) else 0
+            stages = stage_places.get(guid, []) if counts and not dnf and guid not in staged else []   # (a DNF below the league's minimum scores nothing, stage points included)   # (a driver listed twice gets their stages once)
             staged.add(guid)   # (a stage point is kept by whoever earned it, also if they are disqualified afterwards, as in NASCAR)
             stage_points = sum(stage_table[place - 1] for _, place in stages if place <= len(stage_table))
             rows.append({"stages": [{"stage": s, "place": p} for s, p in stages], "stage_points": stage_points, "total_points": points + stage_points - (entry["points_penalty"] if counts else 0),
-                         "position": pos, "original_position": entry["original_position"], "driver_guid": guid, "driver_name": entry["driver_name"], "car_model": entry["car_model"],
+                         "status": "DSQ" if entry["disqualified"] else "DNS" if dns else "DNF" if dnf else "", "position": pos, "original_position": entry["original_position"], "driver_guid": guid, "driver_name": entry["driver_name"], "car_model": entry["car_model"],
                          "best_lap_ms": entry["best_lap_ms"], "total_time_ms": entry["total_time_ms"], "adjusted_total_ms": entry["adjusted_total_ms"], "gap_ms": entry["gap_ms"],
                          "laps": entry["laps"], "disqualified": entry["disqualified"], "points": points, "points_penalty": entry["points_penalty"] if counts else 0})
             if not counts:
@@ -318,8 +322,8 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             row["stage_points"] += stage_points
             row["stage_wins"] += sum(1 for _, place in stages if place == 1)
             row["penalty_points"] += entry["points_penalty"]
-            row["wins"] += pos == 1
-            row["podiums"] += bool(pos and pos <= 3)
+            row["wins"] += pos == 1 and not dnf
+            row["podiums"] += bool(pos and pos <= 3 and not dnf)
             row["races"] += 1
         races.append({"id": e.id, "scores": e.scores, "filename": e.filename, "server_id": e.server_id, "session_type": e.session_type or parsed["type"], "type": parsed["type"], "name": parsed["name"] or titles.get(e.event_id),
                       "track": parsed["track"], "track_config": parsed["track_config"], "classification": rows,
