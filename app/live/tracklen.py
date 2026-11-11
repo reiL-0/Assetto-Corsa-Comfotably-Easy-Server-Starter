@@ -50,6 +50,42 @@ def from_ui_json(track_dir: Path, config: str | None) -> float | None:
     return None
 
 
+OVALS_KEY = "oval_tracks"   # Setting row: {"<track>/<layout>": true | false}: what the admin said about a layout, over what its ui_track.json says (a server pack has no ui/: then it is the only source)
+
+
+def oval_key(track: str | None, config: str | None) -> str:
+    return f"{track or ''}/{config or ''}"
+
+
+def oval_auto(track_dir: Path, config: str | None) -> bool:
+    """Whether the `tags` of the layout's `ui_track.json` (or the track's) say `oval`. Never raises."""
+    for p in ([track_dir / "ui" / config / "ui_track.json"] if config else []) + [track_dir / "ui" / "ui_track.json"]:
+        try:
+            data = json.loads(p.read_bytes().decode("utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("tags"), list):
+            return any(isinstance(x, str) and x.strip().lower() == "oval" for x in data["tags"])
+    return False
+
+
+def is_oval(track: str | None, config: str | None) -> bool:
+    """An oval layout: the admin's answer for it if there is one, else its tags. Touches the disk and the database: OFF the event loop."""
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    try:
+        with Session(engine) as s:
+            row = s.get(Setting, OVALS_KEY)
+        said = (row.value if row else {}).get(oval_key(track, config))
+    except Exception:   # (no database: the tags decide)
+        said = None
+    if isinstance(said, bool):
+        return said
+    d = track_dir(track)
+    return oval_auto(d, config) if d else False
+
+
 class LapLength:
     """Estimates the length from the cars. `observe` is called for every car_update with the car's unwrapped progress (app/live/field.py), its speed and the epoch/generation of that progress: a lap
     counts only if the car drove it WITHOUT the progress being re-anchored (a teleport, a lap-counter correction, a reconnection) and without a gap in the samples."""

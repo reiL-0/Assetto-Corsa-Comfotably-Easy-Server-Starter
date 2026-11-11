@@ -187,9 +187,34 @@ def test_danger_warns_earlier_the_faster_the_driver_comes_and_for_a_crawling_car
     assert af2.danger == {}, "at 100 km/h 550 m is still too far (278 m of road in 10 s, the floor is 400 m)"
 
 
-def test_nascar_keeps_the_old_danger_thresholds():
-    af = AutoFlags(); af.nascar = True
-    run(af, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 200.0}, now=90.0)
-    for i in range(5):
-        run(af, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 200.0}, now=96.0 + i)
-    assert af.danger == {}, "18 km/h is not stopped and 550 m is beyond 400 m"
+def test_an_oval_layout_by_its_tags_or_the_admins_word_has_no_danger_warning(tmp_path, monkeypatch):
+    import json
+    from app.live import tracklen
+    d = tmp_path / "daytona"
+    for layout, tags in (("road", ["road", "circuit"]), ("oval", ["Oval", "usa"])):
+        (d / "ui" / layout).mkdir(parents=True)
+        (d / "ui" / layout / "ui_track.json").write_text(json.dumps({"tags": tags}))
+    assert not tracklen.oval_auto(d, "road") and tracklen.oval_auto(d, "oval") and not tracklen.oval_auto(d, "none"), "per layout: the road one of the same track is not an oval"
+    monkeypatch.setattr(tracklen, "track_dir", lambda t: d)
+    assert tracklen.is_oval("daytona", "oval") and not tracklen.is_oval("daytona", "road")
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    with Session(engine) as s:
+        s.merge(Setting(key=tracklen.OVALS_KEY, value={"daytona/road": True, "daytona/oval": False})); s.commit()
+    try:
+        assert tracklen.is_oval("daytona", "road") and not tracklen.is_oval("daytona", "oval"), "the admin's word wins over the tags"
+    finally:
+        with Session(engine) as s:
+            s.delete(s.get(Setting, tracklen.OVALS_KEY)); s.commit()
+
+
+def test_rc_on_an_oval_switches_the_danger_warning_off():
+    from app.live.racecontrol import RaceControl
+    rc = RaceControl({"session_type": 3})
+    rc.oval = True
+    rc.autoflags_tick({}, {}, 3000.0, 1.0, 1.0)
+    assert rc.autoflags.modes["danger"] == "off"
+    rc.oval = False
+    rc.autoflags_tick({}, {}, 3000.0, 2.0, 2.0)
+    assert rc.autoflags.modes["danger"] == "live"

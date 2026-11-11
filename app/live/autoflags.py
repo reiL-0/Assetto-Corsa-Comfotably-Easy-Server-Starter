@@ -18,7 +18,6 @@ from app.live.field import Sample, ring
 
 BLUE_ON_M, BLUE_OFF_M = 150.0, 250.0
 DANGER_M, DANGER_S, DANGER_MAX_M, ROUND_M = 400.0, 10.0, 900.0, 10.0   # the warning starts at least 400 m away, and earlier the faster the driver comes: 10 s of road (blind corners), 900 m at most
-NASCAR_STOP_KMH, NASCAR_STOP_S = 5.0, 3.0   # (a NASCAR race keeps the old rule: its field crawls in line under a caution)
 STOP_KMH, STOP_S = 25.0, 2.0          # a car under 25 km/h for 2 s that was racing is a hazard (a wreck creeping along a wall at 17-20 km/h is not "stopped" but nobody can pass it)
 MOVING_KMH = 30.0
 TRUST_S, FRESH_S = 2.0, 1.5           # progress continuous for 2 s and updated within 1.5 s
@@ -40,7 +39,6 @@ class AutoFlags:
         self.modes = {"blue": "live", "danger": "live"}   # `off` types are not decided at all
         self.last: float | None = None                   # monotonic time of the last look (the age of what is served)
         self.gen: dict[int, int] = {}                    # slot -> generation of the slot at the last look
-        self.nascar = False                              # a NASCAR race: the danger warning keeps its old thresholds (set by the monitor)
         self.pace_ok = None                              # callable(behind, ahead, open_already) -> bool: the blue only shows when the car behind has the pace to catch the other (app/live/flagpace.py); None = no gate
 
     def reset(self) -> None:
@@ -78,13 +76,13 @@ class AutoFlags:
         for c, v in speeds.items():   # who is stopped on the track
             if v >= MOVING_KMH:
                 self._moved.add(c); self._still.pop(c, None)
-            elif v <= (NASCAR_STOP_KMH if self.nascar else STOP_KMH) and c in self._moved and c in ok:
+            elif v <= STOP_KMH and c in self._moved and c in ok:
                 self._still.setdefault(c, now)
             else:
                 self._still.pop(c, None)
         for c in [c for c in self._moved if c not in samples]:
             self._moved.discard(c); self._still.pop(c, None)
-        stopped = {c for c, t in self._still.items() if now - t >= (NASCAR_STOP_S if self.nascar else STOP_S)}
+        stopped = {c for c, t in self._still.items() if now - t >= STOP_S}
 
         blue: dict[tuple[int, int], float] = {}
         for a, sa in ok.items():
@@ -104,7 +102,7 @@ class AutoFlags:
                 if d == s or d in stopped or speeds.get(d, 0.0) < MOVING_KMH:
                     continue
                 m = ring(ok[s].progress - sd.progress) * length   # metres S is ahead of D (negative: behind)
-                if 0.0 <= m <= (DANGER_M if self.nascar else min(max(DANGER_M, speeds[d] / 3.6 * DANGER_S), DANGER_MAX_M)):
+                if 0.0 <= m <= min(max(DANGER_M, speeds[d] / 3.6 * DANGER_S), DANGER_MAX_M):
                     danger[(d, s)] = int(round(m / ROUND_M) * ROUND_M)
         self._diff("blue", self.blue, blue if self.modes["blue"] != "off" else {}, now)
         self._diff("danger", self.danger, danger if self.modes["danger"] != "off" else {}, now)

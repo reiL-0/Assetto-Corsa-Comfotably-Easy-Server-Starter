@@ -167,6 +167,7 @@ class RaceControl:
         self._neutral_end = 0.0                              # wall time the race was last not under green or white: a lap that began before it is not a clean lap
         self._pace_owner: dict[int, str] = {}                # slot -> the driver whose laps are in its pace
         self._pace_gen: dict[int, int] = {}                  # slot -> generation seen: a slot that changes hands forgets its pace
+        self.oval = False                       # the layout is an oval (set by the monitor from the ACSP client): no danger warning
         self.autoflags = AutoFlags()            # blue flag and danger warning, SHADOW only (app/live/autoflags.py): decided and written down, shown to nobody; a new session starts a new one
         self.neutralization_rule = {"mode": "off"}
         self.neutralization_watch = NeutralizationWatch()
@@ -1086,8 +1087,9 @@ class RaceControl:
             racing = self._sanctioned() and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
-            self.autoflags.nascar = bool(self.nascar)
             self.autoflags.modes = {k: ("off" if k in self.auto_off else v) for k, v in self.flag_modes.items()}
+            if self.oval:
+                self.autoflags.modes["danger"] = "off"   # an oval: the cars run flat out past a wreck for laps, a distance warning means nothing; a ROAD layout keeps it, NASCAR rules or not
             if self.nascar or not self._is_race():
                 self.autoflags.modes["blue"] = "off"   # NASCAR: a lapped car need not give way; outside a race nobody laps anybody (the laps of a car are only how many it has driven)
             rule = self._blue_rule()

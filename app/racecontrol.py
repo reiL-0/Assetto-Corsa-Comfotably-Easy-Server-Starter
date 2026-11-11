@@ -406,6 +406,7 @@ def autoflags_tick(now: float) -> None:
         if rc.flag_modes != modes:
             rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
+        rc.oval = inst.acsp.oval
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
         rc.yellow_tick(samples, speeds, mono, now)
         _flag_messages(inst, rc)

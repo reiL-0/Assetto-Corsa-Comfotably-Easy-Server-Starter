@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
+from app.live.tracklen import OVALS_KEY, oval_auto, oval_key
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -165,8 +166,21 @@ def list_tracks() -> list[dict]:
                 configs.append({"config": sub.name})
         layouts = [c for c in configs if c["config"] and (d / c["config"] / "data" / "surfaces.ini").is_file()]
         base = (d / "data" / "surfaces.ini").is_file()  # the track itself (no layout) can be raced
+        said = _oval_overrides()
+        for c in configs:   # (oval_auto: what its tags say; oval: what counts, the admin's word over it)
+            c["oval_auto"] = oval_auto(d, c["config"])
+            c["oval"] = said.get(oval_key(d.name, c["config"]), c["oval_auto"])
         tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts)})
     return tracks
+
+
+def _oval_overrides() -> dict:
+    from app.db import engine
+    from app.models import Setting
+    from sqlmodel import Session
+    with Session(engine) as s:
+        row = s.get(Setting, OVALS_KEY)
+    return dict(row.value) if row else {}
 
 
 def _sha1(p: Path) -> str | None:
@@ -463,6 +477,30 @@ def download_skin(car: str, skin: str) -> FileResponse:
 @router.get("/tracks")
 def get_tracks() -> list[dict]:
     return list_tracks()
+
+
+class OvalIn(BaseModel):
+    oval: bool | None   # true / false = the admin's word for this layout; null = back to what its tags say
+
+
+@router.put("/tracks/{track}/oval", dependencies=[Depends(require("admin"))])
+def set_track_oval(track: str, body: OvalIn, config: str | None = None) -> dict:
+    """The «oval» check of the catalog, per LAYOUT (Daytona has road, half-course and oval layouts): on an oval the danger warning is off, on a road layout it works (with NASCAR rules or without)."""
+    from app.db import engine
+    from app.models import Setting
+    from sqlmodel import Session
+    track, config = _safe(track), (_safe(config) if config else None)
+    key = oval_key(track, config)
+    with Session(engine) as s:
+        row = s.get(Setting, OVALS_KEY) or Setting(key=OVALS_KEY, value={})
+        value = dict(row.value)
+        if body.oval is None:
+            value.pop(key, None)
+        else:
+            value[key] = body.oval
+        row.value = value
+        s.add(row); s.commit()
+    return {"track": track, "config": config, "oval": body.oval}
 
 
 @router.get("/tracks/{track}/checksum")
