@@ -92,9 +92,9 @@ class OptionsIn(BaseModel):
     autoclutch_allowed: bool | None = None
     tyre_blankets_allowed: bool | None = None
     force_virtual_mirror: bool | None = None
-    damage_multiplier: int | None = Field(default=None, ge=0, le=100)  # %
-    fuel_rate: int | None = Field(default=None, ge=0, le=500)  # % of normal consumption
-    tyre_wear_rate: int | None = Field(default=None, ge=0, le=500)
+    damage_multiplier: int | None = Field(default=None, ge=0, le=1000)  # % (acServer accepts >100 for severe damage)
+    fuel_rate: int | None = Field(default=None, ge=0, le=1000)  # % of normal consumption
+    tyre_wear_rate: int | None = Field(default=None, ge=0, le=1000)
     allowed_tyres_out: int | None = Field(default=None, ge=-1, le=4)  # wheels outside the line before a cut; -1 = never
     legal_tyres: str | None = Field(default=None, pattern=r"^[\w;]{0,60}$")  # e.g. "SV;S;M;H"
     max_ballast_kg: int | None = Field(default=None, ge=0, le=10000)
