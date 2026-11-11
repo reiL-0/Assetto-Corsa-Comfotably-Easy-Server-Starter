@@ -209,3 +209,35 @@ def test_finish_crossing_order_ranks_by_line_crossing_not_laptime_sum(tmp_path):
     assert cls[1]["position"] == 2 and cls[1]["gap_ms"] == 500 and cls[1]["total_time_ms"] == 120500
     assert cls[2]["position"] == 3 and cls[2]["gap_ms"] is None and cls[2]["total_time_ms"] == 0
     assert cls[3]["position"] == 4 and cls[3]["gap_ms"] is None and cls[3]["total_time_ms"] == 0
+
+
+def _late_joiner_race(tmp_path, guids):
+    """Like _long_race plus D, who joined after the flag (A wins on lap 3 at t=300000) and only has laps after it."""
+    p = _long_race(tmp_path, mark=False)
+    data = json.loads(p.read_text())
+    data["Laps"] += [_lap("D", "Dan", i, 310_000 + i * 90_000) for i in (1, 2)]
+    data["Laps"].sort(key=lambda l: l["Timestamp"])
+    data["Result"].append({"DriverName": "Dan", "DriverGuid": "D", "CarModel": "m", "BestLap": 90000, "TotalTime": 180000})
+    p.write_text(json.dumps(data))
+    mark = {"at": p.stat().st_mtime, "laps": 3}
+    if guids is not None:
+        mark["guids"] = guids
+    (tmp_path / "1.finish").write_text(json.dumps(mark))
+    return p
+
+
+def test_a_driver_who_joined_after_the_flag_is_not_in_the_race(tmp_path):
+    parsed = parse_result_file(_late_joiner_race(tmp_path, ["A", "B", "C"]))
+    assert [(e["driver_name"], e["position"]) for e in parsed["classification"]] == [("Ann", 1), ("Bob", 2), ("Cat", 3)]
+    assert all(l["driver_name"] != "Dan" for l in parsed["laps"])
+
+
+def test_a_marker_from_before_the_roster_leaves_nobody_out(tmp_path):   # (fails if the old marker format stops being read as «unknown»)
+    names = [e["driver_name"] for e in parse_result_file(_late_joiner_race(tmp_path, None))["classification"]]
+    assert "Dan" in names
+
+
+def test_a_driver_who_retired_before_the_flag_stays_in_the_race(tmp_path):   # (left the server after racing: not connected at the flag, but he did race)
+    parsed = parse_result_file(_late_joiner_race(tmp_path, ["A", "B"]))   # C (2 laps before the flag) is not connected any more
+    assert [e["driver_name"] for e in parsed["classification"]] == ["Ann", "Bob", "Cat"]
+    assert sum(1 for l in parsed["laps"] if l["driver_name"] == "Cat") == 2

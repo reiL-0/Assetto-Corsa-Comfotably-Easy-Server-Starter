@@ -444,3 +444,46 @@ def test_a_result_added_by_hand_is_linked_to_the_schedule_that_ran_it():
     cid = client.post("/api/v1/championships", json={"name": "Hand Cup"}).json()["id"]
     assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "ran.json"}).json()["event_id"] == eid
     assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "stray.json"}).json()["event_id"] is None, "no schedule behind it: unlinked"
+
+
+def test_a_driver_who_drove_no_lap_never_scores_and_the_league_sets_the_minimum_share_of_laps():
+    sid = client.post("/api/v1/servers", json={"name": "DnfServer"}).json()["id"]
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    G = {n: "7656119000000010" + str(i) for i, n in enumerate(("Ann", "Bob", "Cat", "Dan"))}
+    laps = [{"DriverGuid": G["Ann"], "DriverName": "Ann", "LapTime": 60000 + i, "Timestamp": 60000 * i} for i in range(1, 11)] + \
+           [{"DriverGuid": G["Bob"], "DriverName": "Bob", "LapTime": 61000, "Timestamp": 61000 * i} for i in range(1, 10)] + \
+           [{"DriverGuid": G["Cat"], "DriverName": "Cat", "LapTime": 70000, "Timestamp": 70000 * i} for i in range(1, 4)]   # Ann 10 laps, Bob 9, Cat 3, Dan none
+    (d / "2026_11_10_1_00_RACE.json").write_text(json.dumps({"Type": "RACE", "TrackName": "t", "Laps": laps, "Result": [
+        {"DriverName": n, "DriverGuid": g, "TotalTime": 600000 + i * 1000} for i, (n, g) in enumerate(G.items())]}))
+
+    def run(pct):
+        cid = client.post("/api/v1/championships", json={"name": f"Min{pct}"}).json()["id"]
+        if pct is not None:
+            assert client.put(f"/api/v1/championships/{cid}/rulebook", json={"scoring": {"table": [25, 18, 15, 12], "min_laps_pct": pct}}).status_code == 200
+        assert client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "2026_11_10_1_00_RACE.json"}).status_code == 201
+        race = client.get(f"/api/v1/championships/{cid}/races").json()[0]
+        return {r["driver_guid"]: r for r in race["classification"]}, {s["driver_guid"]: s for s in client.get(f"/api/v1/championships/{cid}/standings").json()}
+
+    rows, st = run(None)   # no minimum: Cat (3 of 10 laps) scores her place; Dan, who drove no lap, does not
+    assert rows[G["Cat"]]["points"] == 15 and rows[G["Cat"]]["status"] == "" and rows[G["Dan"]]["points"] == 0 and rows[G["Dan"]]["status"] == "DNS"
+    assert G["Dan"] not in st, "a driver who did not start is not in the table: he did not race"
+    rows, st = run(75)   # 75 % of 10 laps = 8: Bob (9) scores, Cat (3) is a DNF
+    assert rows[G["Bob"]]["points"] == 18 and rows[G["Cat"]]["points"] == 0 and rows[G["Cat"]]["status"] == "DNF" and rows[G["Cat"]]["position"] == 3
+    assert st[G["Cat"]]["points"] == 0 and st[G["Cat"]]["races"] == 1 and st[G["Cat"]]["podiums"] == 0, "a DNF counts as a race but is no podium"
+    assert client.put(f"/api/v1/championships/{client.post('/api/v1/championships', json={'name': 'x'}).json()['id']}/rulebook", json={"scoring": {"table": [1], "min_laps_pct": 101}}).status_code == 422
+
+
+def test_a_dnf_below_the_minimum_scores_no_stage_points_either():
+    sid = client.post("/api/v1/servers", json={"name": "DnfStageServer"}).json()["id"]
+    d = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    A, B = "76561190000000201", "76561190000000202"
+    laps = [{"DriverGuid": A, "DriverName": "Ann", "LapTime": 60000, "Timestamp": 60000 * i} for i in range(1, 11)] + [{"DriverGuid": B, "DriverName": "Bob", "LapTime": 70000, "Timestamp": 70000 * i} for i in range(1, 3)]
+    (d / "2026_11_10_2_00_RACE.json").write_text(json.dumps({"Type": "RACE", "TrackName": "t", "Laps": laps, "Result": [{"DriverName": "Ann", "DriverGuid": A, "TotalTime": 600000}, {"DriverName": "Bob", "DriverGuid": B, "TotalTime": 700000}]}))
+    (d / "2026_11_10_2_00_RACE.stages").write_text(json.dumps({"stages": [{"stage": 1, "order": [B, A]}]}))   # Bob led stage 1 and then stopped
+    cid = client.post("/api/v1/championships", json={"name": "StageMin"}).json()["id"]
+    assert client.put(f"/api/v1/championships/{cid}/rulebook", json={"scoring": {"table": [40, 35], "stage_points": [10, 9], "min_laps_pct": 50}}).status_code == 200
+    client.post(f"/api/v1/championships/{cid}/events", json={"server_id": sid, "filename": "2026_11_10_2_00_RACE.json"})
+    st = {s["driver_guid"]: s for s in client.get(f"/api/v1/championships/{cid}/standings").json()}
+    assert st[B]["points"] == 0 and st[B]["stage_points"] == 0 and st[B]["stage_wins"] == 0 and st[A]["points"] == 40 + 9

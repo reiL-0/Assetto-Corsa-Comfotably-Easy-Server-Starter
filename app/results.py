@@ -65,9 +65,9 @@ def read_stages(path: Path) -> list[dict]:
         return []
 
 
-def _finish_cut(path: Path, laps: list[dict]) -> int | None:
+def _finish_cut(path: Path, laps: list[dict]) -> tuple[int, set[str] | None] | None:
     """The race is long in acServer and the manager decides when it ends, so the cars keep lapping after the chequered flag and acServer would rank them on those laps. -> the session time
-    (ms) at which the winner completed the distance: every car's race ends at its first lap completed from then on. None = nothing to cut. The flag a result file belongs to is the last one
+    (ms) at which the winner completed the distance: every car's race ends at its first lap completed from then on, and the SteamIDs that were connected at the flag (None = unknown: nobody is left out). None = nothing to cut. The flag a result file belongs to is the last one
     before it was written, unless another race result was written in between (that one took it)."""
     try:
         written = path.stat().st_mtime
@@ -75,12 +75,12 @@ def _finish_cut(path: Path, laps: list[dict]) -> int | None:
         for f in path.parent.glob("*" + FINISH_SUFFIX):
             m = json.loads(f.read_text())
             if float(m["at"]) <= written:
-                marks.append((float(m["at"]), int(m["laps"])))
+                marks.append((float(m["at"]), int(m["laps"]), m.get("guids")))
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if not marks:
         return None
-    at, n = max(marks)
+    at, n, here = max(marks, key=lambda m: m[:2])
     if n < 1 or any(at <= p.stat().st_mtime < written for p in path.parent.glob("*_RACE.json") if p != path):
         return None
     seen, stamps = Counter(), []
@@ -90,11 +90,20 @@ def _finish_cut(path: Path, laps: list[dict]) -> int | None:
             seen[g] += 1
             if seen[g] == n:
                 stamps.append(lap.get("Timestamp") or 0)
-    return min(stamps) if stamps else None
+    if not stamps:
+        return None
+    present = {str(g) for g in here} if isinstance(here, list) and here else None   # (a marker from before this field: nobody is left out)
+    return min(stamps), present
 
 
-def _cut_after_finish(data: dict, classification: list[dict], cut: int) -> None:
-    """Each car's race ends at its first lap completed at or after `cut`: the laps after it are dropped and the classification is recomputed on the rest (laps, then finish crossing order)."""
+def _cut_after_finish(data: dict, classification: list[dict], cut: int, present: set[str] | None = None) -> None:
+    """Each car's race ends at its first lap completed at or after `cut`: the laps after it are dropped and the classification is recomputed on the rest (laps, then finish crossing order).
+    A driver who joined after the flag is not in the race: not connected at the flag AND no lap closed before it (one who left earlier after racing is a retirement and stays) -> his row and laps go."""
+    if present is not None:
+        raced = {lap.get("DriverGuid") for lap in data.get("Laps", []) if (lap.get("Timestamp") or 0) < cut}
+        late = {e["driver_guid"] for e in classification if e["driver_guid"] and e["driver_guid"] not in present and e["driver_guid"] not in raced}
+        classification[:] = [e for e in classification if e["driver_guid"] not in late]
+        data["Laps"] = [lap for lap in data.get("Laps", []) if lap.get("DriverGuid") not in late]
     kept: dict[str, list[dict]] = defaultdict(list)
     done: set[str] = set()
     for lap in data.get("Laps", []):
@@ -202,7 +211,7 @@ def parse_result_file(path: Path) -> dict:
 
     cut = _finish_cut(path, data.get("Laps", [])) if is_race else None
     if cut is not None:
-        _cut_after_finish(data, classification, cut)
+        _cut_after_finish(data, classification, *cut)
 
     gap_key = "total_time_ms" if is_race else "best_lap_ms"
     leader_value = classification[0][gap_key] if classification else None

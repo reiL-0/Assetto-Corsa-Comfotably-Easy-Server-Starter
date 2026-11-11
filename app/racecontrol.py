@@ -650,7 +650,7 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     if body.flag == "checkered":
         laps = max(0, rc.leader_laps_seen - (rc.lap_base if rc.nascar else 0))
         if laps > 0:
-            _mark_finish(server_id, laps)
+            _mark_finish(server_id, laps, inst)
     with _lock:
         apply_last_lap(inst, rc, body.flag)
     nascar_actions(server_id, rc, actions)   # (after the director's own notice: a white flag the engine adds comes last)
@@ -800,7 +800,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             _say(rc, action[1], "race")
         elif action[0] == "finish" and crossing is not None:   # the checkered came with the lap of the first car to complete the distance: that car is the winner (AC ranks by laps, then by time)
             log.info("winner: car %s (%s)", crossing, _name(inst, crossing))
-            _mark_finish(server_id, rc.leader_laps_seen)
+            _mark_finish(server_id, rc.leader_laps_seen, inst)
             rc.notify(f"GANADOR: {_name(inst, crossing)}", "winner", hold="winner")   # (stays until the session restarts: state_of forgets it with the session)
         elif action[0] == "caution":
             _say(rc, "AMARILLA: orden congelado, nadie adelanta", "flag")
@@ -881,13 +881,13 @@ def claim_stages(server_id: int, filename: str) -> None:
                 log.exception("could not file the stage order of %s", name)
 
 
-def _mark_finish(server_id: int, laps: int) -> None:
-    """The chequered flag fell: acServer goes on counting the laps of a race it does not know is over, so the result file is cut at this moment (app/results.py `_finish_cut`)."""
+def _mark_finish(server_id: int, laps: int, inst) -> None:
+    """The chequered flag fell: acServer goes on counting the laps of a race it does not know is over, so the result file is cut at this moment (app/results.py `_finish_cut`). `guids` = who is connected now: whoever joins after the flag is not in the race."""
     d = _results_dir(server_id)
     try:
         d.mkdir(parents=True, exist_ok=True)
         now = time.time()
-        (d / f"{int(now)}{FINISH_SUFFIX}").write_text(json.dumps({"at": now, "laps": laps}))
+        (d / f"{int(now)}{FINISH_SUFFIX}").write_text(json.dumps({"at": now, "laps": laps, "guids": sorted(str(g) for c in inst.acsp.cars.values() if (g := c.get("driver_guid")))}))
     except OSError:
         log.exception("could not write the finish marker of server %s", server_id)
 
