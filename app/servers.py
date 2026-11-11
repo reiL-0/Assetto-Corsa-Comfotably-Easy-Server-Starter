@@ -28,7 +28,7 @@ from app.live.acsp import ACSPClient
 from app.models import Activity, ChampionshipEvent, Incident, Penalty, Schedule, Server, Setting
 from app.services import ini_generator, server_service
 from app.services.server_service import ServerError, check_slots, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
-from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
+from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for, result_details
 from app.schemas.servers import (  # noqa: F401 - re-exported: other modules import these names from here
     Scalar,
     ServerIn,
@@ -401,9 +401,12 @@ def result_path(server_id: int, filename: str) -> Path:
 
 
 @router.get("/{server_id}/results")
-def list_results(server_id: int, sess: SessionDep) -> list[str]:
-    _get(sess, server_id)
+def list_results(server_id: int, sess: SessionDep, details: bool = False) -> list:
+    """The file names (oldest first, as always) or, with ?details=1, [{filename, label, type, league, title, started_at}] newest first: what the selectors show."""
+    srv = _get(sess, server_id)
     d = Path(settings.data_dir) / "instances" / str(server_id) / "results"
+    if details:
+        return result_details(sess, server_id, srv.name, d)
     return sorted(p.name for p in d.glob("*.json")) if d.exists() else []
 
 

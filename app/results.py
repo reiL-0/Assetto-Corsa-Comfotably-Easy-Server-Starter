@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
 from app import csp
-from app.models import ChampionshipEvent, LeagueMember, Penalty
+from app.models import Championship, ChampionshipEvent, Event, LeagueMember, Penalty
 
 
 NO_LAP_MS = 999_999_999   # the BestLap acServer writes for a car that set no lap
@@ -318,3 +321,66 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
         grid.remove(e)
         grid.insert(min(i + e["grid_penalty"], len(grid)), e)
     return {**parsed, "classification": final, "grid": [e["driver_guid"] for e in grid + [x for x in out if x["driver_guid"] not in non_racing] if e["driver_guid"]]}
+
+
+# --- readable names for the result files (the selectors show these; the file name stays the id) -----------------------------------------------------------------
+_RESULT_NAME = re.compile(r"(\d{4})_(\d{1,2})_(\d{1,2})_(\d{1,2})_(\d{1,2})_([A-Za-z]+)\.json")   # acServer does not zero-pad: 2026_11_11_5_13_RACE.json
+_TYPE_WORD = {"RACE": "Race", "QUALIFY": "Quali", "PRACTICE": "Practice"}
+_SHOW_TZ = ZoneInfo("America/Mexico_City")   # the zone the staff reads the hours in; the label says so
+_track_cache: dict[tuple, str | None] = {}   # (path, mtime_ns, size) -> track; a result file never changes once written. ponytail: unbounded, ~100 bytes per file
+
+
+def result_start(filename: str) -> datetime | None:
+    """Aware start of a session from its file name. The clock in the name is the acServer host's own (the VPS runs on Europe/Berlin), so it is read as the host's local time."""
+    m = _RESULT_NAME.fullmatch(filename)
+    try:
+        return datetime(*map(int, m.groups()[:5])).astimezone() if m else None
+    except ValueError:
+        return None
+
+
+def result_track(path: Path) -> str | None:
+    """«Track» or «Track (layout)» as the file says; None when it cannot be read (a corrupt or empty file must not break the whole list)."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if key not in _track_cache:
+            d = json.loads(path.read_text(encoding="utf-8-sig"))
+            track, cfg = csp.clean_track(d.get("TrackName")), d.get("TrackConfig")
+            track, cfg = track if isinstance(track, str) else None, cfg if isinstance(cfg, str) else None   # a hand-edited file may hold anything: only text goes into a label
+            _track_cache[key] = f"{track} ({cfg})" if track and cfg else track or None
+        return _track_cache[key]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def result_label(filename: str, server_name: str, track: str | None, league: str | None, title: str | None) -> str:
+    """«GT3 Fecha 3 · Liga GT · Race · 10/11 15:30 CDMX», or «Servidor · Pista · Quali · 10/11 14:45 CDMX» for a loose result. A name that is not a dated result file is returned as it is."""
+    m, at = _RESULT_NAME.fullmatch(filename), result_start(filename)
+    if not m or not at:
+        return filename
+    kind = _TYPE_WORD.get(m.group(6).upper(), m.group(6).capitalize())
+    parts = [title or league or server_name]
+    if title and league:
+        parts.append(league)
+    if not title:
+        parts.append(track or "pista desconocida")
+    parts += [kind, f"{at.astimezone(_SHOW_TZ):%d/%m %H:%M} CDMX"]
+    return " · ".join(parts)
+
+
+def result_details(sess: Session, server_id: int, server_name: str, folder: Path) -> list[dict]:
+    """Every result file of a server, newest first (by the date in the name: sorted as text, `_5_13_` would come after `_10_00_`):
+    [{filename, label, type, league, title, started_at}]. `title` = the saved event that produced it, `league` = the league that counts it; both None for a loose result."""
+    counted = {e.filename: e for e in sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.server_id == server_id))}
+    leagues = {c.id: c.name for c in sess.exec(select(Championship).where(Championship.id.in_({e.championship_id for e in counted.values()})))} if counted else {}
+    titles = {e.id: e.title for e in sess.exec(select(Event).where(Event.id.in_({e.event_id for e in counted.values() if e.event_id})))} if any(e.event_id for e in counted.values()) else {}
+    out = []
+    for p in folder.glob("*.json") if folder.exists() else []:
+        e, at = counted.get(p.name), result_start(p.name)
+        league, title = (leagues.get(e.championship_id), titles.get(e.event_id)) if e else (None, None)
+        m = _RESULT_NAME.fullmatch(p.name)
+        out.append({"filename": p.name, "label": result_label(p.name, server_name, None if title else result_track(p), league, title), "type": m.group(6).capitalize() if m else None,
+                    "league": league, "title": title, "started_at": at.astimezone(ZoneInfo("UTC")).isoformat() if at else None})
+    return sorted(out, key=lambda r: (r["started_at"] or "", r["filename"]), reverse=True)
+
