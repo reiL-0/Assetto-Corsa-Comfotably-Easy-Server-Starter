@@ -251,9 +251,13 @@ def test_loading_image_validates_bytes_and_exposes_public_url(monkeypatch):
            + chunk(b"IDAT", zlib.compress(b"\0\0\0\0")) + chunk(b"IEND", b""))
     # Also verify RGBA (color type 6) works
     png_rgba = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
-                + chunk(b"IDAT", zlib.compress(b"\0" * 36)) + chunk(b"IEND", b""))
+                + chunk(b"IDAT", zlib.compress(b"\0" * 18)) + chunk(b"IEND", b""))
     assert client.post(path, content=png_rgba).status_code == 200
     assert client.post(path, content=png).status_code == 200
+    assert client.get(path).json() == {"uploaded": True}
+    for payload in (zlib.compress(b"\0"), zlib.compress(b"\0" * 18)[:-2]):
+        malformed = png_rgba[:33] + chunk(b"IDAT", payload) + chunk(b"IEND", b"")
+        assert client.post(path, content=malformed).status_code == 400
     assert client.get(path).json() == {"uploaded": True}
 
     async def scenario():
@@ -283,6 +287,20 @@ def test_loading_image_validates_bytes_and_exposes_public_url(monkeypatch):
         assert b"image/png" in image_headers and image_body == png
         w.close()
     asyncio.run(scenario())
+
+
+def test_preview_track_matches_the_real_csp_requirement(monkeypatch):
+    from app import csp
+    from app.config import settings
+    from app.schemas.servers import SessionIn
+    monkeypatch.setattr(settings, "csp_hub", True)
+    monkeypatch.setattr(settings, "csp_min_build", 3898)
+    s = Server(id=1, name="CSP", base_port=9600, config={"SERVER": {}}, entry_list=[], csp_off="")
+    plan = SessionIn(name="Next", track="spa", cars=["bmw"], practice_min=10)
+    assert wake._preview_server(s, plan).config["SERVER"]["TRACK"] == "csp/3898/../spa"
+    s.csp_off = "hub"
+    assert csp.min_build_for(s.csp_off) == 0
+    assert wake._preview_server(s, plan).config["SERVER"]["TRACK"] == "spa"
 
 
 def test_content_manager_hibernation_and_loading_image_e2e(monkeypatch):

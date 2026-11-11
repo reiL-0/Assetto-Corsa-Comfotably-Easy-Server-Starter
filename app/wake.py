@@ -107,6 +107,9 @@ def _preview_server(s: Server, plan):
                CARS=";".join(cars), MAX_CLIENTS=len(plan.entries) or plan.max_clients,
                PASSWORD=plan.password, LOCKED_ENTRY_LIST=int(plan.locked),
                PICKUP_MODE_ENABLED=int(plan.pickup))
+    from app import csp
+    if build := csp.min_build_for(s.csp_off):
+        srv["TRACK"] = f"csp/{build}/../{plan.track}"
     cfg = {"SERVER": srv}
     if plan.practice_min:
         cfg["PRACTICE"] = {"NAME": "Practice", "TIME": plan.practice_min, "IS_OPEN": 1}

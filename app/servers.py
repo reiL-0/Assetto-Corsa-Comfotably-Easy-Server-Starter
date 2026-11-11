@@ -177,6 +177,7 @@ def _image(data: bytes) -> str:
     """Accept a complete PNG container, not an extension or Content-Type claim."""
     if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
         i, image, compressed = 8, False, bytearray()
+        expected = 0
         depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
         while i + 12 <= len(data):
             size = struct.unpack_from(">I", data, i)[0]
@@ -190,12 +191,20 @@ def _image(data: bytes) -> str:
                 width, height, bit_depth, color, comp, filt, interlace = struct.unpack_from(">IIBBBBB", data, i + 8)
                 image = (0 < width <= 4096 and 0 < height <= 4096 and comp == 0 and filt == 0
                          and interlace in (0, 1) and color in depths and bit_depth in depths[color])
+                if image:
+                    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color]
+                    passes = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+                              (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)) if interlace else ((0, 0, 1, 1),)
+                    expected = sum(((height - y + sy - 1) // sy) * (1 + (((width - x + sx - 1) // sx) * bit_depth * channels + 7) // 8)
+                                   for x, y, sx, sy in passes if width > x and height > y)
+                    image = expected <= 64 * 1024 * 1024
             if kind == b"IDAT" and image:
                 compressed.extend(data[i + 8:i + 8 + size])
             if kind == b"IEND" and size == 0 and end == len(data) and image and compressed:
                 stream = zlib.decompressobj()
                 try:
-                    if stream.decompress(bytes(compressed), 64 * 1024):
+                    pixels = stream.decompress(bytes(compressed), expected + 1)
+                    if len(pixels) == expected and stream.eof and not stream.unused_data and not stream.unconsumed_tail:
                         return "png"
                 except zlib.error:
                     break
