@@ -156,6 +156,25 @@ def test_a_driver_in_two_slots_is_one_row_the_one_that_drove_kept_as_it_is(tmp_p
     assert len(kept) == 2 and (kept[0]["car_model"], kept[0]["best_lap_ms"], kept[0]["total_time_ms"]) == ("car_d", 92000, 100)
 
 
+def test_kicked_placeholder_with_same_name_and_no_laps_does_not_duplicate_a_reconnected_driver(tmp_path):
+    data = {**RACE_JSON, "Result": [
+        {"DriverName": "Tommy", "DriverGuid": "$#@@!$kicked", "CarModel": "car_a", "TotalTime": 400000},
+        {"DriverName": "Tommy", "DriverGuid": "76561198930530762", "CarModel": "car_a", "TotalTime": 600000},
+    ], "Laps": [{"DriverGuid": "76561198930530762", "LapTime": 90000}]}
+    p = tmp_path / "race.json"
+    p.write_text(json.dumps(data))
+    cls = parse_result_file(p)["classification"]
+    assert [(r["driver_name"], r["driver_guid"]) for r in cls] == [("Tommy", "76561198930530762")]
+    data["Result"][1]["DriverName"] = "Other driver"
+    p.write_text(json.dumps(data))
+    assert [(r["driver_name"], r["driver_guid"]) for r in parse_result_file(p)["classification"]] == [
+        ("Tommy", "$#@@!$kicked"), ("Other driver", "76561198930530762")]
+    data["Result"][1]["DriverName"] = "Tommy"
+    data["Laps"][0]["Cuts"] = 2
+    p.write_text(json.dumps(data))
+    assert [r["driver_guid"] for r in parse_result_file(p)["classification"]] == ["76561198930530762"]
+
+
 def test_finish_crossing_order_ranks_by_line_crossing_not_laptime_sum(tmp_path):
     """Ann finishes 3 laps at t=300000; Bob finishes 3 laps at t=300500 (+500ms behind) but had smaller sum(LapTime) due to rolling start or disconnect."""
     laps = [

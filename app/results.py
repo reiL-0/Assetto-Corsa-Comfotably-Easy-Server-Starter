@@ -147,8 +147,17 @@ def parse_result_file(path: Path) -> dict:
     session_type = data.get("Type", "").capitalize()   # (acServer writes RACE / QUALIFY / PRACTICE)
     is_race = session_type == "Race"
 
+    rows = data.get("Result", [])
+    # acServer can replace a kicked driver's GUID with a shared placeholder after reconnecting.
+    # Drop only the phantom row when the same name has a real Steam ID with recorded laps.
+    driven = {lap.get("DriverGuid") for lap in data.get("Laps", []) if (lap.get("LapTime") or 0) > 0}
+    rejoined = {(r.get("DriverName"), r.get("CarModel")) for r in rows if r.get("DriverGuid") in driven and str(r.get("DriverGuid", "")).isdigit()}
     classification = []
-    for r in data.get("Result", []):
+    for r in rows:
+        if r.get("DriverGuid") == "$#@@!$kicked" and (r.get("DriverName"), r.get("CarModel")) in rejoined and not any(
+            lap.get("DriverGuid") == "$#@@!$kicked" and lap.get("DriverName") == r.get("DriverName") for lap in data.get("Laps", [])
+        ):
+            continue
         if not r.get("DriverName") and not r.get("DriverGuid"):
             continue  # acServer lists every empty slot too (BestLap 999999999): nobody drove it
         best = r.get("BestLap")
