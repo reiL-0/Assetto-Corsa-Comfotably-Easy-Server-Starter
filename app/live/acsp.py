@@ -21,7 +21,7 @@ from app import csp, metrics
 from app.config import settings
 from app.live.board import LiveBoard
 from app.live.field import Field
-from app.live.tracklen import TrackLength, is_oval, lookup
+from app.live.tracklen import TrackLength, lookup, oval_known, store_detected
 
 log = logging.getLogger("acmanager.acsp")
 
@@ -361,7 +361,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.winner_done = False   # the winner of this race has been announced
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
-        self.oval = False   # the layout being raced is an oval (tags or the admin's word): no danger warning there
+        self.oval = False          # the layout being raced is an oval (the admin's word, its tags, or the shape of the laps): no danger warning there
+        self._oval_known = False   # something has said so (False: still a road layout until the laps show otherwise)
         self.length = TrackLength()  # the track's length in metres (the blue flag and the danger warning say HOW FAR): from ui_track.json or estimated from the cars, app/live/tracklen.py
         self._length_logged: float | None = None
         self.transport: asyncio.DatagramTransport | None = None
@@ -401,7 +402,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self.session = event
                     self.field.clear()
                     self.length.reset()
-                    self.oval = False
+                    self.oval, self._oval_known = False, False
                     self._length_logged = None
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
@@ -495,8 +496,15 @@ class ACSPClient(asyncio.DatagramProtocol):
             cid, mono = event["car_id"], time.monotonic()
             self.field.update(cid, event["spline_pos"], d.laps if d else None, mono)
             v = event.get("velocity")
-            if self.length.configured is None and v and len(v) >= 3:   # (a configured length needs no estimate)
-                self.length.estimator.observe(cid, self.field.progress[cid], math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2), mono, self.field.epoch[cid], self.field.generation.get(cid, 0))
+            if (self.length.configured is None or not self._oval_known) and v and len(v) >= 3:   # (a configured length needs no estimate; the shape of the laps is read until something has said if the layout is an oval)
+                self.length.estimator.observe(cid, self.field.progress[cid], math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2), mono, self.field.epoch[cid], self.field.generation.get(cid, 0), math.atan2(v[0], v[2]))
+                if not self._oval_known and (shape := self.length.estimator.oval) is not None:
+                    self.oval, self._oval_known = shape, True
+                    log.info("server %s: the laps say this layout is %s", self.server_id, "an oval" if shape else "a road layout")
+                    try:
+                        asyncio.get_running_loop().run_in_executor(None, store_detected, self.session.get("track"), self.session.get("track_config") or None, shape)
+                    except RuntimeError:
+                        pass
                 m = self.length.metres()
                 if m is not None and self._length_logged is None:
                     self._length_logged = m
@@ -510,20 +518,21 @@ class ACSPClient(asyncio.DatagramProtocol):
         session is still the one that asked."""
         token = self.session
 
-        def apply(m: float | None, oval: bool = False) -> None:
+        def apply(m: float | None, oval: bool | None = None) -> None:
             if self.session is token:
-                self.oval = oval
+                if oval is not None and not self._oval_known:
+                    self.oval, self._oval_known = oval, True
                 if m is not None:
                     self.length.configured = m
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:   # no loop (a test, a script): there is nothing to hold up
-            apply(lookup(track, config), is_oval(track, config))
+            apply(lookup(track, config), oval_known(track, config))
             return
-        fut = loop.run_in_executor(None, lambda: (lookup(track, config), is_oval(track, config)))
+        fut = loop.run_in_executor(None, lambda: (lookup(track, config), oval_known(track, config)))
 
-        def done(f: "asyncio.Future[tuple[float | None, bool]]") -> None:
+        def done(f: "asyncio.Future[tuple[float | None, bool | None]]") -> None:
             try:
                 apply(*f.result())
             except Exception:

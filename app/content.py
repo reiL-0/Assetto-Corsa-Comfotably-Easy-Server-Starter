@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
-from app.live.tracklen import OVALS_KEY, oval_auto, oval_key
+from app.live.tracklen import DETECTED_KEY, OVALS_KEY, oval_auto, oval_key
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -166,20 +166,22 @@ def list_tracks() -> list[dict]:
                 configs.append({"config": sub.name})
         layouts = [c for c in configs if c["config"] and (d / c["config"] / "data" / "surfaces.ini").is_file()]
         base = (d / "data" / "surfaces.ini").is_file()  # the track itself (no layout) can be raced
-        said = _oval_overrides()
+        said, seen = _oval_overrides(OVALS_KEY), _oval_overrides(DETECTED_KEY)
         for c in configs:   # (oval_auto: what its tags say; oval: what counts, the admin's word over it)
-            c["oval_auto"] = oval_auto(d, c["config"])
-            c["oval"] = said.get(oval_key(d.name, c["config"]), c["oval_auto"])
+            key = oval_key(d.name, c["config"])
+            c["oval_auto"] = oval_auto(d, c["config"])   # (its tags: true | false | null when it has none)
+            c["oval_detected"] = seen.get(key)   # (the shape of the laps cars drove on it: true | false | null)
+            c["oval"] = bool(said[key] if isinstance(said.get(key), bool) else c["oval_auto"] if c["oval_auto"] is not None else seen.get(key))
         tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts)})
     return tracks
 
 
-def _oval_overrides() -> dict:
+def _oval_overrides(key: str) -> dict:
     from app.db import engine
     from app.models import Setting
     from sqlmodel import Session
     with Session(engine) as s:
-        row = s.get(Setting, OVALS_KEY)
+        row = s.get(Setting, key)
     return dict(row.value) if row else {}
 
 

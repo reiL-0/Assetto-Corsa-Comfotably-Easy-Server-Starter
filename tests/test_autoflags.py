@@ -1,3 +1,4 @@
+import math
 """Blue flag and danger warning in shadow (app/live/autoflags.py), on a synthetic 3000 m track: what it decides for cars at known places."""
 
 from app.live.autoflags import AutoFlags
@@ -196,14 +197,16 @@ def test_an_oval_layout_by_its_tags_or_the_admins_word_has_no_danger_warning(tmp
         (d / "ui" / layout / "ui_track.json").write_text(json.dumps({"tags": tags}))
     assert not tracklen.oval_auto(d, "road") and tracklen.oval_auto(d, "oval") and not tracklen.oval_auto(d, "none"), "per layout: the road one of the same track is not an oval"
     monkeypatch.setattr(tracklen, "track_dir", lambda t: d)
-    assert tracklen.is_oval("daytona", "oval") and not tracklen.is_oval("daytona", "road")
+    assert tracklen.oval_known("daytona", "oval") is True and tracklen.oval_known("daytona", "road") is False
+    (d / "ui" / "plain").mkdir(); (d / "ui" / "plain" / "ui_track.json").write_text("{}")
+    assert tracklen.oval_known("daytona", "plain") is None, "no tags and nothing detected: nobody knows"
     from sqlmodel import Session
     from app.db import engine
     from app.models import Setting
     with Session(engine) as s:
         s.merge(Setting(key=tracklen.OVALS_KEY, value={"daytona/road": True, "daytona/oval": False})); s.commit()
     try:
-        assert tracklen.is_oval("daytona", "road") and not tracklen.is_oval("daytona", "oval"), "the admin's word wins over the tags"
+        assert tracklen.oval_known("daytona", "road") is True and tracklen.oval_known("daytona", "oval") is False, "the admin's word wins over the tags"
     finally:
         with Session(engine) as s:
             s.delete(s.get(Setting, tracklen.OVALS_KEY)); s.commit()
@@ -218,3 +221,24 @@ def test_rc_on_an_oval_switches_the_danger_warning_off():
     rc.oval = False
     rc.autoflags_tick({}, {}, 3000.0, 2.0, 2.0)
     assert rc.autoflags.modes["danger"] == "live"
+
+
+def _drive(shape, laps=6, spin_lap=None):
+    import math
+    from app.live.tracklen import LapLength
+    ll = LapLength()
+    n = 300
+    for i in range(laps * n + 1):
+        p = i / n
+        phi = math.tau * (p % 1.0)
+        heading = shape(phi) + (2.5 * math.sin(phi) if spin_lap == int(p) else 0.0)
+        ll.observe(1, p, 60.0, i * 0.2, 1, 0, heading)
+    return ll
+
+
+def test_the_shape_of_the_laps_tells_an_oval_from_a_road_layout():
+    oval = _drive(lambda phi: phi + 0.1 * math.sin(3 * phi))   # (a tri-oval's dog-leg: a few degrees back)
+    road = _drive(lambda phi: phi + 1.2 * math.sin(2 * phi))    # (turns both ways by far more than 35 degrees)
+    assert oval.oval is True and road.oval is False
+    assert _drive(lambda phi: phi, laps=3).oval is None, "too few whole laps to say"
+    assert _drive(lambda phi: phi, laps=8, spin_lap=4).oval is True, "a spin spoils its lap, not the verdict"
