@@ -289,3 +289,43 @@ def test_the_catalog_gives_the_oval_check_to_the_base_layout_too(tmp_path, monke
     tracks = {t["track"]: t for t in content.list_tracks()}
     assert tracks["oval_only"]["configs"] == [] and tracks["oval_only"]["base_oval"] == {"oval_auto": None, "oval_detected": None, "oval": False}
     assert tracks["daytona"]["base_oval"]["oval"] is False and tracks["daytona"]["configs"][0]["oval_auto"] is False, "the road layout is tagged road"
+
+
+def test_the_admins_word_outranks_a_detection_that_came_first_and_reaches_a_running_session(monkeypatch):
+    from app.live import acsp
+    c = acsp.ACSPClient(993)
+    c.oval, c._oval_known = True, True   # the laps said «oval» before the answer of the lookup came back
+    monkeypatch.setattr(acsp, "lookup", lambda t, cfg: None)
+    monkeypatch.setattr(acsp, "oval_known", lambda t, cfg: False)   # the admin said: road layout
+    c._look_up_length("daytona", "road")   # (no loop in a test: it runs inline)
+    assert c.oval is False and c._oval_known is True, "the answer of the lookup wins over what the laps said first"
+    monkeypatch.setattr(acsp, "oval_known", lambda t, cfg: None)
+    c.oval, c._oval_known = True, True
+    c._look_up_length("daytona", "road")
+    assert c.oval is True, "nothing known: the detection stays"
+    c.set_oval(False)
+    assert c.oval is False and c._oval_known is True
+    c.set_oval(None)
+    assert c.oval is False and c._oval_known is False, "nothing says it any more: a road layout, the laps may say again"
+
+
+def test_two_writers_of_the_oval_rows_do_not_lose_each_others_key():
+    import threading
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    from app.live import tracklen
+    keys = [(f"t{i}", None) for i in range(12)]
+    ts = [threading.Thread(target=tracklen.update_oval_row, args=(tracklen.OVALS_KEY, t, c, i % 2 == 0)) for i, (t, c) in enumerate(keys)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    try:
+        with Session(engine) as s:
+            value = s.get(Setting, tracklen.OVALS_KEY).value
+        assert len(value) == 12 and value["t0/"] is True and value["t1/"] is False
+        tracklen.update_oval_row(tracklen.OVALS_KEY, "t0", None, None)
+        with Session(engine) as s:
+            assert "t0/" not in s.get(Setting, tracklen.OVALS_KEY).value, "None removes the admin's word"
+    finally:
+        with Session(engine) as s:
+            row = s.get(Setting, tracklen.OVALS_KEY)
+            if row: s.delete(row); s.commit()

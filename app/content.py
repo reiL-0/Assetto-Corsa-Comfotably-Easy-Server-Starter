@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
-from app.live.tracklen import DETECTED_KEY, OVALS_KEY, _setting, oval_auto, oval_key
+from app.live.tracklen import DETECTED_KEY, OVALS_KEY, _setting, oval_auto, oval_key, oval_known, update_oval_row
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -488,20 +488,14 @@ class OvalIn(BaseModel):
 @router.put("/tracks/{track}/oval", dependencies=[Depends(require("admin"))])
 def set_track_oval(track: str, body: OvalIn, config: str | None = None) -> dict:
     """The «oval» check of the catalog, per LAYOUT (Daytona has road, half-course and oval layouts): on an oval the danger warning is off, on a road layout it works (with NASCAR rules or without)."""
-    from app.db import engine
-    from app.models import Setting
-    from sqlmodel import Session
     track, config = _safe(track), (_safe(config) if config else None)
-    key = oval_key(track, config)
-    with Session(engine) as s:
-        row = s.get(Setting, OVALS_KEY) or Setting(key=OVALS_KEY, value={})
-        value = dict(row.value)
-        if body.oval is None:
-            value.pop(key, None)
-        else:
-            value[key] = body.oval
-        row.value = value
-        s.add(row); s.commit()
+    update_oval_row(OVALS_KEY, track, config, body.oval)
+    known = oval_known(track, config)   # (what counts now: the admin's word, else its tags, else the laps seen before)
+    from app import supervisor
+    for inst in supervisor.live():   # a race being run does not wait for its next session: the admin's word reaches it now
+        s = inst.acsp.session or {}
+        if s.get("track") == track and (s.get("track_config") or None) == config:
+            inst.acsp.set_oval(known)
     return {"track": track, "config": config, "oval": body.oval}
 
 
