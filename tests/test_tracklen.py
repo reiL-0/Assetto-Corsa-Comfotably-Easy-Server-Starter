@@ -275,3 +275,17 @@ def test_two_cars_may_agree_sooner_but_one_car_needs_five_laps():
     assert solo.length is None, "four laps of one car"
     lap(solo, 1, 4000.0, speed, laps=2, start=5 * 4000.0, t0=1000.0)
     assert solo.length is not None
+
+
+def test_the_catalog_gives_the_oval_check_to_the_base_layout_too(tmp_path, monkeypatch):
+    """A track with only its base layout (no ui/), and the base of one that has layouts, have no entry in `configs`: the «oval» check needs `base_oval`."""
+    from app import content
+    for track, layout in (("oval_only", None), ("daytona", "road")):
+        (tmp_path / track / "data").mkdir(parents=True); (tmp_path / track / "data" / "surfaces.ini").write_text("")
+        if layout:
+            (tmp_path / track / "ui" / layout).mkdir(parents=True); (tmp_path / track / "ui" / layout / "ui_track.json").write_text('{"tags":["road"]}')
+            (tmp_path / track / layout / "data").mkdir(parents=True); (tmp_path / track / layout / "data" / "surfaces.ini").write_text("")
+    monkeypatch.setattr(content, "_tracks_dir", lambda: tmp_path)
+    tracks = {t["track"]: t for t in content.list_tracks()}
+    assert tracks["oval_only"]["configs"] == [] and tracks["oval_only"]["base_oval"] == {"oval_auto": None, "oval_detected": None, "oval": False}
+    assert tracks["daytona"]["base_oval"]["oval"] is False and tracks["daytona"]["configs"][0]["oval_auto"] is False, "the road layout is tagged road"
