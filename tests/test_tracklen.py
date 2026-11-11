@@ -143,10 +143,10 @@ def test_the_acsp_client_measures_the_length_from_the_car_updates(monkeypatch):
     assert c.length.metres() is not None and abs(c.length.metres() - L) < 80 and c.length.source() == "estimated", c.length.metres()
     assert c._length_logged == c.length.metres(), "said once in the log"
     c2 = acsp.ACSPClient(992)
-    c2.length.configured = 5000.0   # a configured length needs no estimate
+    c2.length.configured, c2._oval_known = 5000.0, True   # a configured length and a known layout need no estimate
     for _ in range(50):
         c2._apply({"type": "car_update", "car_id": 3, "spline_pos": 0.1, "velocity": (0.0, 0.0, 60.0), "pos": (0.0, 0.0, 0.0)})
-    assert c2.length.estimator._cars == {}, "the estimator is not even fed when the length is known"
+    assert c2.length.estimator._cars == {}, "the estimator is not even fed when the length and the layout are known"
 
 
 def test_a_new_session_reads_the_track_file(tmp_path, monkeypatch):

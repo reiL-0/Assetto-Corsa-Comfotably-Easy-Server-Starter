@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
+from app.live.tracklen import DETECTED_KEY, OVALS_KEY, oval_auto, oval_key
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -165,8 +166,23 @@ def list_tracks() -> list[dict]:
                 configs.append({"config": sub.name})
         layouts = [c for c in configs if c["config"] and (d / c["config"] / "data" / "surfaces.ini").is_file()]
         base = (d / "data" / "surfaces.ini").is_file()  # the track itself (no layout) can be raced
+        said, seen = _oval_overrides(OVALS_KEY), _oval_overrides(DETECTED_KEY)
+        for c in configs:   # (oval_auto: what its tags say; oval: what counts, the admin's word over it)
+            key = oval_key(d.name, c["config"])
+            c["oval_auto"] = oval_auto(d, c["config"])   # (its tags: true | false | null when it has none)
+            c["oval_detected"] = seen.get(key)   # (the shape of the laps cars drove on it: true | false | null)
+            c["oval"] = bool(said[key] if isinstance(said.get(key), bool) else c["oval_auto"] if c["oval_auto"] is not None else seen.get(key))
         tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts)})
     return tracks
+
+
+def _oval_overrides(key: str) -> dict:
+    from app.db import engine
+    from app.models import Setting
+    from sqlmodel import Session
+    with Session(engine) as s:
+        row = s.get(Setting, key)
+    return dict(row.value) if row else {}
 
 
 def _sha1(p: Path) -> str | None:
@@ -463,6 +479,30 @@ def download_skin(car: str, skin: str) -> FileResponse:
 @router.get("/tracks")
 def get_tracks() -> list[dict]:
     return list_tracks()
+
+
+class OvalIn(BaseModel):
+    oval: bool | None   # true / false = the admin's word for this layout; null = back to what its tags say
+
+
+@router.put("/tracks/{track}/oval", dependencies=[Depends(require("admin"))])
+def set_track_oval(track: str, body: OvalIn, config: str | None = None) -> dict:
+    """The «oval» check of the catalog, per LAYOUT (Daytona has road, half-course and oval layouts): on an oval the danger warning is off, on a road layout it works (with NASCAR rules or without)."""
+    from app.db import engine
+    from app.models import Setting
+    from sqlmodel import Session
+    track, config = _safe(track), (_safe(config) if config else None)
+    key = oval_key(track, config)
+    with Session(engine) as s:
+        row = s.get(Setting, OVALS_KEY) or Setting(key=OVALS_KEY, value={})
+        value = dict(row.value)
+        if body.oval is None:
+            value.pop(key, None)
+        else:
+            value[key] = body.oval
+        row.value = value
+        s.add(row); s.commit()
+    return {"track": track, "config": config, "oval": body.oval}
 
 
 @router.get("/tracks/{track}/checksum")

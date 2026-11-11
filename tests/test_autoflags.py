@@ -1,3 +1,4 @@
+import math
 """Blue flag and danger warning in shadow (app/live/autoflags.py), on a synthetic 3000 m track: what it decides for cars at known places."""
 
 from app.live.autoflags import AutoFlags
@@ -172,3 +173,72 @@ def test_a_server_with_no_rulebook_takes_its_default_modes_from_the_deployment(m
         league._EFFECTIVE.clear()
         assert set(league.flag_modes(987001).values()) == {default}, default
     league._EFFECTIVE.clear()
+
+
+def test_danger_warns_earlier_the_faster_the_driver_comes_and_for_a_crawling_car():
+    af = AutoFlags()
+    run(af, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 200.0}, now=90.0)   # (car 1 was racing)
+    for i in range(5):   # car 1 crawls at 18 km/h (a wreck along a wall); car 2 comes at 200 km/h, 550 m behind
+        run(af, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 200.0}, now=96.0 + i)
+    assert af.danger == {(2, 1): 550}, "550 m is more than 400 m but less than 10 s at 200 km/h (555 m)"
+    af2 = AutoFlags()
+    run(af2, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 100.0}, now=90.0)
+    for i in range(5):
+        run(af2, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 100.0}, now=96.0 + i)
+    assert af2.danger == {}, "at 100 km/h 550 m is still too far (278 m of road in 10 s, the floor is 400 m)"
+
+
+def test_an_oval_layout_by_its_tags_or_the_admins_word_has_no_danger_warning(tmp_path, monkeypatch):
+    import json
+    from app.live import tracklen
+    d = tmp_path / "daytona"
+    for layout, tags in (("road", ["road", "circuit"]), ("oval", ["Oval", "usa"])):
+        (d / "ui" / layout).mkdir(parents=True)
+        (d / "ui" / layout / "ui_track.json").write_text(json.dumps({"tags": tags}))
+    assert not tracklen.oval_auto(d, "road") and tracklen.oval_auto(d, "oval") and not tracklen.oval_auto(d, "none"), "per layout: the road one of the same track is not an oval"
+    monkeypatch.setattr(tracklen, "track_dir", lambda t: d)
+    assert tracklen.oval_known("daytona", "oval") is True and tracklen.oval_known("daytona", "road") is False
+    (d / "ui" / "plain").mkdir(); (d / "ui" / "plain" / "ui_track.json").write_text("{}")
+    assert tracklen.oval_known("daytona", "plain") is None, "no tags and nothing detected: nobody knows"
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    with Session(engine) as s:
+        s.merge(Setting(key=tracklen.OVALS_KEY, value={"daytona/road": True, "daytona/oval": False})); s.commit()
+    try:
+        assert tracklen.oval_known("daytona", "road") is True and tracklen.oval_known("daytona", "oval") is False, "the admin's word wins over the tags"
+    finally:
+        with Session(engine) as s:
+            s.delete(s.get(Setting, tracklen.OVALS_KEY)); s.commit()
+
+
+def test_rc_on_an_oval_switches_the_danger_warning_off():
+    from app.live.racecontrol import RaceControl
+    rc = RaceControl({"session_type": 3})
+    rc.oval = True
+    rc.autoflags_tick({}, {}, 3000.0, 1.0, 1.0)
+    assert rc.autoflags.modes["danger"] == "off"
+    rc.oval = False
+    rc.autoflags_tick({}, {}, 3000.0, 2.0, 2.0)
+    assert rc.autoflags.modes["danger"] == "live"
+
+
+def _drive(shape, laps=6, spin_lap=None):
+    import math
+    from app.live.tracklen import LapLength
+    ll = LapLength()
+    n = 300
+    for i in range(laps * n + 1):
+        p = i / n
+        phi = math.tau * (p % 1.0)
+        heading = shape(phi) + (2.5 * math.sin(phi) if spin_lap == int(p) else 0.0)
+        ll.observe(1, p, 60.0, i * 0.2, 1, 0, heading)
+    return ll
+
+
+def test_the_shape_of_the_laps_tells_an_oval_from_a_road_layout():
+    oval = _drive(lambda phi: phi + 0.1 * math.sin(3 * phi))   # (a tri-oval's dog-leg: a few degrees back)
+    road = _drive(lambda phi: phi + 1.2 * math.sin(2 * phi))    # (turns both ways by far more than 35 degrees)
+    assert oval.oval is True and road.oval is False
+    assert _drive(lambda phi: phi, laps=3).oval is None, "too few whole laps to say"
+    assert _drive(lambda phi: phi, laps=8, spin_lap=4).oval is True, "a spin spoils its lap, not the verdict"

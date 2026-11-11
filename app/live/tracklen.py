@@ -11,6 +11,7 @@ Plain state, no I/O apart from reading one small JSON file (`from_ui_json`); tes
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 from pathlib import Path
@@ -50,6 +51,64 @@ def from_ui_json(track_dir: Path, config: str | None) -> float | None:
     return None
 
 
+OVALS_KEY = "oval_tracks"       # Setting row: {"<track>/<layout>": true | false}: what the admin said about a layout, over everything else
+DETECTED_KEY = "oval_detected"  # Setting row, same shape: what the cars' own laps showed (OvalShape), the last resort for a layout with no tags (a server pack has no ui/)
+
+
+def oval_key(track: str | None, config: str | None) -> str:
+    return f"{track or ''}/{config or ''}"
+
+
+def oval_auto(track_dir: Path, config: str | None) -> bool | None:
+    """What the `tags` of the layout's `ui_track.json` (or the track's) say: True with `oval`, False with other tags, None when there are no tags to read. Never raises."""
+    for p in ([track_dir / "ui" / config / "ui_track.json"] if config else []) + [track_dir / "ui" / "ui_track.json"]:
+        try:
+            data = json.loads(p.read_bytes().decode("utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("tags"), list) and data["tags"]:
+            return any(isinstance(x, str) and x.strip().lower() == "oval" for x in data["tags"])
+    return None
+
+
+def _setting(key: str) -> dict:
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    try:
+        with Session(engine) as s:
+            row = s.get(Setting, key)
+        return dict(row.value) if row else {}
+    except Exception:   # (no database: nothing is known)
+        return {}
+
+
+def oval_known(track: str | None, config: str | None) -> bool | None:
+    """Is this layout an oval? The admin's word, else its tags, else what the cars' laps showed on an earlier session; None = nobody knows yet (the shape detector will say). Touches the disk and the
+    database: OFF the event loop."""
+    key = oval_key(track, config)
+    for said in (_setting(OVALS_KEY).get(key),):
+        if isinstance(said, bool):
+            return said
+    d = track_dir(track)
+    tags = oval_auto(d, config) if d else None
+    if tags is not None:
+        return tags
+    seen = _setting(DETECTED_KEY).get(key)
+    return seen if isinstance(seen, bool) else None
+
+
+def store_detected(track: str | None, config: str | None, oval: bool) -> None:
+    """Remember what the shape detector found, for the next session on this layout. OFF the event loop."""
+    from sqlmodel import Session
+    from app.db import engine
+    from app.models import Setting
+    with Session(engine) as s:
+        row = s.get(Setting, DETECTED_KEY) or Setting(key=DETECTED_KEY, value={})
+        row.value = {**row.value, oval_key(track, config): oval}
+        s.add(row); s.commit()
+
+
 class LapLength:
     """Estimates the length from the cars. `observe` is called for every car_update with the car's unwrapped progress (app/live/field.py), its speed and the epoch/generation of that progress: a lap
     counts only if the car drove it WITHOUT the progress being re-anchored (a teleport, a lap-counter correction, a reconnection) and without a gap in the samples."""
@@ -58,31 +117,38 @@ class LapLength:
     MIN_LAPS, SOLO_LAPS, KEEP, AGREE = 3, 5, 40, 0.04   # laps needed (and when only ONE car has driven them: more, so that a car lapping through the pits every time cannot set the length), laps remembered, how much the laps may differ from the median (4 %: the racing line is not the centre line)
     BACK = 0.003                          # a car whose progress goes BACK by more than this (of a lap, ~15 m on a 5 km track) reversed or spun round: its lap is not a lap (the speed is never negative, so the integral cannot tell)
     GAP_S = 1.0                           # a bigger hole between two samples of a car spoils the lap it is in
+    TURN_MS = 8.0                         # the direction of travel is only read above 8 m/s (slower, the velocity vector is noise)
+    OVAL_NET, OVAL_BACK = math.radians(300), math.radians(35)   # an oval lap turns ~360 degrees ONE way and never turns the other way by more than 35 (a tri-oval's dog-leg a few): any road layout has a chicane or a hairpin the other way
 
     def __init__(self) -> None:
         self._cars: dict[int, list] = {}   # car -> [epoch, generation, last_t, last_speed, lap_index, distance, clean, seconds stopped, last progress]
         self._laps: list[tuple[float, int]] = []   # (distance, car)
+        self._shapes: list[bool] = []              # per whole lap: did it turn like an oval (see OVAL_NET / OVAL_BACK)
 
     def reset(self) -> None:
         self._cars.clear()
         self._laps.clear()
+        self._shapes.clear()
 
     def forget(self, car: int) -> None:
         """The car left (its slot may be somebody else's): whatever lap it was in is not a lap."""
         self._cars.pop(car, None)
 
-    def observe(self, car: int, progress: float, speed_ms: float, now: float, epoch: int, generation: int) -> None:
+    def observe(self, car: int, progress: float, speed_ms: float, now: float, epoch: int, generation: int, heading: float | None = None) -> None:
         if not (speed_ms >= 0.0) or progress != progress:   # (a NaN or a negative speed is garbage)
             return
         lap = int(progress // 1)
         st = self._cars.get(car)
         if st is None or st[0] != epoch or st[1] != generation or now - st[2] > self.GAP_S or now < st[2]:
-            self._cars[car] = [epoch, generation, now, speed_ms, lap, 0.0, False, 0.0, progress]   # (a lap that starts here is not whole: it counts from the next crossing)
+            self._cars[car] = [epoch, generation, now, speed_ms, lap, 0.0, False, 0.0, progress, []]   # (a lap that starts here is not whole: it counts from the next crossing)
             return
         dt = now - st[2]
         st[5] += 0.5 * (st[3] + speed_ms) * dt   # trapezoid
         if speed_ms < self.STOP_MS:
             st[7] += dt
+        if heading is not None and speed_ms >= self.TURN_MS:   # (the direction of travel, unwrapped, for the shape of the lap)
+            h = st[9]
+            h.append(heading if not h else h[-1] + (heading - h[-1] + math.pi) % math.tau - math.pi)
         if progress < st[8] - self.BACK:
             st[6] = False   # it went backwards: this lap is not whole
         st[2], st[3], st[8] = now, speed_ms, max(progress, st[8]) if progress >= st[8] - self.BACK else st[8]
@@ -90,7 +156,28 @@ class LapLength:
             if lap == st[4] + 1 and st[6] and st[7] <= self.STOP_S and MIN_M <= st[5] <= MAX_M:
                 self._laps.append((st[5], car))
                 del self._laps[:-self.KEEP]
-            st[4], st[5], st[6], st[7] = lap, 0.0, lap == st[4] + 1, 0.0   # a new lap starts at the crossing: clean from here on, but only when the car went FORWARD over the line (backwards, or a jump of laps, is not a lap)
+                if len(st[9]) > 20:
+                    self._shapes.append(self._oval_lap(st[9]))
+                    del self._shapes[:-self.KEEP]
+            st[4], st[5], st[6], st[7], st[9] = lap, 0.0, lap == st[4] + 1, 0.0, []   # a new lap starts at the crossing: clean from here on, but only when the car went FORWARD over the line (backwards, or a jump of laps, is not a lap)
+
+    def _oval_lap(self, h: list[float]) -> bool:
+        s = 1.0 if h[-1] >= h[0] else -1.0
+        peak, back = h[0] * s, 0.0
+        for x in h:
+            peak = max(peak, x * s)
+            back = max(back, peak - x * s)   # how far it turned back from its furthest point
+        return abs(h[-1] - h[0]) >= self.OVAL_NET and back <= self.OVAL_BACK
+
+    @property
+    def oval(self) -> bool | None:
+        """True when at least `MIN_LAPS` whole laps turned like an oval and they are 3 of every 4 laps seen (a spin spoils one lap, not the verdict); False when at least `MIN_LAPS` laps were seen and
+        3 of every 4 did not; None until then (the layout stays a road one: the danger warning works)."""
+        n = len(self._shapes)
+        if n < self.MIN_LAPS:
+            return None
+        yes = sum(self._shapes)
+        return True if yes >= 0.75 * n else False if n - yes >= 0.75 * n else None
 
     @property
     def length(self) -> float | None:

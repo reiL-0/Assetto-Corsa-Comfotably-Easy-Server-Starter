@@ -174,10 +174,10 @@ def test_the_nascar_cup_preset_and_a_rulebook_saved_before_stage_points_existed(
     assert old.scoring.stage_points == []
 
 
-def test_old_rulebooks_receive_disabled_neutralization_defaults():
+def test_old_rulebooks_receive_live_neutralization_defaults():
     rb = Rulebook.model_validate({"schema_version": 1})
     n = rb.neutralization
-    assert rb.schema_version == 1 and n.mode == "off" and n.default_mode == "VSC"
+    assert rb.schema_version == 1 and n.mode == "live" and n.default_mode == "VSC"
     assert n.mode_by_category == {}
     assert n.max_auto_time_penalty_s == 10
     assert (n.green_after_laps, n.green_clear_s, n.green_max_extra_laps) == (3, 15, 3)

@@ -371,6 +371,8 @@ def incident_tick(now: float) -> None:
         rc = state_of(inst.server_id, True, inst.acsp.session, create=rule.get("mode", "off") != "off" or fieldrec.enabled(inst.server_id))
         if not rc:
             continue
+        if rc.nascar and rule.get("mode", "off") != "off":
+            rule = {**rule, "mode": "off"}   # (a NASCAR race has its own cautions: the automatic VSC/FCY and its green never touch it)
         if rc.neutralization_rule != rule:
             rc.audit("mode_change", previous=rc.neutralization_rule, rule=rule, executed=True)
         rc.neutralization_rule = rule
@@ -404,6 +406,7 @@ def autoflags_tick(now: float) -> None:
         if rc.flag_modes != modes:
             rc.audit("flag_mode_change", previous=rc.flag_modes, modes=modes, executed=True)
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
+        rc.oval = inst.acsp.oval
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
         rc.yellow_tick(samples, speeds, mono, now)
         _flag_messages(inst, rc)
