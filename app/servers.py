@@ -11,6 +11,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import json
+import os
+import struct
+import zlib
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -165,6 +168,79 @@ def list_servers(sess: SessionDep) -> list[ServerOut]:
 @router.get("/{server_id}", response_model=ServerOut)
 def get_server(server_id: int, sess: SessionDep) -> ServerOut:
     return _out(_get(sess, server_id))
+
+
+_IMAGE_LIMIT = 1024 * 1024
+
+
+def _image(data: bytes) -> str:
+    """Accept a complete PNG container, not an extension or Content-Type claim."""
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        i, image, compressed = 8, False, bytearray()
+        depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+        while i + 12 <= len(data):
+            size = struct.unpack_from(">I", data, i)[0]
+            end = i + 12 + size
+            if end > len(data):
+                break
+            kind = data[i + 4:i + 8]
+            if zlib.crc32(data[i + 4:i + 8 + size]) & 0xffffffff != struct.unpack_from(">I", data, i + 8 + size)[0]:
+                break
+            if kind == b"IHDR" and i == 8 and size == 13:
+                width, height, bit_depth, color, comp, filt, interlace = struct.unpack_from(">IIBBBBB", data, i + 8)
+                image = (0 < width <= 4096 and 0 < height <= 4096 and comp == 0 and filt == 0
+                         and interlace in (0, 1) and color in depths and bit_depth in depths[color])
+            if kind == b"IDAT" and image:
+                compressed.extend(data[i + 8:i + 8 + size])
+            if kind == b"IEND" and size == 0 and end == len(data) and image and compressed:
+                stream = zlib.decompressobj()
+                try:
+                    if stream.decompress(bytes(compressed), 64 * 1024):
+                        return "png"
+                except zlib.error:
+                    break
+            i = end
+    raise HTTPException(400, "imagen PNG no válida")
+
+
+@router.get("/{server_id}/loading-image")
+def loading_image_status(server_id: int, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    saved = sess.get(Setting, f"loading_image:{server_id}")
+    return {"uploaded": bool(saved and saved.value.get("filename"))}
+
+
+@router.post("/{server_id}/loading-image", dependencies=[Depends(require("admin"))])
+async def upload_loading_image(server_id: int, request: Request, sess: SessionDep) -> dict:
+    _get(sess, server_id)
+    try:
+        if int(request.headers.get("content-length", "0")) > _IMAGE_LIMIT:
+            raise HTTPException(413, "imagen demasiado grande")
+    except ValueError as exc:
+        raise HTTPException(400, "Content-Length inválido") from exc
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > _IMAGE_LIMIT:
+            raise HTTPException(413, "imagen demasiado grande")
+    ext = _image(bytes(data))
+    directory = Path(settings.data_dir) / "loading-images"
+    filename = f"{server_id}.{ext}"
+    temporary = directory / f".{server_id}.{ext}.{os.urandom(8).hex()}"
+    def store():
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            temporary.write_bytes(data)
+            temporary.replace(directory / filename)
+        finally:
+            temporary.unlink(missing_ok=True)
+    await asyncio.to_thread(store)
+    key = f"loading_image:{server_id}"
+    saved = sess.get(Setting, key) or Setting(key=key)
+    saved.value = {"filename": filename}
+    sess.add(saved)
+    sess.commit()
+    return {"uploaded": True}
 
 
 @router.patch("/{server_id}", response_model=ServerOut)

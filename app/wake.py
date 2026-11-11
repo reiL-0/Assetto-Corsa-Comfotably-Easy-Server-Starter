@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import ipaddress
 import json
 import logging
 import re
@@ -30,7 +31,7 @@ import socket
 import struct
 import time
 import urllib.request
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from email.utils import formatdate
 from pathlib import Path
 
@@ -39,8 +40,9 @@ from sqlmodel import Session, select
 from app import requirements, schedule, supervisor, timeline
 from app.config import settings
 from app.db import engine
-from app.models import Event, Schedule, Server
+from app.models import Event, Server, Setting
 from app.services.server_service import ports as _ports
+from fastapi import HTTPException
 
 log = logging.getLogger("acmanager.wake")
 SYNC_EVERY = 5.0  # seconds between looks at which servers should be listened for
@@ -77,10 +79,61 @@ def lobby_info(s: Server, info: dict) -> dict:
     return info
 
 
-def facade_info(s: Server) -> dict:
-    """What acServer's /INFO would say with nobody on: the last real answer (info.json) when there is one, else built from the config."""
+def _preview(s: Server):
+    """Unloaded event in the wake window: derive the same eligible grid as wake, without sending notices."""
+    if s.wake == "off":
+        return None
     try:
-        info = json.loads((_instance_dir(s.id) / "info.json").read_text())
+        with Session(engine) as db:
+            sc = schedule.open_window(db, s.id, time.time())
+            if not sc or sc.loaded or not (ev := db.get(Event, sc.event_id)):
+                return None
+            from app.league import session_for
+            return session_for(db, ev, sc.start_at, notify=False)
+    except HTTPException as exc:
+        log.warning("cannot preview pending event for server %s: %s", s.id, exc.detail)
+        return None
+    except Exception:
+        log.warning("cannot preview pending event for server %s", s.id, exc_info=True)
+        return None
+
+
+def _preview_server(s: Server, plan):
+    """Build an in-memory server view; never mutate the stored configuration or start acServer."""
+    from types import SimpleNamespace
+    srv = dict(s.config.get("SERVER", {}))
+    cars = list(dict.fromkeys(e.model for e in plan.entries)) if plan.entries else plan.cars
+    srv.update(NAME=plan.name, TRACK=plan.track, CONFIG_TRACK=plan.track_config,
+               CARS=";".join(cars), MAX_CLIENTS=len(plan.entries) or plan.max_clients,
+               PASSWORD=plan.password, LOCKED_ENTRY_LIST=int(plan.locked),
+               PICKUP_MODE_ENABLED=int(plan.pickup))
+    cfg = {"SERVER": srv}
+    if plan.practice_min:
+        cfg["PRACTICE"] = {"NAME": "Practice", "TIME": plan.practice_min, "IS_OPEN": 1}
+    if plan.qualify_min:
+        cfg["QUALIFY"] = {"NAME": "Qualify", "TIME": plan.qualify_min, "IS_OPEN": 1}
+    if plan.race_laps:
+        cfg["RACE"] = {"NAME": "Race", "LAPS": plan.race_laps, "WAIT_TIME": plan.race_wait_s, "IS_OPEN": 1}
+    elif plan.race_min:
+        cfg["RACE"] = {"NAME": "Race", "LAPS": 0, "TIME": plan.race_min, "WAIT_TIME": plan.race_wait_s, "IS_OPEN": 1}
+    entries = ([{"MODEL": e.model, "SKIN": e.skin, "DRIVERNAME": e.driver_name,
+                 "TEAM": e.team, "GUID": e.guid} for e in plan.entries] if plan.entries else
+               [{"MODEL": car, "SKIN": ""} for car in
+                ([car for car, count in plan.car_counts.items() for _ in range(count)] if plan.car_counts else
+                 [cars[i % len(cars)] for i in range(plan.max_clients)])])
+    return SimpleNamespace(id=s.id, base_port=s.base_port, name=s.name, config=cfg,
+                           entry_list=entries, welcome=plan.welcome, anchor_index=None, anchor_at=None,
+                           session={"race_est_min": plan.race_est_min or 0})
+
+
+def facade_info(s: Server, preview: bool = True) -> dict:
+    """What acServer's /INFO would say with nobody on: the last real answer (info.json) when there is one, else built from the config."""
+    if preview and (plan := _preview(s)):
+        return facade_info(_preview_server(s, plan), preview=False)
+    try:
+        info = json.loads((_instance_dir(s.id) / "info.json").read_text()) if preview else {}
+        if not info:
+            raise ValueError("build preview from event")
     except (OSError, ValueError):
         srv, ports = s.config.get("SERVER", {}), _ports(s.base_port)
         track, layout = srv.get("TRACK", ""), srv.get("CONFIG_TRACK") or ""
@@ -112,6 +165,8 @@ def facade_cars(s: Server, guid: str = "") -> dict:
     """Body of /JSON|<guid>: the entry list's cars and skins, nobody connected (checked byte for byte against the running acServer's).
     `IsRequestedGUID` is the slot booked for the asker (its GUID, one of the `;`-separated ones, is the one in the path): Content Manager takes a
     server without pickup (every locked league event) as «Wait for the next booking», with Join disabled, unless one slot comes back booked for the player."""
+    if plan := _preview(s):
+        s = _preview_server(s, plan)
     return {"Cars": [{"Model": e.get("MODEL", ""), "Skin": e.get("SKIN", ""), "DriverName": e.get("DRIVERNAME", ""), "DriverTeam": e.get("TEAM", ""),
                       "DriverNation": "", "IsConnected": False, "IsRequestedGUID": bool(guid) and guid in str(e.get("GUID", "")).split(";"),
                       "IsEntryList": True}   # acServer says True for every slot of the entry list, named or not
@@ -149,22 +204,26 @@ def _upstream(port: int, path: str) -> bytes:
 
 
 def _league_of(server_id: int) -> int | None:
-    """The league of the event loaded on this server (the latest schedule that is loaded and not over), None when there is none."""
+    """The league of the event visible on this server, loaded or pending within its wake window."""
     try:
         with Session(engine) as sess:
-            return sess.exec(select(Event.league_id).join(Schedule, Schedule.event_id == Event.id)
-                             .where(Schedule.server_id == server_id, Schedule.loaded == True, Schedule.state.in_(("pending", "running")))  # noqa: E712
-                             .order_by(Schedule.start_at.desc())).first()
-    except Exception:   # noqa: BLE001 - the lobby page must answer even when the lookup fails: it shows the global list, and the error is logged
+            sc = schedule.open_window(sess, server_id, time.time())
+            if sc:
+                event = sess.get(Event, sc.event_id)
+                return event.league_id if event else None
+            return None
+    except Exception:   # the lobby page must answer even when the lookup fails: it shows the global list, and the error is logged
         log.warning("could not find the league of server %s; showing the global requirements", server_id, exc_info=True)
         return None
 
 
-def details(s: Server, live: bytes | None) -> dict:
-    """Body of /api/details, what the Content Manager wrapper serves and Content Manager shows on the server's page: the lobby
-    info (acServer's own /INFO when running, the facade's when stopped) plus the description (the welcome text)."""
+def details(s: Server, live: bytes | None, host: str = "") -> dict:
+    """Body of /api/details, with the same pending-event view as the stopped lobby."""
+    plan = _preview(s) if not live else None
+    if plan:
+        s = _preview_server(s, plan)
     try:
-        info = json.loads(live) if live else facade_info(s)
+        info = json.loads(live) if live else facade_info(s, preview=not plan)
     except ValueError:
         info = facade_info(s)
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
@@ -172,7 +231,23 @@ def details(s: Server, live: bytes | None) -> dict:
     info["wrappedPort"] = info["cport"]   # Content Manager keeps asking THIS port for the details (ServerInformationExtended.PortExtended)
     req = requirements.lines(requirements.current(_league_of(s.id)))   # what the player must install, under the welcome text: the league's list while its event is on this server
     info["description"] = s.welcome + ("\n\nRequisitos:\n" + "\n".join(req) if req else "")
+    if host:
+        with Session(engine) as db:
+            image = db.get(Setting, f"loading_image:{s.id}")
+        if image and image.value.get("filename") == f"{s.id}.png":
+            info["loadingImageUrl"] = f"http://{host}/loading-image"
     return info
+
+
+def _loading_image(server_id: int) -> bytes:
+    with Session(engine) as db:
+        image = db.get(Setting, f"loading_image:{server_id}")
+    if image and image.value.get("filename") == f"{server_id}.png":
+        try:
+            return (Path(settings.data_dir) / "loading-images" / f"{server_id}.png").read_bytes()
+        except OSError:
+            log.warning("loading image unavailable for server %s", server_id, exc_info=True)
+    return b""
 
 
 def _http_handler(server_id: int, ac_seen):
@@ -187,29 +262,49 @@ def _http_handler(server_id: int, ac_seen):
                 if not line.strip():
                     break
                 path = line.split(" ")[1] if line.count(" ") >= 2 else ""
-                agent, close = "", False
+                agent, close, host = "", False, ""
                 for _ in range(40):   # the headers, up to the blank line
                     h = (await asyncio.wait_for(reader.readline(), 5)).decode(errors="replace")
                     if h in ("\r\n", "\n", ""):
                         break
                     name, _, value = h.partition(":")
-                    if name.lower() == "user-agent":
+                    if name.lower() == "host":
+                        host = value.strip()
+                    elif name.lower() == "user-agent":
                         agent = value.strip()
                     elif name.lower() == "connection" and "close" in value.lower():
                         close = True
                 log.info("lobby query server=%s %s from %s agent=%r", server_id, path, peer, agent)
                 if AC_AGENT in agent.lower() and path.startswith(("/INFO", "/JSON")):
                     ac_seen(peer)
-                with Session(engine) as sess:
-                    s = sess.get(Server, server_id)
+                def get_server():
+                    with Session(engine) as sess:
+                        return sess.get(Server, server_id)
+                s = await asyncio.to_thread(get_server)
                 inst = supervisor.get(server_id)
                 internal = _ports(s.base_port)["http_internal"]
                 running = bool(inst and inst.running)
                 ctype = "text/plain; charset=utf-8"
-                if path.startswith("/api/details"):
+                if path == "/loading-image":
+                    data = await asyncio.to_thread(_loading_image, server_id)
+                    ctype = "image/png"
+                elif path.startswith("/api/details"):
                     ctype = "application/json; charset=utf-8"
                     live = await asyncio.to_thread(_upstream, internal, "/INFO") if running else None
-                    data = _dump(details(s, live)).encode()
+                    advertised = urlsplit(settings.public_url).hostname if settings.public_url else ""
+                    hostname, sep, given_port = host.rpartition(":")
+                    is_valid_host = False
+                    if sep and given_port == str(_ports(s.base_port)["http"]):
+                        if advertised and hostname.lower() == advertised.lower():
+                            is_valid_host = True
+                        else:
+                            try:
+                                ip = ipaddress.ip_address(hostname)
+                                is_valid_host = not (ip.is_multicast or ip.is_unspecified or (ip.is_loopback and peer not in ("127.0.0.1", "::1")))
+                            except ValueError:
+                                is_valid_host = bool(re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?", hostname)) and ".." not in hostname
+                    image_host = host if is_valid_host else ""
+                    data = _dump(await asyncio.to_thread(details, s, live, image_host)).encode()
                 elif running and path.startswith(("/INFO", "/JSON")):   # the real acServer answers (only what the lobby asks: this port has no login); its own HTTP port number is swapped for ours in /INFO
                     data = await asyncio.to_thread(_upstream, internal, path)
                     if path.startswith("/INFO") and data:
@@ -219,8 +314,14 @@ def _http_handler(server_id: int, ac_seen):
                         except ValueError:
                             pass
                 else:
-                    body = _dump(lobby_info(s, facade_info(s))) if path.startswith("/INFO") else _dump(facade_cars(s, unquote(path.partition("?")[0]).partition("|")[2])) if path.startswith("/JSON") else ""
-                    data = body.encode()
+                    if path.startswith("/INFO"):
+                        body = await asyncio.to_thread(facade_info, s)
+                        data = _dump(lobby_info(s, body)).encode()
+                    elif path.startswith("/JSON"):
+                        body = await asyncio.to_thread(facade_cars, s, unquote(path.partition("?")[0]).partition("|")[2])
+                        data = _dump(body).encode()
+                    else:
+                        data = b""
                 date = formatdate(usegmt=True)
                 writer.write(f"HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {len(data)}\r\nContent-Type: {ctype}\r\n".encode()
                              + (b"Connection: close\r\n" if close else b"") + b"\r\n" + data)

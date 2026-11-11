@@ -137,7 +137,7 @@ def remove_member(championship_id: int, guid: str, sess: SessionDep) -> None:
     sess.commit()
 
 
-def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
+def session_for(sess: Session, ev: Event, at: float, *, notify: bool = True) -> SessionIn:
     """The event's session as it must be loaded at `at` (unix s): for a league event, the roster's eligible drivers as a locked
     entry list; for any other event, the saved session untouched. 409 when nobody is eligible or the roster does not fit."""
     s = SessionIn(**{k: v for k, v in ev.data.items() if k not in ("cuts_rule", "drs_rule")})
@@ -170,9 +170,9 @@ def session_for(sess: Session, ev: Event, at: float) -> SessionIn:
     cars = s.cars or sorted({e.model for e in s.entries})
     if not cars:
         raise HTTPException(422, "a league event needs cars")
-    if suspended:
+    if suspended and notify:
         discord.alert(f"⛔ **{c.name}** · {ev.title}: suspendidos, quedan fuera de la lista: " + ", ".join(m.name or m.guid for m in suspended))
-    if out:
+    if out and notify:
         discord.alert(f"⚠️ **{c.name}** · {ev.title}: quedan fuera de la lista por no cumplir la práctica ({c.practice_laps} vueltas válidas en {c.practice_days} días): "
                       + ", ".join(f"{m.name or m.guid} ({m.laps}/{c.practice_laps})" for m in out))
     ok.sort(key=lambda m: (m.non_racing and m.in_pits, not m.non_racing))   # (the entry list is the grid when there is no qualifying: the pace car goes in front, the casters at the back (they sit in the pits, no gap at the front), not wherever their name falls; stable, so the rest keep their order)
