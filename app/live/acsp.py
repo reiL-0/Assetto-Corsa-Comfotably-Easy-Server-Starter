@@ -513,6 +513,10 @@ class ACSPClient(asyncio.DatagramProtocol):
         from app.stewards import engine   # (late: the detectors read this module's constants)
         engine.on_event(self, event)
 
+    def set_oval(self, oval: bool | None) -> None:
+        """The admin changed the check of the layout being raced (PUT /content/tracks/.../oval): True / False now; None = nothing says it any more, a road layout until the laps show otherwise."""
+        self.oval, self._oval_known = bool(oval), oval is not None
+
     def _look_up_length(self, track: str | None, config: str | None) -> None:
         """The track's own `ui_track.json`, read OFF the event loop (this runs in the datagram callback, on the loop that receives the UDP: a slow disk must not hold it up). The answer counts only if the
         session is still the one that asked."""
@@ -520,7 +524,7 @@ class ACSPClient(asyncio.DatagramProtocol):
 
         def apply(m: float | None, oval: bool | None = None) -> None:
             if self.session is token:
-                if oval is not None and not self._oval_known:
+                if oval is not None:   # (the admin's word, the tags or what an earlier session saw: they outrank what the laps of this one may have said first)
                     self.oval, self._oval_known = oval, True
                 if m is not None:
                     self.length.configured = m

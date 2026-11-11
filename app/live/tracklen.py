@@ -14,6 +14,7 @@ import json
 import math
 import re
 import statistics
+import threading
 from pathlib import Path
 
 MIN_M, MAX_M = 300.0, 40000.0   # a lap shorter or longer than this is not a lap (a kart track to the Nordschleife with room to spare)
@@ -98,15 +99,28 @@ def oval_known(track: str | None, config: str | None) -> bool | None:
     return seen if isinstance(seen, bool) else None
 
 
-def store_detected(track: str | None, config: str | None, oval: bool) -> None:
-    """Remember what the shape detector found, for the next session on this layout. OFF the event loop."""
+_oval_lock = threading.Lock()   # one writer at a time to the two oval rows: this process is the only one that writes them (two PUTs, or two servers' detectors, must not lose each other's key)
+
+
+def update_oval_row(setting_key: str, track: str | None, config: str | None, oval: bool | None) -> None:
+    """Set (or, with None, remove) the oval flag of one layout in one of the two Setting rows. OFF the event loop."""
     from sqlmodel import Session
     from app.db import engine
     from app.models import Setting
-    with Session(engine) as s:
-        row = s.get(Setting, DETECTED_KEY) or Setting(key=DETECTED_KEY, value={})
-        row.value = {**row.value, oval_key(track, config): oval}
+    with _oval_lock, Session(engine) as s:
+        row = s.get(Setting, setting_key) or Setting(key=setting_key, value={})
+        value = dict(row.value)
+        if oval is None:
+            value.pop(oval_key(track, config), None)
+        else:
+            value[oval_key(track, config)] = oval
+        row.value = value
         s.add(row); s.commit()
+
+
+def store_detected(track: str | None, config: str | None, oval: bool) -> None:
+    """Remember what the shape detector found, for the next session on this layout. OFF the event loop."""
+    update_oval_row(DETECTED_KEY, track, config, oval)
 
 
 class LapLength:

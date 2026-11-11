@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from app import catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
-from app.live.tracklen import DETECTED_KEY, OVALS_KEY, oval_auto, oval_key
+from app.live.tracklen import DETECTED_KEY, OVALS_KEY, _setting, oval_auto, oval_key, oval_known, update_oval_row
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -167,22 +167,22 @@ def list_tracks() -> list[dict]:
         layouts = [c for c in configs if c["config"] and (d / c["config"] / "data" / "surfaces.ini").is_file()]
         base = (d / "data" / "surfaces.ini").is_file()  # the track itself (no layout) can be raced
         said, seen = _oval_overrides(OVALS_KEY), _oval_overrides(DETECTED_KEY)
-        for c in configs:   # (oval_auto: what its tags say; oval: what counts, the admin's word over it)
-            key = oval_key(d.name, c["config"])
-            c["oval_auto"] = oval_auto(d, c["config"])   # (its tags: true | false | null when it has none)
-            c["oval_detected"] = seen.get(key)   # (the shape of the laps cars drove on it: true | false | null)
-            c["oval"] = bool(said[key] if isinstance(said.get(key), bool) else c["oval_auto"] if c["oval_auto"] is not None else seen.get(key))
-        tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts)})
+        for c in configs:
+            c.update(_oval_fields(d, c["config"], said, seen))
+        # (a track with only its base layout, or the base of one that has layouts, has no entry in `configs` unless it has a ui_track.json: its «oval» check lives here)
+        tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts), "base_oval": _oval_fields(d, None, said, seen) if base else None})
     return tracks
 
 
+def _oval_fields(d: Path, config: str | None, said: dict, seen: dict) -> dict:
+    """oval_auto: what its tags say (true | false | null: none); oval_detected: what the laps of cars showed (true | false | null); oval: what counts (the admin's word, else the tags, else the laps)."""
+    key = oval_key(d.name, config)
+    auto = oval_auto(d, config)
+    return {"oval_auto": auto, "oval_detected": seen.get(key), "oval": bool(said[key] if isinstance(said.get(key), bool) else auto if auto is not None else seen.get(key))}
+
+
 def _oval_overrides(key: str) -> dict:
-    from app.db import engine
-    from app.models import Setting
-    from sqlmodel import Session
-    with Session(engine) as s:
-        row = s.get(Setting, key)
-    return dict(row.value) if row else {}
+    return _setting(key)   # (guarded: the catalog does not depend on the database being there)
 
 
 def _sha1(p: Path) -> str | None:
@@ -488,20 +488,14 @@ class OvalIn(BaseModel):
 @router.put("/tracks/{track}/oval", dependencies=[Depends(require("admin"))])
 def set_track_oval(track: str, body: OvalIn, config: str | None = None) -> dict:
     """The «oval» check of the catalog, per LAYOUT (Daytona has road, half-course and oval layouts): on an oval the danger warning is off, on a road layout it works (with NASCAR rules or without)."""
-    from app.db import engine
-    from app.models import Setting
-    from sqlmodel import Session
     track, config = _safe(track), (_safe(config) if config else None)
-    key = oval_key(track, config)
-    with Session(engine) as s:
-        row = s.get(Setting, OVALS_KEY) or Setting(key=OVALS_KEY, value={})
-        value = dict(row.value)
-        if body.oval is None:
-            value.pop(key, None)
-        else:
-            value[key] = body.oval
-        row.value = value
-        s.add(row); s.commit()
+    update_oval_row(OVALS_KEY, track, config, body.oval)
+    known = oval_known(track, config)   # (what counts now: the admin's word, else its tags, else the laps seen before)
+    from app import supervisor
+    for inst in supervisor.live():   # a race being run does not wait for its next session: the admin's word reaches it now
+        s = inst.acsp.session or {}
+        if s.get("track") == track and (s.get("track_config") or None) == config:
+            inst.acsp.set_oval(known)
     return {"track": track, "config": config, "oval": body.oval}
 
 
