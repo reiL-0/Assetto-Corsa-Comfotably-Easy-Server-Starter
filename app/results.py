@@ -326,7 +326,6 @@ def apply_penalties(parsed: dict, penalties: list[Penalty], non_racing: frozense
 # --- readable names for the result files (the selectors show these; the file name stays the id) -----------------------------------------------------------------
 _RESULT_NAME = re.compile(r"(\d{4})_(\d{1,2})_(\d{1,2})_(\d{1,2})_(\d{1,2})_([A-Za-z]+)\.json")   # acServer does not zero-pad: 2026_11_11_5_13_RACE.json
 _TYPE_WORD = {"RACE": "Race", "QUALIFY": "Quali", "PRACTICE": "Practice"}
-_SHOW_TZ = ZoneInfo("America/Mexico_City")   # the zone the staff reads the hours in; the label says so
 _track_cache: dict[tuple, str | None] = {}   # (path, mtime_ns, size) -> track; a result file never changes once written. ponytail: unbounded, ~100 bytes per file
 
 
@@ -356,7 +355,8 @@ def result_track(path: Path) -> str | None:
 
 
 def result_label(filename: str, server_name: str, track: str | None, league: str | None, title: str | None) -> str:
-    """«GT3 Fecha 3 · Liga GT · Race · 10/11 15:30 CDMX», or «Servidor · Pista · Quali · 10/11 14:45 CDMX» for a loose result. A name that is not a dated result file is returned as it is."""
+    """«GT3 Fecha 3 · Liga GT · Race», or «Servidor · Pista · Quali» for a loose result: the date is NOT in it, the page adds `started_at` in the browser's own zone.
+    A name that is not a dated result file is returned as it is."""
     m, at = _RESULT_NAME.fullmatch(filename), result_start(filename)
     if not m or not at:
         return filename
@@ -366,7 +366,7 @@ def result_label(filename: str, server_name: str, track: str | None, league: str
         parts.append(league)
     if not title:
         parts.append(track or "pista desconocida")
-    parts += [kind, f"{at.astimezone(_SHOW_TZ):%d/%m %H:%M} CDMX"]
+    parts.append(kind)
     return " · ".join(parts)
 
 
