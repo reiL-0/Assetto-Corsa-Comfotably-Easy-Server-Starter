@@ -100,7 +100,7 @@ def test_applied_cache_uses_snapshot_and_category_not_edited_league():
         schedule.state = "done"
         db.add(schedule); db.commit()
         invalidate_rule_cache(sid)
-        assert neutralization_rule(sid) == {"mode": "off"}
+        assert neutralization_rule(sid)["mode"] == "live", "no event running = the server's own rules: live by default"
 
 
 def test_isolated_slow_car_is_local_and_uses_applied_ratio_and_duration():
@@ -741,3 +741,21 @@ def test_escalated_sc_starts_own_caution_and_ignores_virtual_green(monkeypatch, 
     assert [rc.caution_lap(4, {}, 1100 + i) for i in range(3)] == [None, None, "two"]
     rc.restart_plan(field.snapshot(), 2)
     assert rc.caution_lap(4, {}, 1103) == "one"
+
+
+def test_a_server_without_league_has_neutralization_live_and_its_own_settings_win():
+    from sqlmodel import Session
+    from app.db import engine
+    from app.league import effective_rules, invalidate_rule_cache
+    from app.models import Server
+    with Session(engine) as db:
+        server = Server(name="Neutralization server rules", base_port=15556, rules={"preset": "vrl-base", "neutralization": {"default_mode": "FCY"}})
+        db.add(server); db.commit(); db.refresh(server)
+        sid = server.id
+        invalidate_rule_cache(sid)
+        n = effective_rules(sid)["neutralization"]
+        assert n["mode"] == "live" and n["default_mode"] == "FCY" and n["category"] == "vrl-base"
+        server.rules = {"neutralization": {"mode": "off"}}
+        db.add(server); db.commit()
+        invalidate_rule_cache(sid)
+        assert effective_rules(sid)["neutralization"]["mode"] == "off"

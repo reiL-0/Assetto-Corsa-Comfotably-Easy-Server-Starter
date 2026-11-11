@@ -206,7 +206,7 @@ class SevereRule(_Strict):
 class Neutralization(_Strict):
     """Automatic incident escalation. Missing categories use default_mode; off does nothing."""
 
-    mode: Literal["off", "shadow", "live"] = "off"
+    mode: Literal["off", "shadow", "live"] = "live"   # (live by default, like every rule of a server: a rulebook that saved `off` or `shadow` keeps it)
     default_mode: Literal["VSC", "FCY"] = "VSC"
     mode_by_category: dict[Annotated[str, StringConstraints(max_length=64)], Literal["VSC", "FCY"]] = Field(default_factory=dict, max_length=100)
     max_auto_time_penalty_s: int = Field(default=10, ge=1, le=60)
@@ -219,7 +219,6 @@ class Neutralization(_Strict):
     pileup: PileupRule = Field(default_factory=PileupRule)
     severe: SevereRule = Field(default_factory=SevereRule)
     stale_telemetry_s: float = Field(default=1.5, gt=0, le=10)
-
 
 class Rulebook(_Strict):
     schema_version: Literal[1] = SCHEMA_VERSION

@@ -313,11 +313,16 @@ def effective_rules(server_id: int) -> dict:
             give_back = {"seconds": gb.seconds, "window_s": gb.window_s} if gb.enabled and (rb is not None or "give_back" in set_here) else None
             drs = (_ManualDrsRule(det.drs.model_dump()) if drs_from_server else det.drs.model_dump()) if det.drs else None
             modes = det.flags.model_dump() if (rb is not None or "flags" in set_here) else {k: settings.flag_modes_default for k in FLAG_MODE_KINDS}
-            neutral = {"mode": "off"}
             if rb:
                 neutral = rb.neutralization.model_dump()
-                neutral["category"] = (server.session or {}).get("category", "") if server else ""
                 neutral["rulebook_revision"] = (server.session or {}).get("rulebook_revision") if server else None
+            else:   # no league: the category preset under the server's own settings (live by default, like every other rule of the server)
+                from app.rulebook import PRESETS, Neutralization
+                srules = (server.rules or {}) if server else {}
+                preset = PRESETS.get(srules.get("preset") or "")
+                neutral = Neutralization.model_validate(_deep_merge(preset.neutralization.model_dump() if preset else {}, srules.get("neutralization") or {})).model_dump()
+                neutral["rulebook_revision"] = None
+            neutral["category"] = (server.session or {}).get("category") or (server.rules or {}).get("preset") or "" if server else ""
         out = {"cut": cut_rule, "give_back": give_back, "drs": drs, "flag_rules": {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}, "flag_modes": modes, "neutralization": neutral}
         if len(_EFFECTIVE) > 64:
             _EFFECTIVE.clear()

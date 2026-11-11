@@ -312,13 +312,14 @@ def set_csp_scripts(server_id: int, body: CspScriptsIn, sess: SessionDep) -> Ser
 class RulesIn(BaseModel):
     preset: str | None = None   # a rulebook preset name (GET /championships/rulebook/presets) the server starts from; None = the defaults
     detectors: dict = Field(default_factory=dict)   # only what this server changes over the preset: {drs: {...}, cuts: {...}, flags: {yellow: "off"}, blue: {...}, ...} (app/rulebook.py Detectors)
+    neutralization: dict = Field(default_factory=dict)   # the automatic VSC/FCY/SC over the preset: {mode: "off", default_mode: "FCY", mode_by_category: {...}, pileup: {...}} (app/rulebook.py Neutralization; live by default)
 
 
 def _rules_view(s: Server) -> dict:
     from app import league
     from app.rulebook import PRESETS
     det, _ = league.server_detectors(s)
-    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "effective": det.model_dump(), "presets": sorted(PRESETS)}
+    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "neutralization": (s.rules or {}).get("neutralization") or {}, "effective": det.model_dump(), "effective_neutralization": league.effective_rules(s.id)["neutralization"], "presets": sorted(PRESETS)}
 
 
 @router.get("/{server_id}/rules")
@@ -333,20 +334,21 @@ def set_rules(server_id: int, body: RulesIn, sess: SessionDep) -> dict:
     """Replace this server's rules. Refused while a race is running on it (a rule must not change under the drivers); the live race control reads the new ones within 30 s."""
     from pydantic import ValidationError
     from app import league
-    from app.rulebook import PRESETS, Detectors
+    from app.rulebook import PRESETS, Detectors, Neutralization
     s = _get(sess, server_id)
-    if len(json.dumps(body.detectors)) > 20000:
+    if len(json.dumps(body.detectors)) > 20000 or len(json.dumps(body.neutralization)) > 5000:
         raise HTTPException(422, "rules too large")
     if body.preset is not None and body.preset not in PRESETS:
         raise HTTPException(422, f"unknown preset {body.preset!r}")
     try:
         Detectors.model_validate(league._deep_merge(PRESETS[body.preset].detectors.model_dump() if body.preset else {}, body.detectors))
+        Neutralization.model_validate(league._deep_merge(PRESETS[body.preset].neutralization.model_dump() if body.preset else {}, body.neutralization))
     except ValidationError as e:
         raise HTTPException(422, str(e.errors(include_url=False, include_context=False)[:3])) from e
     inst = supervisor.get(server_id)
     if inst and inst.running and inst.acsp and (inst.acsp.session or {}).get("session_type") == 3:
         raise HTTPException(409, "race in progress: the rules are frozen")
-    s.rules = {"preset": body.preset, "detectors": body.detectors} if (body.preset or body.detectors) else None
+    s.rules = {"preset": body.preset, "detectors": body.detectors, "neutralization": body.neutralization} if (body.preset or body.detectors or body.neutralization) else None
     sess.add(s)
     sess.commit()
     sess.refresh(s)

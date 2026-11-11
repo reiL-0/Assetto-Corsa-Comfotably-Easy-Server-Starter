@@ -172,3 +172,16 @@ def test_a_server_with_no_rulebook_takes_its_default_modes_from_the_deployment(m
         league._EFFECTIVE.clear()
         assert set(league.flag_modes(987001).values()) == {default}, default
     league._EFFECTIVE.clear()
+
+
+def test_danger_warns_earlier_the_faster_the_driver_comes_and_for_a_crawling_car():
+    af = AutoFlags()
+    run(af, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 200.0}, now=90.0)   # (car 1 was racing)
+    for i in range(5):   # car 1 crawls at 18 km/h (a wreck along a wall); car 2 comes at 200 km/h, 550 m behind
+        run(af, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 200.0}, now=96.0 + i)
+    assert af.danger == {(2, 1): 550}, "550 m is more than 400 m but less than 10 s at 200 km/h (555 m)"
+    af2 = AutoFlags()
+    run(af2, {1: 1000.0, 2: 450.0}, {1: 150.0, 2: 100.0}, now=90.0)
+    for i in range(5):
+        run(af2, {1: 1000.0, 2: 450.0 + i}, {1: 18.0, 2: 100.0}, now=96.0 + i)
+    assert af2.danger == {}, "at 100 km/h 550 m is still too far (278 m of road in 10 s, the floor is 400 m)"

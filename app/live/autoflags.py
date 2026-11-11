@@ -1,4 +1,4 @@
-"""The flags that need no director: the BLUE flag (a car about to lap you is close behind) and the DANGER warning (a stopped car ahead of you, N metres). SHADOW only: it decides and writes
+"""The flags that need no director: the BLUE flag (a car about to lap you is close behind) and the DANGER warning (a stopped or crawling car ahead of you, N metres). SHADOW only: it decides and writes
 down what it WOULD show; nothing reaches a screen until the contract carries it.
 
 Plain state, no I/O: the monitor feeds `step` the field samples (app/live/field.py), the speeds (km/h), the cars in the pit lane and the track length (app/live/tracklen.py). Distances are
@@ -17,8 +17,8 @@ from collections import deque
 from app.live.field import Sample, ring
 
 BLUE_ON_M, BLUE_OFF_M = 150.0, 250.0
-DANGER_M, ROUND_M = 400.0, 10.0
-STOP_KMH, STOP_S = 5.0, 3.0           # a car under 5 km/h for 3 s that was racing is a stopped car
+DANGER_M, DANGER_S, DANGER_MAX_M, ROUND_M = 400.0, 10.0, 900.0, 10.0   # the warning starts at least 400 m away, and earlier the faster the driver comes: 10 s of road (blind corners), 900 m at most
+STOP_KMH, STOP_S = 25.0, 2.0          # a car under 25 km/h for 2 s that was racing is a hazard (a wreck creeping along a wall at 17-20 km/h is not "stopped" but nobody can pass it)
 MOVING_KMH = 30.0
 TRUST_S, FRESH_S = 2.0, 1.5           # progress continuous for 2 s and updated within 1.5 s
 LOG_MAX = 200
@@ -102,7 +102,7 @@ class AutoFlags:
                 if d == s or d in stopped or speeds.get(d, 0.0) < MOVING_KMH:
                     continue
                 m = ring(ok[s].progress - sd.progress) * length   # metres S is ahead of D (negative: behind)
-                if 0.0 <= m <= DANGER_M:
+                if 0.0 <= m <= min(max(DANGER_M, speeds[d] / 3.6 * DANGER_S), DANGER_MAX_M):
                     danger[(d, s)] = int(round(m / ROUND_M) * ROUND_M)
         self._diff("blue", self.blue, blue if self.modes["blue"] != "off" else {}, now)
         self._diff("danger", self.danger, danger if self.modes["danger"] != "off" else {}, now)
