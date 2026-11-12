@@ -287,3 +287,19 @@ def test_live_sector_splits_computed_and_serialized():
     assert splits["0"]["Cuts"] == 0
 
 
+
+
+def test_potential_lap_is_the_sum_of_the_best_sector_of_each_valid_lap():
+    NS = 1_000_000
+    b = _board()
+    def lap(ms, r1, r2, cuts=0):   # pending = what the sector tracker leaves at the line: the share of S1 and S2
+        b._sector_track[0] = {"pending": (r1, r2)}
+        b.apply({"type": "lap_completed", "car_id": 0, "laptime_ms": ms, "cuts": cuts, "grip_level": 1.0,
+                 "leaderboard": [{"car_id": 0, "laptime_ms": ms, "laps": 1, "has_completed": False}]})
+    car = lambda: b.leaderboard()["ConnectedDrivers"][0]["Cars"]["bmw_m3_e30"]
+    lap(100_000, 0.30, 0.40)   # 30 / 40 / 30 s
+    assert car()["PotentialLap"] == 100_000 * NS
+    lap(101_000, 0.28, 0.41)   # S1 28.28, S2 41.41, S3 31.31 s: only S1 is better
+    assert car()["PotentialLap"] == (28_280 + 40_000 + 30_000) * NS
+    lap(90_000, 0.20, 0.40, cuts=1)   # a lap with cuts gives no sector
+    assert car()["PotentialLap"] == (28_280 + 40_000 + 30_000) * NS

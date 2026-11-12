@@ -28,6 +28,7 @@ class Driver:
     best_valid_ms: int = 0
     kept_ms: int = 0  # best lap brought from the practice kept across an idle stop (app/practicekeep.py): the server's own table starts empty and must not lower it
     best_splits: list[int] = field(default_factory=list)  # [s1_ms, s2_ms, s3_ms] for best_ms
+    best_sectors: list[int] = field(default_factory=list)  # [s1, s2, s3]: the quickest of each sector over the valid laps (not all from one lap); their sum is the potential lap
     pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     spline: float = 0.0
 
@@ -48,7 +49,7 @@ class LiveBoard:
     @staticmethod
     def _reset(d: Driver) -> None:
         d.best_ms = d.last_ms = d.laps = d.total_ms = d.kept_ms = 0
-        d.best_splits = []
+        d.best_splits, d.best_sectors = [], []
         d.top_kmh = 0.0
         d.valid_laps, d.best_valid_ms = None, 0
 
@@ -183,6 +184,8 @@ class LiveBoard:
                 d.valid_laps = (d.valid_laps or 0) + valid
                 if valid:
                     d.best_valid_ms = min(d.best_valid_ms or NO_TIME, lap_ms)
+                    if lap_splits:
+                        d.best_sectors = [min(a, b) for a, b in zip(d.best_sectors, lap_splits)] if len(d.best_sectors) == 3 else list(lap_splits)
                 if not e.get("leaderboard"):  # fallback if acServer emits no leaderboard rows
                     if 0 < lap_ms < NO_TIME:
                         old_best = d.best_ms
@@ -212,6 +215,7 @@ class LiveBoard:
             "1": {"SplitTime": d.best_splits[1] * NS, "Cuts": 0},
             "2": {"SplitTime": d.best_splits[2] * NS, "Cuts": 0},
         } if len(d.best_splits) == 3 and 0 < d.best_ms < NO_TIME else {}
+        potential = sum(d.best_sectors) * NS if len(d.best_sectors) == 3 else 0   # (ours, not ACSM's) the best sectors added up
         return {
             "CarInfo": {
                 "DriverName": d.name, "DriverGUID": d.guid, "DriverInitials": "", "TeamName": "",
@@ -226,6 +230,7 @@ class LiveBoard:
                 d.model: {
                     "BestLap": best_lap, "LastLap": last_lap, "NumLaps": d.laps,
                     "TotalLapTime": d.total_ms * NS, "BestLapSplits": splits, "TopSpeedBestLap": round(d.top_kmh),
+                    **({"PotentialLap": potential} if potential else {}),
                     **({"ValidLaps": d.valid_laps, "BestValidLap": best_valid} if d.valid_laps is not None else {}),   # (ours, not ACSM's: the lobby page shows the valid laps and the quickest of them)
                 }
             },
