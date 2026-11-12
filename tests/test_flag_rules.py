@@ -68,12 +68,14 @@ def test_a_damaged_car_gets_the_disc_then_the_black_flag_then_the_disqualificati
     rc.lap_done(5, 100000, 0, 5, 1030.0, "G5")
     assert rc.meatball["G5"]["laps"] == 1
     rc.lap_done(5, 100000, 0, 6, 1130.0, "G5")
-    assert "G5" not in rc.meatball and rc.black["G5"]["laps"] == 2, "two laps without the pits: the black flag"
+    assert "G5" not in rc.meatball and "G5" not in rc.black, "two laps without the pits: NO automatic black flag (it is the director's)"
+    assert rc.show_black(5) and rc.black["G5"]["laps"] == 2, "the director shows it: two laps to come in"
     rc.lap_done(5, 100000, 0, 7, 1230.0, "G5")
     rc.lap_done(5, 100000, 0, 8, 1330.0, "G5")
     [o] = offences(rc)
     assert (o["kind"], o["step"]) == ("black", "dsq") and [(r["kind"], r["seconds"]) for r in rcmod.pending_flag_dues()] == [("black", 0)], "a black flag not obeyed: disqualified"
     assert not rc.penalties, "no drive-through for it"
+    assert "G5" in rc.disqualified, "disqualified: out of the server, and he cannot come back to it"
     rcmod._flag_dues_pending.clear()
     rc = rc_with(); rules(rc)   # serving it: a pit-lane pass; and a stale report is no report
     rc.damage_report(5, 90, 1000.0)
@@ -103,6 +105,8 @@ def test_conduct_builds_to_black_and_white_then_black_and_a_pit_visit_starts_it_
     assert rc.auto_for(1, 0, 1.0)["bw"] == {"n": 2}, "the warning: no sanction"
     rc.conduct_add("G1", 1)
     rc.conduct_add("G1", 1)
+    assert "G1" not in rc.black and "black" not in (rc.auto_for(1, 0, 1.0) or {}), "conduct never gives the black flag by itself"
+    assert rc.show_black(1)   # the director does
     a = rc.auto_for(1, 0, 1.0)
     assert {k: v for k, v in rc.black["G1"].items() if k != "since"} == {"car": 1, "laps": 2} and a["black"] == {"laps": 2} and "bw" not in a
     rc.report_pit(1, True, now=rc.clock.time() + 1)
@@ -121,7 +125,7 @@ def test_a_sanction_of_any_rule_counts_as_conduct():
     rcmod._flag_dues_pending.clear()
 
 
-def test_red_flag_sends_the_black_flag_to_whoever_does_not_come_in_before_the_lap_ends():
+def test_red_flag_not_obeyed_gives_no_automatic_black_flag():
     rcmod._flag_dues_pending.clear()
     rc = rc_with(); rules(rc, red={"laps": 1})
     rc.set_red(True, now=1000.0)
@@ -131,7 +135,7 @@ def test_red_flag_sends_the_black_flag_to_whoever_does_not_come_in_before_the_la
     assert rc.auto_for(2, 0, 1.0)["red"] == {"laps": 1, "pit": True}
     rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")   # car 1 finished its lap on the track: the black flag
     rc.lap_done(2, 100000, 0, 5, 1050.0, "G2")   # car 2 had come in: it obeyed
-    assert "G1" in rc.black and "G2" not in rc.black
+    assert "G1" not in rc.black and "G2" not in rc.black, "not obeyed: still no automatic black flag"
     rc.set_flag("checkered"); rc.set_flag("green")
     assert rc.red_since is not None and "red" in (rc.auto_for(3, 0, 1.0) or {}), "the red flag goes with any track flag"
     rc.set_red(False)
@@ -155,7 +159,7 @@ def test_a_flag_is_served_only_by_a_pit_visit_after_it_was_given_and_a_full_ledg
     rc = rc_with(); rules(rc, black={"bw_at": 1, "black_at": 2})
     rc.report_pit(1, True, now=rc.clock.time())   # already in the pit lane when the flag comes
     rc.conduct_add("G1", 1); rc.conduct_add("G1", 1)
-    assert "G1" in rc.black
+    assert "G1" not in rc.black and rc.show_black(1) and "G1" in rc.black
     rc.report_pit(1, True, now=rc.clock.time() - 1)   # (the same pass reported again, before the flag: not a new visit)
     assert "G1" in rc.black, "a car that was in the pits when it got the black flag has to come in again"
     rc.report_pit(1, True, now=rc.clock.time() + 5)
@@ -196,9 +200,9 @@ def test_the_car_about_to_cross_the_line_when_the_red_comes_is_excused_that_cros
     assert rc.red_ref["lap"] == 3
     rc.lap_done(1, 100000, 0, 4, 1005.0, "G1")   # car 1 crossed the line under red, it could not have come in
     rc.lap_done(2, 100000, 0, 3, 1050.0, "G2")   # car 2 had a whole lap: nothing came in -> black
-    assert "G1" not in rc.black and "G2" in rc.black
+    assert "G1" not in rc.black and "G2" not in rc.black, "nothing gives the black flag by itself"
     rc.lap_done(1, 100000, 0, 5, 1100.0, "G1")   # its next crossing counts
-    assert "G1" in rc.black
+    assert "G1" not in rc.black
     rcmod._flag_dues_pending.clear()
 
 

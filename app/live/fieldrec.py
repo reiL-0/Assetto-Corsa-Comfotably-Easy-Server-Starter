@@ -46,6 +46,7 @@ EXCLUDED = {
     "damage_report": "Client-reported damage for the orange disc: evidence from the driver's game, not field data",
     "set_red": "The director's red flag: a manual input, not field data",
     "conduct_add": "Conduct counter fed by sanctions already decided elsewhere; not detector input",
+    "show_black": "The director shows the black flag: a manual input, not field data",
     "drs_tick": "DRS window from laps, flag and weather; no field judge reads it (app/live/drs.py)",
     "drs_use": "Client evidence of DRS use, sanctioned from the window state; not field data",
     "configure_nascar": "Arms NASCAR; armed NASCAR tapes are explicitly rejected",

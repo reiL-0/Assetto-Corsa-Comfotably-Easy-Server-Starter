@@ -173,6 +173,8 @@ def _flag_messages(inst, rc) -> None:
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
         elif kind == "black":
             _say(rc, "DESCALIFICADO: ignoraste la bandera negra", "penalty", car)
+            if str((inst.acsp.cars.get(car) or {}).get("driver_guid") or "") in rc.disqualified:   # (a race: out of the server; if he connects again acsp.py kicks him again)
+                inst.acsp.send(acsp.encode_kick_user(car))
 
 
 def blue_stale_servers() -> list[int]:
@@ -690,8 +692,8 @@ class FlagNoticeIn(BaseModel):
 
 @control_router.post("/flag-notice")
 def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
-    """A flag shown by hand: blue, black-and-white, black, orange disc and track limits go to ONE driver; the double yellow and the red to everybody. Only a notice: no penalty is set (the black flag
-    here does not make the game's own black flag, and the red does not stop the session)."""
+    """A flag shown by hand: blue, black-and-white, black, orange disc and track limits go to ONE driver; the double yellow and the red to everybody. Only a notice, except the BLACK flag: nothing gives it
+    by itself, the director's one is real (laps to come into the pits, then disqualification: out of the server for the rest of the race). It does not make the game's own black flag; the red does not stop the session."""
     if body.kind in PER_DRIVER and body.car_id is None:
         raise HTTPException(422, "esta bandera es para un piloto: indica car_id")
     _, rc = _control(server_id, sess)
@@ -704,6 +706,8 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
         if rc.red_ref and inst:
             top = " · ".join(f"{i + 1} {_name(inst, c)}" for i, c in enumerate(rc.red_ref["order"][:10]))
             _say(rc, f"ORDEN DE REINICIO (vuelta {rc.red_ref['lap']}): {top}", "race", hold="red-order")
+    if body.kind == "black" and rc.show_black(body.car_id):   # (the black flag of the director is a real one: laps to come into the pits or disqualification; nothing else shows it)
+        log.info("black flag shown by the director to car %s", body.car_id)
     _say(rc, FLAG_NOTICES[body.kind], "flag", -1 if body.car_id is None else body.car_id)
     log.info("flag-notice %s to %s", body.kind, body.car_id)
     return rc.snapshot()

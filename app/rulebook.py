@@ -133,8 +133,9 @@ class MeatballRule(_Strict):
 
 
 class BlackRule(_Strict):
-    """BLACK AND WHITE then BLACK. Every sanction a driver earns in the race (from the flags, DRS, the cuts ladder) is a conduct offence: at `bw_at` of them the black-and-white flag warns him (no sanction), at `black_at` he
-    gets the BLACK flag (also from an orange disc or a red flag that was not obeyed): he must come into the pits within `pit_laps` laps (the counter starts again) or he is DISQUALIFIED from the race."""
+    """BLACK AND WHITE then BLACK. Every sanction a driver earns in the race (from the flags, DRS, the cuts ladder) is a conduct offence: at `bw_at` of them the black-and-white flag warns him (no sanction), at `black_at` it is only
+    written down (audit): the BLACK flag is never given by itself (nor by an orange disc or a red flag that was not obeyed), only the race director shows it. He must come into the pits within `pit_laps`
+    laps or he is DISQUALIFIED from the race: out of the server, and he cannot come back to it."""
 
     bw_at: int = Field(default=3, ge=1, le=20)
     black_at: int = Field(default=6, ge=2, le=40)
