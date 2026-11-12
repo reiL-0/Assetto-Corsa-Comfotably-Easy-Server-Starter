@@ -479,7 +479,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "black_proposals": [], "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
