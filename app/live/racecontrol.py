@@ -1014,6 +1014,14 @@ class RaceControl:
                 if lead in progress and GO_ARM_FROM <= progress[lead] % 1.0 <= GO_ARM_TO:
                     self.go_armed = True
                     self.audit("restart_armed", leader=lead, progress=progress[lead], executed=True)
+            if self._is_race():   # (every server, NASCAR or not: a car that spins or stops on the track goes to the back of the restart line)
+                pace_kmh = speeds.get(self.pace_car) if self.pace_car is not None else max(speeds.values(), default=None)
+                exempt_now = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
+                for car in c.check_spins(speeds, pace_kmh, exempt_now, self.without_pace_car(progress), now):
+                    out.append(("spun", car))
+                    self.audit("caution_spin", car=car, executed=True)
+                if out:
+                    self._bump()
             if c.pace_only:
                 return out   # (practice behind a pace car: nobody is judged)
             if c.free_pass is not None and c.free_pass in c.pitted:

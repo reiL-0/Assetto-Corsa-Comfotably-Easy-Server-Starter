@@ -1445,3 +1445,35 @@ def test_the_frozen_order_notice_says_behind_whom_and_follows_a_car_that_goes_in
     adapter.line_up_notices(inst, rc, dict(client.field.progress))
     assert ('ORDEN CONGELADO: P2 · detrás de Ana', 5) in said() and ('ORDEN CONGELADO: P3 · detrás de Cleo', 4) in said()
     assert ('ORDEN CONGELADO: P3 · detrás de Beto', 5) not in said(), 'the old text is replaced, not left beside the new one'
+
+
+def test_a_car_that_spins_under_the_caution_is_told_and_lines_up_last(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'))})
+    for car, spline in ((3, 0.50), (4, 0.48), (5, 0.46)):
+        client.field.update(car, spline, 9)
+        client.field.completed_laps[car] = 9
+    rc.set_flag('yellow', field=client.field)
+    for t in (100.0, 101.0, 103.5):   # Beto stops on the track while the others roll (the pace car is not in the test: the fastest car says the field rolls)
+        adapter.nascar_actions(sid, rc, rc.caution_tick(dict(client.field.progress), {3: 60, 4: 2, 5: 60}, t))
+    assert ('TROMPO: te formas al final de la fila', 4) in {(n['text'], n['to']) for n in rc.snapshot()['notices']}
+    assert rc.caution.line_up() == [3, 5, 4], 'no contact needed: he lines up last'
+
+
+def test_the_free_pass_car_is_told_to_go_to_the_back_when_it_crosses_the_line(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'))})
+    for car, spline, laps in ((3, 0.50, 9), (4, 0.48, 9), (5, 0.30, 8)):
+        client.field.update(car, spline, laps)
+        client.field.completed_laps[car] = laps
+    rc.set_flag('yellow', field=client.field)
+    assert rc.caution.free_pass == 5 and rc.caution.line_up() == [3, 4, 5]
+    adapter.auto_caution(sid, rc, 3)
+    assert not rc.caution.free_crossed, 'another car crossing says nothing to the free pass car'
+    adapter.auto_caution(sid, rc, 5)
+    assert rc.caution.free_crossed and rc.caution.line_up() == [3, 4, 5]
+    assert ('FREE PASS: ponte al final de la fila', 5) in {(n['text'], n['to']) for n in rc.snapshot()['notices']}

@@ -295,3 +295,34 @@ def test_a_car_lining_up_behind_the_pace_car_before_the_leader_is_told_to_form_b
     assert c.early_formers({1: 5.13, 2: 5.10, 3: 4.60}, 5.15, order) == {}, "the leader is the first behind the pace car: the field is forming right"
     assert c.early_formers({1: 5.20, 2: 5.13, 3: 4.60}, 5.15, order) == {}, "the leader is already ahead of the pace car: nothing to say"
     assert c.early_formers(prog, None, order) == {}, "no pace car, no notice"
+
+
+def test_a_car_that_spins_or_stops_on_the_track_goes_to_the_very_back_with_or_without_contact():
+    c = Caution(field(5.20, 5.18, 5.16, 5.14), 0.0)   # cars 1..4
+    prog = dict(c.p0)
+    rolling = {1: 60.0, 2: 60.0, 3: 60.0, 4: 60.0}
+    assert c.check_spins(rolling, 60.0, set(), prog, 10.0) == []
+    stopped = {**rolling, 2: 3.0}
+    assert c.check_spins(stopped, 60.0, set(), prog, 11.0) == [], "slow for a moment: not yet a spin"
+    assert c.check_spins(stopped, 60.0, set(), prog, 14.0) == [2], "stopped for SPIN_HOLD: it spun"
+    assert c.line_up() == [1, 3, 4, 2], "car 2 spun: it lines up last, the others close the gap"
+    assert c.check_spins({**stopped, 3: 2.0}, 60.0, set(), prog, 20.0) == [] and c.check_spins({**stopped, 3: 2.0}, 60.0, set(), prog, 23.0) == [3]
+    assert c.line_up() == [1, 4, 2, 3], "the first to spin is ahead of the second one at the back"
+
+
+def test_a_stopped_car_is_not_a_spin_in_the_pits_behind_a_stopped_pace_car_or_when_it_joined_late():
+    c = Caution(field(5.20, 5.18), 0.0)
+    prog = {**c.p0, 9: 5.0}
+    assert c.check_spins({1: 60.0, 2: 0.0, 9: 0.0}, 0.0, set(), prog, 0.0) == [] and c.check_spins({1: 0.0, 2: 0.0}, 0.0, set(), prog, 10.0) == [], "the pace car waits: so does everybody"
+    assert c.check_spins({1: 60.0, 2: 0.0}, 60.0, {2}, prog, 20.0) == [] and c.check_spins({1: 60.0, 2: 0.0}, 60.0, {2}, prog, 30.0) == [], "in the pit lane"
+    assert c.check_spins({1: 60.0, 9: 0.0}, 60.0, set(), prog, 40.0) == [] and c.check_spins({1: 60.0, 9: 0.0}, 60.0, set(), prog, 50.0) == [], "joined after the yellow"
+
+
+def test_the_lapped_cars_form_where_they_were_and_the_free_pass_goes_to_the_back_when_it_crosses_the_line():
+    c = Caution(field(5.20, 5.18, 4.30, 5.10, 4.20), 0.0, completed_laps={1: 5, 2: 5, 3: 4, 4: 5, 5: 4})   # 3 and 5 are a lap down; 3 is the free pass
+    assert c.free_pass == 3
+    assert c.line_up() == [1, 2, 4, 3, 5], "the lapped cars stay where they were at the yellow, between the same cars"
+    c.free_crossed = True
+    assert c.line_up() == [1, 2, 4, 5, 3], "the free pass crossed the line: the very back"
+    c.spun.append(2)
+    assert c.line_up() == [1, 4, 5, 3, 2], "a spin goes behind even the free pass car"
