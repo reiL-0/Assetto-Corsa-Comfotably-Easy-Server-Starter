@@ -476,3 +476,16 @@ class PracticeKeep(SQLModel, table=True):
     server_id: int = Field(primary_key=True)
     grip: float | None = None   # grip_level of the last practice lap, 0..1
     drivers: list = Field(default_factory=list, sa_type=JSON)   # [{guid, name, model, skin, best_ms, best_valid_ms, laps, valid_laps}]
+
+
+class TrackRecord(SQLModel, table=True):
+    """The best valid lap (no cuts) of a driver on a track layout with a car, from any session of any server of this manager (app/records.py)."""
+    __tablename__ = "track_records"
+
+    track: str = Field(primary_key=True)
+    track_config: str = Field(default="", primary_key=True)   # "" = the track has no layouts
+    car_model: str = Field(primary_key=True)
+    guid: str = Field(primary_key=True)
+    name: str = ""
+    best_ms: int
+    set_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

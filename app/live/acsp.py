@@ -434,6 +434,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             if (self.session or {}).get("session_type") == 1 and not self.keep_off:   # the practice is kept across an idle stop (app/practicekeep.py)
                 from app import practicekeep
                 practicekeep.save(self.server_id, self.board, event.get("grip_level"))
+            if (rec := self.board._by_car(event["car_id"])) and rec.guid:   # the best valid laps of the track, from any session (app/records.py)
+                from app import records
+                records.submit(self.session.get("track"), self.session.get("track_config"), rec.model, rec.guid, rec.name, event["laptime_ms"], event.get("cuts") or 0)
             from app.live.racecontrol import on_lap, state_of
             from app.racecontrol import nascar_actions  # adapter owns ACSP I/O, like timeline above
             rc0 = state_of(self.server_id, True, self.session)
