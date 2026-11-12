@@ -280,3 +280,15 @@ def test_a_plain_yellow_after_a_red_is_not_a_grid_hold_and_a_second_red_keeps_th
     rc.set_red(False, now=1100.0)
     rc.set_flag("yellow", now=1101.0)   # no pace car, no caution: a plain yellow
     assert rc.caution is None and rc.pass_tick({}, {}, 1.0, 1102.0) == [] and rc.passjudge._flag != rc._red_id
+
+
+def test_a_driver_who_reaches_the_black_flag_by_conduct_is_only_proposed_to_the_director():
+    rc = rc_with(); rules(rc, black={"bw_at": 2, "black_at": 4})
+    for _ in range(3):
+        rc.conduct_add("G1", 1)
+    assert rc.black_view() == [], "not there yet"
+    rc.conduct_add("G1", 1)
+    assert rc.black_view() == [{"car": 1, "conduct": 4}] and "G1" not in rc.black and rc.snapshot()["black_proposals"] == [{"car": 1, "conduct": 4}], "proposed, nothing done"
+    rc.conduct_add("G1", 1)
+    assert len(rc.black_view()) == 1, "still one proposal, not one per sanction"
+    assert rc.show_black(1) and rc.black_view() == [], "the director shows it: no longer a proposal"

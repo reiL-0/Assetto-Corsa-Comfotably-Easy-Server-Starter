@@ -1237,6 +1237,7 @@ class RaceControl:
         if n >= rule["black_at"] and guid not in self.black_proposed:   # (the black flag is the director's: the conduct only writes it down)
             self.black_proposed.add(guid)
             self.audit("black_flag", car=car, driver=guid, conduct=n, why="conduct", executed=False, by="director_only")
+            self._bump()   # (the director's panel shows the proposal)
         if n >= rule["bw_at"] and guid not in self.bw_shown:
             self.bw_shown.add(guid)
             self.flag_new.append({"msg": "bw", "car": car, "n": n})
@@ -1254,6 +1255,12 @@ class RaceControl:
         if guid in self.black and at > self.black[guid]["since"]:
             del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid); self.black_proposed.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
+
+    def black_view(self) -> list[dict]:
+        """The proposals of a black flag for the director: drivers whose conduct reached `black_at` and who still have no black flag (`{car, conduct}`). Nothing is done until the director shows it."""
+        by_guid = {g: c for c, g in self.audit_guids.items()}
+        return [{"car": by_guid[g], "conduct": self.conduct.get(g, 0)} for g in sorted(self.black_proposed)
+                if g in by_guid and g not in self.black and g not in self.disqualified and by_guid[g] != self.pace_car]
 
     def show_black(self, car: int) -> bool:
         """The DIRECTOR shows the black flag to a car: it has `pit_laps` laps to come into the pits or it is disqualified (the only way a black flag is given: no rule gives it by itself). False when the car has no
@@ -1806,7 +1813,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "black_proposals": self.black_view(), **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:
