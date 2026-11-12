@@ -1671,7 +1671,7 @@ class RaceControl:
                 self.cuts_client[car], self.cuts_server[car] = self.cuts_totals[driver_guid]
             else:
                 book[car] = book.get(car, 0) + n
-            if rule and rule.get("ladder") and driver_guid:
+            if rule and rule.get("ladder") and driver_guid and session.get("session_type") != 1:   # practice (1): the cut only invalidates the lap (counted above, never a round); qualifying and race run the ladder
                 size, ladder = rule["max"] + 1, rule["ladder"]
                 total = max(self.cuts_client.get(car, 0), self.cuts_server.get(car, 0))
                 for round_no in range(self.cuts_emitted.get(driver_guid, 0) + 1, total // size + 1):
