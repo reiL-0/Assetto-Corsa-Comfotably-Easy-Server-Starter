@@ -517,21 +517,12 @@ def test_ladder_payload_in_every_session_with_a_ladder(session_type, ladder):
         assert set(view["cuts_rule"]) == {"cap", "max", "per", "step"}
 
 
-def test_practice_cuts_never_run_the_ladder():
-    rc = live_rc.RaceControl({"session_type": 1})
+@pytest.mark.parametrize("session_type", [1, 2])
+def test_practice_and_qualifying_cuts_never_run_the_ladder(session_type):
+    rc = live_rc.RaceControl({"session_type": session_type})
     rc.server_id = 907
     live_rc._cut_dues_pending.clear()
     rc.add_cuts(3, 6, True, {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5]}, "G907")
     assert rc.cuts_client.get(3) == 6, "the cuts still count (lap invalid)"
     assert not rc.penalties and not rc.dt_open and not rc.cuts_emitted and not rc.conduct
-
-
-@pytest.mark.parametrize("session_type", [2])
-def test_a_ladder_round_in_practice_or_qualifying_is_a_live_drive_through_and_never_a_due(session_type):
-    rc = live_rc.RaceControl({"session_type": session_type})
-    rc.server_id = 907
-    live_rc._cut_dues_pending.clear()
-    rc.add_cuts(3, 3, True, {"max": 2, "per": 1, "step": 5, "cap": 600, "ladder": [0, 5]}, "G907")   # a rule that is NOT live-only: the session decides
-    assert rc.penalties and rc.dt_open, "the drive-through is live"
-    assert not live_rc.pending_cut_dues(), "nothing queued for a result: it would count in the race of the same event"
-    assert rc.conduct.get("G907") == 1, "and the offence counts for the conduct (black flag)"
+    assert not live_rc.pending_cut_dues()
