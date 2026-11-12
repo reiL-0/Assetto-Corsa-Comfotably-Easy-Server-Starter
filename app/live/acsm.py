@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from app import csp, practicekeep, supervisor
+from app import csp, practicekeep, records, supervisor
 from app.live.board import LiveBoard
 from app.content import _read_json, _tracks_dir
 
@@ -44,6 +44,22 @@ def kept(server_id: int) -> dict:
     if row:
         practicekeep.seed(board, row.drivers)
     return {"DisconnectedDrivers": board.leaderboard()["DisconnectedDrivers"]}
+
+
+@router.get("/api/live-timings/records.json")
+def track_records(server_id: int) -> dict:
+    """The best valid laps kept for the track this server is set up with: top 10 of each car. Works for a stopped server: it reads the set-up, not the running instance."""
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.models import Server
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+    if not srv:
+        raise HTTPException(404, "not found")
+    conf = (srv.config or {}).get("SERVER", {})
+    track, config = csp.clean_track(str(conf.get("TRACK", ""))), str(conf.get("CONFIG_TRACK", "") or "")
+    return {"Track": track, "TrackConfig": config, "Cars": records.top(track, config)}
 
 
 def _asset(track: str, config: str, rel: str) -> Path:

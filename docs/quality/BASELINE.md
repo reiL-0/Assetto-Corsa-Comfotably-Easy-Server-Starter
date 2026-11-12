@@ -65,6 +65,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | PATCH | `/api/v1/servers/{server_id}` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/acsm/api/live-timings/kept.json` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/acsm/api/live-timings/leaderboard.json` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| GET | `/api/v1/servers/{server_id}/acsm/api/live-timings/records.json` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/acsm/content/tracks/{track}/data/map.ini` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/acsm/content/tracks/{track}/map.png` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/acsm/content/tracks/{track}/{config}/data/map.ini` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
