@@ -837,6 +837,8 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
                 _say(rc, "FREE PASS: pasa al pace car por fuera y ponte al final de la fila", "race", action[1], hold="freepass-car")
             else:
                 _say(rc, "SIN FREE PASS", "race", hold="freepass")
+        elif action[0] == "spun":
+            _say(rc, "TROMPO: te formas al final de la fila", "race", action[1])
         elif action[0] == "break":
             lap = rc.stage_break(crossing is not None)
             _record_stage(server_id, inst, rc)
@@ -1129,6 +1131,13 @@ def auto_caution(server_id: int, rc, car: int) -> None:
     inst = _live(server_id)
     if not inst:
         return
+    with _lock:   # the free pass car crosses the line: it is told to go to the back of the line (the order notices put it there)
+        c = rc.caution
+        free_now = bool(c and car == c.free_pass and not c.free_crossed and rc._is_race())
+        if free_now:
+            c.free_crossed = True
+    if free_now:
+        _say(rc, "FREE PASS: ponte al final de la fila", "race", car, hold="freepass-car")
     if rc.formation:
         if rc.formation_lap(car):
             _say(rc, "VUELTA DE FORMACIÓN COMPLETA: UNA PARA VERDE", "flag")

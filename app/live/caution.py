@@ -32,6 +32,9 @@ GIVE_BACK_HOLD = 2.0  # s behind the passed car again that count as having given
 SLOW_KMH = 15.0       # the car that is passed is this slow or slower: it is stopped, passing it is not a violation
 SLOW_RATIO = 0.6      # ...or this fraction of the passer's speed (a car that went wide and is crawling back: the field going by it is not a violation)
 CASCADE_S = 15.0      # s: two or more cars passing the same car inside this time are for the director, not for the automatic judge (less than GIVE_BACK_MIN: a verdict never comes before the cascade is known)
+SPIN_KMH = 15.0       # a car on the track slower than this while the field is moving has spun (or stopped): it goes to the back of the line
+SPIN_HOLD = 2.0       # s it has to stay that slow (a brake for a car ahead is not a spin)
+FIELD_MOVING_KMH = 40.0   # the pace car (or the fastest car, without one) is at least this fast: the field is rolling, so a stopped car is not just waiting behind a stopped pace car
 FORM_GAP = 0.05      # of a lap: a car this close behind the pace car (and nearer to it than the leader) is lining up behind it before the leader has caught it
 PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader when it is not known (the virtual one)
 
@@ -48,6 +51,9 @@ class Caution:
         self.involved, self.pitted, self.penalised = set(involved), set(pitted), set(penalised)
         self.allowed: set[int] = set()    # cars directed to pass (free pass, wave-around): not violators
         self.violators: set[int] = set()
+        self.free_crossed = False         # the free pass car has crossed the line under this caution: from then on it lines up at the very back
+        self.spun: list[int] = []         # cars that spun or stopped on the track under the caution, in the order it happened: they restart at the very back, with or without contact
+        self._stopped: dict[int, float] = {}   # car -> since when it has been (almost) stopped on the track
         self.pit_ok: set[int] = set(pitted) | set(involved)   # cars that may be in the pit lane: there already when the yellow came out, involved (damaged), or let in by the director
         self.pit_entered: set[int] = set()                    # cars that reported the pit lane without being in pit_ok, not judged yet
         self.pit_broken: set[int] = set()                     # cars already judged for it (once per caution)
@@ -103,7 +109,7 @@ class Caution:
 
     def restart_order(self, waved=(), pitted_exit=()) -> list[int]:
         """The restart order (see the module docstring). `pitted_exit` = the cars that pitted, in the order they left the pits (the rest of the pitted go by frozen order)."""
-        waved, bad = set(waved), self.penalised | self.violators
+        waved, bad = set(waved), self.penalised | self.violators | set(self.spun)
         lapped = set(self.lapped())
         exit_rank = {c: i for i, c in enumerate(pitted_exit)}
         lead = [c for c in self.frozen if c not in lapped and c not in self.involved and c not in bad]
@@ -112,22 +118,45 @@ class Caution:
         down = [c for c in self.frozen if c in lapped and c != self.free_pass and c not in self.involved and c not in waved and c not in bad]
         free = [self.free_pass] if self.free_pass is not None and self.free_pass not in bad else []
         mess = [c for c in self.frozen if c in self.involved and c not in bad] + [c for c in self.frozen if c in waved and c not in self.involved and c not in bad]
-        tail = [c for c in self.frozen if c in bad]
+        tail = [c for c in self.frozen if c in bad and c not in self.spun] + [c for c in self.spun if c in self.frozen]   # (the spun ones last, in the order they spun)
         seen: set[int] = set()
         return [c for c in stayed + pitted + down + free + mess + tail if not (c in seen or seen.add(c))]
 
+    def check_spins(self, speeds: dict[int, float], pace_kmh: float | None, exempt, progress: dict[int, float], now: float) -> list[int]:
+        """Cars that have just spun or stopped on the track while the field rolls (SPIN_KMH for SPIN_HOLD s): they go to the very back, whether or not they touched anybody. Not the cars in the pit lane (reports in
+        `exempt`, or in the pits when the yellow came out / let in), not a car that joined after the yellow, not while the pace car is stopped (the field waits behind it)."""
+        if pace_kmh is None or pace_kmh < FIELD_MOVING_KMH:
+            self._stopped.clear()
+            return []
+        out = []
+        skip = set(exempt) | self.pitted | self.pit_ok | self.pit_entered | self.pit_broken | self.gone | set(self.spun)
+        for c, v in speeds.items():
+            if c in skip or c not in progress or c not in self.p0:
+                self._stopped.pop(c, None)
+            elif v >= SPIN_KMH:
+                self._stopped.pop(c, None)
+            elif now - self._stopped.setdefault(c, now) >= SPIN_HOLD:
+                self.spun.append(c)
+                out.append(c)
+        return out
+
     def line_up(self, in_pits=()) -> list[int]:
-        """The order the field would restart in as it stands now: the restart order (lead lap that stayed out, lead lap that pitted, lapped, free pass, involved, penalised) with the cars that are in the pit lane
-        at this moment at the tail: whoever goes into the pits loses the place, and the car behind moves up behind the one that is now ahead of it."""
-        order, pits = self.restart_order(), set(in_pits)
-        return [c for c in order if c not in pits] + [c for c in order if c in pits]
+        """The line the field forms behind the pace car as it stands now: every car where it was when the yellow came out, the lapped ones too (between the same cars), with the cars that lose the place at
+        the back: the ones in the pit lane at this moment, the penalised and the violators, the free pass car once it has crossed the line (`free_crossed`) and, last of all, the cars that spun or stopped on the
+        track (in the order it happened), with or without contact. The car behind one that leaves simply moves up behind the one that is now ahead of it."""
+        pits, bad = set(in_pits), self.penalised | self.violators
+        free = [self.free_pass] if self.free_crossed and self.free_pass is not None else []
+        back = pits | bad | set(free) | set(self.spun)
+        line = [c for c in self.frozen if c not in back and c not in self.gone]
+        return line + [c for c in self.frozen if c in pits and c not in bad and c not in free and c not in self.spun] + [c for c in self.frozen if c in bad and c not in free and c not in self.spun] \
+            + [c for c in free if c not in self.spun] + [c for c in self.spun if c in self.frozen]
 
     def early_formers(self, progress: dict[int, float], pace_progress: float | None, order: list[int]) -> dict[int, int]:
         """Lead-lap cars lining up behind the pace car BEFORE the leader has reached it (the field forms behind the leader, who is the one that meets the pace car first): {car: the car it has to line up behind}.
         Only a notice, nobody is punished. Lapped, involved, penalised, the free pass and the leader itself are never early; nothing when the leader is already ahead of the pace car."""
         if pace_progress is None:
             return {}
-        lapped, bad = set(self.lapped()), self.penalised | self.violators
+        lapped, bad = set(self.lapped()), self.penalised | self.violators | set(self.spun)
         lead = [c for c in order if c in progress and c not in lapped and c not in self.involved and c not in bad and c != self.free_pass and c not in self.gone]
         if len(lead) < 2:
             return {}
@@ -146,7 +175,7 @@ class Caution:
         self.waved = self.wave_around(progress, pace_progress)
         self.allowed.update(self.waved)
         self.restart = self.restart_order(self.waved)
-        bad = self.penalised | self.violators
+        bad = self.penalised | self.violators | set(self.spun)
         choosers = {c for c in self.restart if c not in self.involved and c not in bad and c not in self.waved and c != self.free_pass}
         return self.restart, self.waved, choosers
 
