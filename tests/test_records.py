@@ -51,3 +51,16 @@ def test_submit_says_false_when_the_database_already_had_a_better_one():
     records.submit("imola", "", "gt3", G1, "Ana", 70_000)
     records._best.clear()
     assert not records.submit("imola", "", "gt3", G1, "Ana", 75_000)
+
+
+def test_backfill_reads_the_result_files_and_skips_laps_with_cuts(tmp_path):
+    import json
+    import sys
+    sys.path.insert(0, "ops")
+    import backfill_records
+    laps = [{"DriverGuid": G2, "DriverName": "Beto", "CarModel": "gt3", "LapTime": 61_000, "Cuts": 0},
+            {"DriverGuid": G2, "DriverName": "Beto", "CarModel": "gt3", "LapTime": 55_000, "Cuts": 2}]
+    (tmp_path / "r.json").write_text(json.dumps({"TrackName": "csp/3898/../brno", "TrackConfig": "", "Laps": laps}))
+    (tmp_path / "bad.json").write_text("{not json")
+    backfill_records.main([str(tmp_path)])
+    assert records.top("brno", "")[0]["laps"][0]["best_ms"] == 61_000
