@@ -1477,3 +1477,23 @@ def test_the_free_pass_car_is_told_to_go_to_the_back_when_it_crosses_the_line(li
     adapter.auto_caution(sid, rc, 5)
     assert rc.caution.free_crossed and rc.caution.line_up() == [3, 4, 5]
     assert ('FREE PASS: ponte al final de la fila', 5) in {(n['text'], n['to']) for n in rc.snapshot()['notices']}
+
+
+def test_the_directors_black_flag_disqualifies_who_ignores_it_and_a_disqualified_driver_is_kicked_and_cannot_come_back(live):
+    sid, client, sent = live
+    guid = client.cars[3]['driver_guid']
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.audit_guids = {3: guid}
+    rc.flag_modes = {k: 'live' for k in ('blue', 'danger', 'yellow', 'meatball', 'black', 'red')}
+    steward = _client('steward')
+    assert steward.post(f'{V}/servers/{sid}/race-control/flag-notice', json={'kind': 'black', 'car_id': 3}).status_code == 200
+    assert guid in rc.black, 'the director shows a real black flag'
+    inst = SimpleNamespace(server_id=sid, acsp=client)
+    for lap in range(4, 4 + rc._rule('black')['pit_laps']):   # three laps without the pits
+        rc.lap_done(3, 100000, 0, lap, 1000.0 + lap, guid)
+    assert guid in rc.disqualified
+    adapter._flag_messages(inst, rc)
+    assert acsp.encode_kick_user(3) in sent, 'disqualified: out of the server'
+    sent.clear()
+    client._apply({'type': 'new_connection', 'car_id': 7, 'driver_name': 'Ana', 'driver_guid': guid, 'car_model': 'bmw', 'car_skin': 'red'})
+    assert acsp.encode_kick_user(7) in sent, 'and he is kicked again if he comes back'

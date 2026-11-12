@@ -148,6 +148,8 @@ class RaceControl:
         self.blue_ignored: set[tuple[int, int]] = set()      # the pairs whose present blue already cost an offence: one per appearance
         self.flag_count: dict[tuple, int] = {}               # (driver, flag kind) -> offences of this session (the n-th one picks the ladder step)
         self.conduct: dict[str, int] = {}                    # driver -> sanctions earned in this race (every flag, DRS, the cuts ladder): the black-and-white and the black flag come from it
+        self.black_proposed: set[str] = set()                # drivers whose conduct reached the black flag: written down once, the director decides
+        self.disqualified: set[str] = set()                  # drivers disqualified in this race (a black flag the director showed and they ignored): out of the server, and they cannot come back to it
         self.bw_shown: set[str] = set()                      # drivers who have the black-and-white flag
         self.black: dict[str, dict] = {}                     # driver -> {car, laps}: the black flag, and the laps he has left to come into the pits
         self.meatball: dict[str, dict] = {}                  # driver -> {car, laps}: the orange disc, and the laps he has left to come into the pits
@@ -1232,12 +1234,10 @@ class RaceControl:
             car = next((c for c, g in self.audit_guids.items() if g == guid), None)
         if car is None or guid in self.black:
             return
-        if n >= rule["black_at"]:
-            self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
-            self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
-            self.audit("black_flag", car=car, driver=guid, conduct=n, executed=self.flag_modes.get("black") == "live")
-            self._bump()
-        elif n >= rule["bw_at"] and guid not in self.bw_shown:
+        if n >= rule["black_at"] and guid not in self.black_proposed:   # (the black flag is the director's: the conduct only writes it down)
+            self.black_proposed.add(guid)
+            self.audit("black_flag", car=car, driver=guid, conduct=n, why="conduct", executed=False, by="director_only")
+        if n >= rule["bw_at"] and guid not in self.bw_shown:
             self.bw_shown.add(guid)
             self.flag_new.append({"msg": "bw", "car": car, "n": n})
             self.audit("bw_flag", car=car, driver=guid, conduct=n, executed=self.flag_modes.get("black") == "live")
@@ -1252,8 +1252,20 @@ class RaceControl:
             del self.meatball[guid]
             self.audit("meatball_served", car=car, driver=guid, executed=True)
         if guid in self.black and at > self.black[guid]["since"]:
-            del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid)
+            del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid); self.black_proposed.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
+
+    def show_black(self, car: int) -> bool:
+        """The DIRECTOR shows the black flag to a car: it has `pit_laps` laps to come into the pits or it is disqualified (the only way a black flag is given: no rule gives it by itself). False when the car has no
+        driver, or the black flag is not live on this server (then it stays a notice only)."""
+        with _lock:
+            guid = str(self.audit_guids.get(car) or "")
+            live = self.flag_modes.get("black") == "live" and "black" not in self.auto_off
+            if not guid or car == self.pace_car or not live:
+                return False
+            if guid not in self.black:
+                self._give_black(guid, car, "director", True)
+            return True
 
     def _give_black(self, guid: str, car: int, why: str, live: bool) -> None:
         rule = self._rule("black")
@@ -1278,19 +1290,19 @@ class RaceControl:
                 if self.red_laps[car] <= 0:
                     del self.red_laps[car]
                     self.meatball.pop(guid, None)
-                    self._give_black(guid, car, "red", live and self.flag_modes.get("red") == "live")
+                    self.audit("black_flag", car=car, driver=guid, why="red", executed=False, by="director_only")   # (not obeyed: the black flag is the director's to show)
         if in_pit_lap:
             return
         if guid in self.meatball:
             self.meatball[guid]["laps"] -= 1
             if self.meatball[guid]["laps"] <= 0:
                 del self.meatball[guid]
-                self._give_black(guid, car, "meatball", live)
+                self.audit("black_flag", car=car, driver=guid, why="meatball", executed=False, by="director_only")
         elif guid in self.black:
             self.black[guid]["laps"] -= 1
             if self.black[guid]["laps"] <= 0:
                 del self.black[guid]
-                self.conduct[guid] = 0; self.bw_shown.discard(guid)
+                self.conduct[guid] = 0; self.bw_shown.discard(guid); self.black_proposed.discard(guid)
                 self._disqualify(car, guid, live)
 
     def _disqualify(self, car: int, guid: str, live: bool) -> None:
@@ -1303,6 +1315,7 @@ class RaceControl:
             self.flag_new.append({"msg": "offence", "kind": "black", "car": car, "seq": 1, "step": "dsq", "laps": 0})
             self._bump()
             return
+        self.disqualified.add(guid)
         n = self.flag_count.get((guid, "black"), 0) + 1
         key = (self.server_id, self.cuts_session_key, guid, "black", n)
         if len(_flag_dues_pending) >= MAX_FLAG_DUES_PENDING:

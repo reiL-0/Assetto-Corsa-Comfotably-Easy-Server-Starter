@@ -466,9 +466,13 @@ class ACSPClient(asyncio.DatagramProtocol):
             self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
+            from app.live.racecontrol import state_of
             if bans.is_banned(event["driver_guid"]):
                 self.send(encode_kick_user(event["car_id"]))
                 metrics.enqueue(self.server_id, "ban_kick", guid=event["driver_guid"], name=event["driver_name"])
+            elif (rc := state_of(self.server_id, True, self.session)) and event["driver_guid"] in rc.disqualified:   # disqualified from this race: he does not come back to it
+                self.send(encode_kick_user(event["car_id"]))
+                metrics.enqueue(self.server_id, "dsq_kick", guid=event["driver_guid"], name=event["driver_name"])
             elif (self.session or {}).get("session_type") == 2:
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
