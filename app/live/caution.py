@@ -32,6 +32,7 @@ GIVE_BACK_HOLD = 2.0  # s behind the passed car again that count as having given
 SLOW_KMH = 15.0       # the car that is passed is this slow or slower: it is stopped, passing it is not a violation
 SLOW_RATIO = 0.6      # ...or this fraction of the passer's speed (a car that went wide and is crawling back: the field going by it is not a violation)
 CASCADE_S = 15.0      # s: two or more cars passing the same car inside this time are for the director, not for the automatic judge (less than GIVE_BACK_MIN: a verdict never comes before the cascade is known)
+FORM_GAP = 0.05      # of a lap: a car this close behind the pace car (and nearer to it than the leader) is lining up behind it before the leader has caught it
 PACE_GAP = 0.03       # of a lap: where the pace car is in front of the leader when it is not known (the virtual one)
 
 
@@ -114,6 +115,27 @@ class Caution:
         tail = [c for c in self.frozen if c in bad]
         seen: set[int] = set()
         return [c for c in stayed + pitted + down + free + mess + tail if not (c in seen or seen.add(c))]
+
+    def line_up(self, in_pits=()) -> list[int]:
+        """The order the field would restart in as it stands now: the restart order (lead lap that stayed out, lead lap that pitted, lapped, free pass, involved, penalised) with the cars that are in the pit lane
+        at this moment at the tail: whoever goes into the pits loses the place, and the car behind moves up behind the one that is now ahead of it."""
+        order, pits = self.restart_order(), set(in_pits)
+        return [c for c in order if c not in pits] + [c for c in order if c in pits]
+
+    def early_formers(self, progress: dict[int, float], pace_progress: float | None, order: list[int]) -> dict[int, int]:
+        """Lead-lap cars lining up behind the pace car BEFORE the leader has reached it (the field forms behind the leader, who is the one that meets the pace car first): {car: the car it has to line up behind}.
+        Only a notice, nobody is punished. Lapped, involved, penalised, the free pass and the leader itself are never early; nothing when the leader is already ahead of the pace car."""
+        if pace_progress is None:
+            return {}
+        lapped, bad = set(self.lapped()), self.penalised | self.violators
+        lead = [c for c in order if c in progress and c not in lapped and c not in self.involved and c not in bad and c != self.free_pass and c not in self.gone]
+        if len(lead) < 2:
+            return {}
+        behind_pace = lambda c: ring(pace_progress - progress[c])   # how far behind the pace car the car is (negative: ahead of it)
+        d_lead = behind_pace(lead[0])
+        if d_lead <= 0:
+            return {}
+        return {c: order[order.index(c) - 1] for c in lead[1:] if 0 < behind_pace(c) < min(d_lead, FORM_GAP)}
 
     def call_restart(self, progress: dict[int, float], pace_progress: float | None = None) -> tuple[list[int], list[int], set[int]]:
         """'To go': the wave-around cars may pass (they are not violators any more) and the restart order is fixed. -> (order, waved, cars that may choose their lane)."""

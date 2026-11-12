@@ -278,3 +278,20 @@ def test_a_second_cascade_on_the_same_car_is_another_review_and_does_not_erase_t
     t = GIVE_BACK_MAX + 100.0
     run(c, [(t, second), (t + PASS_HOLD + 0.1, second), (t + GIVE_BACK_MAX + 20.0, second)], speeds=sp)
     assert c.reviews == [{"passed": 1, "passers": [2, 3]}, {"passed": 1, "passers": [4, 5]}] and not c.violators
+
+
+def test_line_up_says_behind_whom_and_a_car_in_the_pits_loses_the_place():
+    c = Caution(field(5.20, 5.18, 5.16, 5.14, 5.12), 0.0)   # cars 1..5, frozen in that order
+    assert c.line_up() == [1, 2, 3, 4, 5]
+    assert c.line_up({3}) == [1, 2, 4, 5, 3], "car 3 goes into the pits: 4 is now behind 2, 3 goes to the tail"
+
+
+def test_a_car_lining_up_behind_the_pace_car_before_the_leader_is_told_to_form_behind_the_right_car():
+    p = field(5.20, 5.18, 5.16)   # the leader (1) is 0.15 of a lap behind the pace car; car 2 is 0.02 behind it
+    c = Caution(p, 0.0)
+    order = c.line_up()
+    prog = {1: 5.00, 2: 5.13, 3: 4.60}
+    assert c.early_formers(prog, 5.15, order) == {2: 1}, "car 2 reached the pace car first: line up behind car 1"
+    assert c.early_formers({1: 5.13, 2: 5.10, 3: 4.60}, 5.15, order) == {}, "the leader is the first behind the pace car: the field is forming right"
+    assert c.early_formers({1: 5.20, 2: 5.13, 3: 4.60}, 5.15, order) == {}, "the leader is already ahead of the pace car: nothing to say"
+    assert c.early_formers(prog, None, order) == {}, "no pace car, no notice"

@@ -1426,3 +1426,22 @@ def test_caution_leader_crossing_in_pits_does_not_advance_without_pace_car():
     rc.report_pit(3, True, now)
     assert rc.caution_lap(3, {3: 80}, now, {3}) is None
     assert rc.caution_laps == before
+
+
+def test_the_frozen_order_notice_says_behind_whom_and_follows_a_car_that_goes_into_the_pits(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'))})
+    for car, spline in ((3, 0.50), (4, 0.48), (5, 0.46)):
+        client.field.update(car, spline, 9)
+        client.field.completed_laps[car] = 9
+    rc.set_flag('yellow', field=client.field)
+    inst = SimpleNamespace(server_id=sid, acsp=client)
+    adapter.line_up_notices(inst, rc, dict(client.field.progress))
+    said = lambda: {(n['text'], n['to']) for n in rc.snapshot()['notices']}
+    assert ('ORDEN CONGELADO: P1 · LÍDER', 3) in said() and ('ORDEN CONGELADO: P2 · detrás de Ana', 4) in said() and ('ORDEN CONGELADO: P3 · detrás de Beto', 5) in said()
+    rc.report_pit(4, True, now=rc.clock.time())   # Beto goes into the pits: Cleo is now behind Ana
+    adapter.line_up_notices(inst, rc, dict(client.field.progress))
+    assert ('ORDEN CONGELADO: P2 · detrás de Ana', 5) in said() and ('ORDEN CONGELADO: P3 · detrás de Cleo', 4) in said()
+    assert ('ORDEN CONGELADO: P3 · detrás de Beto', 5) not in said(), 'the old text is replaced, not left beside the new one'

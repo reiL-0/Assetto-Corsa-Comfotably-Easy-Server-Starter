@@ -156,6 +156,7 @@ class RaceControl:
         self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
+        self.line_told: dict[str, str] = {}                  # hold tag -> the text of the order / "line up" notice on the screens now (a notice is only said again when its text changes)
         self.red_ref: dict | None = None                     # the F1 way: {"lap": n, "order": [cars]} = the last line every car of the leader's lap had crossed when the red flag came; the restart grid and the lap count come from it
         self.red_near: set[int] = set()                      # cars that were about to cross the line when the red came: that crossing is not a lap they could use to come in
         self._red_id = 0                                     # which red flag: the id the no-pass judge of the restart uses
@@ -742,6 +743,7 @@ class RaceControl:
         """The flag went to `flag`: a caution starts (freeze the order, pick the free pass) or ends. Returns actions for the adapter, which owns the names and the messages."""
         if flag in CAUTION and not was_caution:
             self.blocked_crossings, self.caution_laps, self.caution_notified = 0, -1, False
+            self.line_told = {}
             self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False   # a new caution: the pace car comes out again
             progress = self.without_pace_car(progress)
             held = bool(self.red_ref)
@@ -758,7 +760,7 @@ class RaceControl:
                 self.caution.open_pits()   # (from the first instant: a report cannot be judged between the caution and the notice)
             return [("caution", self.caution.free_pass)]
         if flag not in CAUTION:
-            self.caution = None
+            self.caution, self.line_told = None, {}
         return []
 
     def configure_nascar(self, total: int, stages: list[int] | None = None, shares: tuple | None = None, next_delay_min: int | None = None) -> list[tuple]:
@@ -987,6 +989,17 @@ class RaceControl:
             self.audit("restart_plan", order=plan[0], waved=plan[1], choosers=sorted(plan[2]), to_go=to_go, executed=True)
             log.info("restart plan: order=%s waved=%s choosers=%s pace_car=%s", plan[0], plan[1], sorted(plan[2]), self.pace_car)
             return plan
+
+    def line_up(self, progress: dict[int, float]) -> tuple[list[int], dict[int, int]]:
+        """(the order the field restarts in as it stands, {car lining up too early: the car to line up behind}) under a caution of a race; empty otherwise. The pit lane report of the last seconds moves a car to the tail."""
+        with _lock:
+            c = self.caution
+            if not c or not self._is_race():
+                return [], {}
+            now = self.clock.time()
+            order = c.line_up({car for car, t in self._pit_seen.items() if now - t < PIT_CLEAR})
+            pace = progress.get(self.pace_car) if self.pace_car is not None else None
+            return order, c.early_formers(self.without_pace_car(progress), pace, order)
 
     @fieldrec.capture(_lock)
     def caution_tick(self, progress: dict[int, float], speeds: dict[int, float], now: float) -> list[tuple]:
