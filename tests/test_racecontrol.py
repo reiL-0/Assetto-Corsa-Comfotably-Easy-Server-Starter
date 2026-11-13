@@ -552,4 +552,5 @@ def test_the_directors_field_table_has_the_race_order_gaps_and_what_each_driver_
     assert [x["name"] for x in rows] == ["Ana", "Beto", "Cleo"] and rows[0]["gap"] is None and rows[0]["flags"] == ["boxes"]
     assert rows[1]["gap"] == {"laps": 0, "ms": 2500} and rows[1]["flags"] == ["bw", "dt"] and rows[1]["conduct"] == 3 and rows[1]["best_ms"] == 96000
     assert rows[2]["gap"] == {"laps": 1, "ms": None} and rows[2]["flags"] == ["dsq"]
+    assert [x["driver_guid"] for x in rows] == ["G3", "G4", "G5"], "the table kick needs the driver GUID (kick checks who is in the slot)"
     assert _client("driver").get(f"{V}/servers/{sid}/race-control/field").status_code in (401, 403), "the director table is for stewards"

@@ -648,7 +648,7 @@ def field_view(server_id: int, sess: SessionDep) -> dict:
         lap = next(iter(d["Cars"].values()))
         flags = [k for k, on in (("dsq", guid in marks["dsq"]), ("black", guid in marks["black"]), ("meatball", guid in marks["meatball"]), ("bw", guid in marks["bw"]),
                                  ("dt", car in marks["dt"]), ("viol", car in marks["viol"]), ("boxes", car in marks["pits"])) if on]
-        rows.append({"car_id": car, "name": d["CarInfo"]["DriverName"], "model": d["CarInfo"]["CarModel"], "position": i + 1, "laps": d["TotalNumLaps"],
+        rows.append({"car_id": car, "driver_guid": guid, "name": d["CarInfo"]["DriverName"], "model": d["CarInfo"]["CarModel"], "position": i + 1, "laps": d["TotalNumLaps"],
                      "best_ms": round(lap["BestLap"] / 1_000_000) or None, "last_ms": round(lap["LastLap"] / 1_000_000) or None,
                      "gap": _gap_to(drivers[0], d) if race and i else None, "conduct": marks["conduct"].get(guid, 0), "flags": flags})
     return {"race": race, "session": lb.get("Name", ""), "rows": rows}
