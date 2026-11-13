@@ -479,7 +479,7 @@ class PracticeKeep(SQLModel, table=True):
 
 
 class PitLimit(SQLModel, table=True):
-    """The pit-lane speed limit of a track layout (app/pitlimits.py): set by the director for the track, 0/absent = no rule. A car reported over `limit_kmh + tolerance_kmh` is sanctioned: `penalty_s` 0 = a drive-through,
+    """The pit-lane speed limit of a track layout (migrated to the server rules by migration 17: app/db.py `_m017_pit_rule_per_server`): set by the director for the track, 0/absent = no rule. A car reported over `limit_kmh + tolerance_kmh` is sanctioned: `penalty_s` 0 = a drive-through,
     N = N seconds on the race result."""
     __tablename__ = "pit_limits"
 

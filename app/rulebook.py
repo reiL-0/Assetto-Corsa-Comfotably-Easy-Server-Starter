@@ -171,6 +171,25 @@ class FlagsRule(_Strict):
         return "live" if v == "shadow" else v
 
 
+class VscCfg(_Strict):
+    """How a VSC / FCY is run on a SERVER: what the director's Lanzar buttons use when they say nothing, and what the automatic one uses (the director can still change the flag being run)."""
+    vsc_kmh: int = Field(default=60, ge=30, le=250)
+    fcy_kmh: int = Field(default=80, ge=30, le=250)
+    grace_s: int = Field(default=20, ge=3, le=60)
+    tolerance_kmh: int = Field(default=5, ge=0, le=30)
+    penalty: Literal["none", "pits"] = "pits"   # who does not slow down: a drive-through, or only a note
+    laps: int = Field(default=3, ge=1, le=5)   # laps to serve the drive-through
+    warnings: int = Field(default=2, ge=1, le=5)   # red sectors in a row before the first breach
+    severe_s: int = Field(default=10, ge=0, le=60)   # seconds on the result for the severe level; 0 = none
+
+
+class PitCfg(_Strict):
+    """The pit-lane speed rule of a SERVER (every track it runs): the limit, the km/h forgiven over it, and the punishment (0 = a drive-through, N = N seconds on the result)."""
+    limit_kmh: int = Field(default=0, ge=0, le=300)   # 0 = no rule
+    tolerance_kmh: int = Field(default=5, ge=0, le=30)
+    penalty_s: int = Field(default=0, ge=0, le=60)
+
+
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
     drs: DrsRule | None = None   # None = off
@@ -181,6 +200,8 @@ class Detectors(_Strict):
     red: RedRule = Field(default_factory=RedRule)
     flags: FlagsRule = Field(default_factory=FlagsRule)
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
+    vsc: VscCfg = Field(default_factory=VscCfg)
+    pit: PitCfg = Field(default_factory=PitCfg)
 
 
 class SlowCarRule(_Strict):

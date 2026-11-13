@@ -231,6 +231,24 @@ def _m016_vsc_refs_window(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "vsc_refs" ADD COLUMN "recent_laps" JSON NOT NULL DEFAULT \'[]\'')
 
 
+def _m017_pit_rule_per_server(con: sqlite3.Connection) -> None:
+    """The pit-lane limit goes from the track (table pit_limits) to the SERVER (rules.detectors.pit): each server takes the rule of the track it was last set up for, unless it already has one.
+    The table stays (nothing reads it any more); a rule of a track no server is set up for is not moved."""
+    import json
+    from app import csp
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name = 'pit_limits'").fetchone():
+        return
+    for sid, session, rules in con.execute("SELECT id, session, rules FROM servers").fetchall():
+        sj = (json.loads(session) if session else None) or {}   # (SQLAlchemy writes a Python None to a JSON column as the text 'null', not as SQL NULL: `or {}` takes both)
+        track = csp.clean_track(sj.get("track") or "")
+        row = con.execute("SELECT limit_kmh, tolerance_kmh, penalty_s FROM pit_limits WHERE track = ? AND track_config = ?", (track, sj.get("track_config") or "")).fetchone() if track else None
+        r = (json.loads(rules) if rules else None) or {}
+        if not row or row[0] <= 0 or "pit" in (r.get("detectors") or {}):
+            continue
+        r["detectors"] = {**(r.get("detectors") or {}), "pit": {"limit_kmh": row[0], "tolerance_kmh": row[1], "penalty_s": row[2]}}
+        con.execute("UPDATE servers SET rules = ? WHERE id = ?", (json.dumps(r), sid))
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -248,6 +266,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (14, _m014_result_rulebook_snapshot),
     (15, _m015_server_rules),
     (16, _m016_vsc_refs_window),
+    (17, _m017_pit_rule_per_server),
 ]
 
 

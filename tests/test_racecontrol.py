@@ -121,7 +121,8 @@ def test_the_director_sets_the_flag_and_the_screen_says_it(live):
     assert r.status_code == 200 and r.json()["flag"] == "yellow" and r.json()["pace_kmh"] is None and _notices(sid) == ["BANDERA AMARILLA: sin adelantar"] and sent == [], "no chat line any more"
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "yellow"
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "red"}).status_code == 422
-    assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "vsc"}).status_code == 422   # a VSC needs its pace
+    r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "vsc"})   # a VSC that says nothing is run with the server's rule (Reglas del servidor: 60 km/h)
+    assert r.status_code == 200 and r.json()["flag"] == "vsc" and r.json()["pace_kmh"] == 60
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "vsc", "pace_kmh": 5}).status_code == 422
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "green"}).json()["pace_kmh"] is None
     c.session = {"session_index": 1}   # the next session: the state goes back to green on its own
@@ -265,13 +266,21 @@ def test_the_games_own_penalties_are_off_whenever_the_hub_is_on(monkeypatch):
 
 
 def test_an_fcy_is_a_pace_flag_too_and_its_notice_comes_with_the_state(live):
-    sid, _, sent = live
+    sid, c, sent = live
     steward = _client("steward")
     body = {"flag": "fcy", "pace_kmh": 60, "grace_s": 5, "tolerance_kmh": 5, "penalty": {"kind": "pits", "laps": 2}}
     r = steward.post(f"{V}/servers/{sid}/race-control", json=body)
     assert r.json()["flag"] == "fcy" and r.json()["pace_kmh"] == 60 and r.json()["vsc_id"] and r.json()["grace_left"] in (4, 5)
     assert steward.get(f"{V}/servers/{sid}/race-state").json()["flag"] == "fcy" and "FULL COURSE YELLOW" in _notices(sid)[0] and sent == []
-    assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"}).status_code == 422, "an FCY needs its pace like a VSC"
+    r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"})
+    assert r.status_code == 200 and r.json()["pace_kmh"] == 80, "an FCY that says nothing takes the server's FCY pace"
+    race = c.session["session_type"]
+    c.session["session_type"] = 1   # (the rules are frozen during a race: the server's settings are changed outside it)
+    assert api.put(f"{V}/servers/{sid}/rules", json={"detectors": {"vsc": {"fcy_kmh": 70, "grace_s": 7, "penalty": "none"}}}).status_code == 200
+    c.session["session_type"] = race
+    r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"})
+    assert r.status_code == 200 and r.json()["pace_kmh"] == 70 and r.json()["grace_left"] in (6, 7), "the server's own settings: pace and grace"
+    assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy", "pace_kmh": 90}).json()["pace_kmh"] == 90, "what the director says wins"
     rc = RaceControl()
     rc.set_flag("fcy", 60, 5, 5, {"kind": "pits", "laps": 1}, now=100.0)
     rc.sample({1: 120.0}, 104.0); rc.sample({1: 120.0}, 104.3); rc.sample({1: 120.0}, 104.6)
@@ -493,8 +502,8 @@ def test_the_directors_white_flag_is_the_last_lap_in_a_laps_race_and_in_a_timed_
     assert last_lap_bytes({**laps_race, "session_type": 2}, 7, 0) is None
 
 
-def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_managers_own_speed(live):
-    from app import pitlimits
+def test_pit_speed_is_sanctioned_once_per_pass_with_the_servers_penalty_and_the_managers_own_speed(live):
+    from app import league
     sid, client, sent = live
     rc = state_of(sid, True, client.session, create=True)
     rc.audit_guids = {3: client.cars[3]["driver_guid"]}
@@ -503,7 +512,8 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_m
     client.session.update({"track": "imola", "track_config": ""})
     assert steward.get(f"{V}/servers/{sid}/race-control/pit-limit").json()["limit_kmh"] == 0
     assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}).status_code == 200
-    assert pitlimits.get("imola", "") == {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
+    assert league.effective_rules(sid)["pit"] == {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}, "the rule is the SERVER's: the same on any track"
+    assert steward.get(f"{V}/servers/{sid}/rules").json()["detectors"]["pit"]["limit_kmh"] == 80
     api.get(f"{V}/servers/{sid}/race-state")   # (the state poll reads the track's rule)
     assert rc.pit_limit and rc.snapshot()["pit_limit"] == {"limit_kmh": 80, "tolerance_kmh": 5}
     assert rc.pit_speed(3, 84.0, 1000.0) is None, "inside the tolerance (80 + 5)"
@@ -514,7 +524,7 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_m
     assert rc.pit_speed(3, 95.0, 1050.0) is None, "a pit report is no new pass"
     rc.lap_done(3, 95000, 0, 8, 1060.0, "")   # a lap completed since: another pass through the pit lane
     assert rc.pit_speed(3, 95.0, 1070.0) is not None, "another pass: a new offence"
-    assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and pitlimits.get("imola", "") is None
+    assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and league.effective_rules(sid)["pit"] is None
     rc2 = RaceControl(session_ref={"session_type": 3}); rc2.server_id = 9
     rc2.audit_guids = {1: "G1"}; rc2.pit_limit = {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 5}
     assert rc2.pit_speed(1, 70.0, 10.0)["step"] == 5 and not rc2.penalties, "seconds on the result, no drive-through"

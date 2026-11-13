@@ -784,3 +784,15 @@ def test_a_nascar_server_never_gets_automatic_neutralization_and_a_category_pres
         db.add(server); db.commit()
         invalidate_rule_cache(sid)
         assert effective_rules(sid)["neutralization"]["default_mode"] == "VSC"
+
+
+@pytest.mark.parametrize("category, flag, pace", [("GT3", "fcy", 70), ("", "vsc", 55)])
+def test_the_automatic_vsc_fcy_runs_with_the_servers_settings(monkeypatch, category, flag, pace):
+    """Reglas del servidor: the pace of the flag, the grace and the penalty come from the rule (`vsc`), not from the pace car's speed and the defaults."""
+    from app.rulebook import VscCfg
+    rc, feed = scenario(monkeypatch, "live", category)
+    rc.neutralization_rule["vsc"] = VscCfg(vsc_kmh=55, fcy_kmh=70, grace_s=9, penalty="none").model_dump()
+    for t in range(1, 8):
+        feed(t, 0)
+    assert rc.flag == flag and rc.pace_kmh == pace != rc.pace_car_kmh
+    assert rc.vsc_penalty["kind"] == "none"

@@ -936,7 +936,10 @@ class RaceControl:
                         self.notify("SAFETY CAR AUTOMÁTICO: accidente muy grave", "flag")
                         return None, actions
                     if mode == "live" and target in ("VSC", "FCY") and self.flag in ("green", "white"):
-                        actions = self.set_flag(target.lower(), self.pace_car_kmh, now=now, source="incident", field=field, mode="delta")
+                        v = rule.get("vsc")   # how this server runs a VSC / FCY (Reglas del servidor); an old rule without it keeps the pace car's speed and the defaults
+                        actions = self.set_flag(target.lower(), v["fcy_kmh" if target == "FCY" else "vsc_kmh"] if v else self.pace_car_kmh, **({"grace_s": v["grace_s"], "tolerance_kmh": v["tolerance_kmh"],
+                                                "penalty": {"kind": v["penalty"], "laps": v["laps"], "warnings": v["warnings"], "severe_s": v["severe_s"]}} if v else {}),
+                                                now=now, source="incident", field=field, mode="delta")
                         self.audit("neutralization_applied", **evidence, executed=True)
                         return None, actions
                 return None, []

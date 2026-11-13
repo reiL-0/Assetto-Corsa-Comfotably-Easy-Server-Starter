@@ -71,9 +71,9 @@ class PenaltyCfg(BaseModel):
 class FlagIn(BaseModel):
     flag: Literal["green", "yellow", "vsc", "fcy", "white", "checkered"]
     pace_kmh: int | None = Field(default=None, ge=PACE_MIN, le=PACE_MAX)   # a VSC only (a yellow is only a flag)
-    grace_s: int = Field(default=GRACE_DEFAULT, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves
-    tolerance_kmh: int = Field(default=TOL_DEFAULT, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends
-    penalty: PenaltyCfg = PenaltyCfg()                                        # a VSC: what whoever is still over gets
+    grace_s: int | None = Field(default=None, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves (not said = the server's rule, `vsc.grace_s`)
+    tolerance_kmh: int | None = Field(default=None, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends (not said = the server's)
+    penalty: PenaltyCfg | None = None                                         # a VSC: what whoever is still over gets (not said = the server's)
     mode: Literal["fixed", "delta"] = "delta"                                  # VSC and FCY are judged by delta (the default); `fixed` is only the old single pace limit, kept for an API client that asks for it
 
 
@@ -491,7 +491,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     if inst and _sanctioned(inst):
         cut_rule_of(server_id)   # (refreshes the cached rules here, in a request thread: the snapshot and the monitor never touch the database)
         if rc:
-            refresh_pit_limit(rc, inst)
+            refresh_pit_limit(rc, server_id)
         give_back_rule_of(server_id)
     server = _get(sess, server_id)
     if rc:
@@ -660,44 +660,40 @@ class PitLimitIn(BaseModel):
     penalty_s: int = Field(default=0, ge=0, le=60)   # 0 = a drive-through; N = N seconds on the race result
 
 
-def _pit_key(inst) -> tuple[str, str]:
-    from app import vscrefs
-    key = vscrefs.key_of(inst.acsp.session)
-    if not key:
-        raise HTTPException(409, "el servidor aún no dice en qué pista corre")
-    return key
-
-
 @control_router.get("/pit-limit")
 def get_pit_limit(server_id: int, sess: SessionDep) -> dict:
-    """The pit-lane speed rule of the track this server runs now ({} fields null when there is none)."""
-    from app import pitlimits
-    inst, _ = _control(server_id, sess)
-    track, config = _pit_key(inst)
-    return {"track": track, "track_config": config, **(pitlimits.get(track, config) or {"limit_kmh": 0, "tolerance_kmh": 5, "penalty_s": 0})}
+    """The pit-lane speed rule of this SERVER (Reglas del servidor, `detectors.pit`; limit 0 = none). It is the same for every track it runs."""
+    from app import league
+    _control(server_id, sess)
+    return league.effective_rules(server_id)["pit"] or {"limit_kmh": 0, "tolerance_kmh": 5, "penalty_s": 0}
 
 
 @control_router.put("/pit-limit")
 def put_pit_limit(server_id: int, body: PitLimitIn, sess: SessionDep) -> dict:
-    from app import pitlimits
-    inst, rc = _control(server_id, sess)
-    track, config = _pit_key(inst)
-    pitlimits.put(track, config, body.limit_kmh, body.tolerance_kmh, body.penalty_s)
+    """Old panels and the live director: writes the server's rule (the same one PUT /rules writes) and takes effect at once, also during a race."""
+    from app import league
+    _, rc = _control(server_id, sess)
+    s = _get(sess, server_id)
+    rules = dict(s.rules or {})   # ponytail: read-modify-write of the whole rules JSON, like PUT /rules; two writers in the same few ms could lose one: a lock or a rules revision if it ever happens
+    rules["detectors"] = {**(rules.get("detectors") or {}), "pit": body.model_dump()}
+    s.rules = rules
+    sess.add(s)
+    sess.commit()
+    league.invalidate_rule_cache(server_id)
     rc.pit_limit_gen += 1   # (a read that began before this is out of date)
     rc.pit_limit_at = -1e9   # (read again at the next state poll)
-    return {"track": track, "track_config": config, **body.model_dump()}
+    return body.model_dump()
 
 
-def refresh_pit_limit(rc, inst) -> None:
+def refresh_pit_limit(rc, server_id: int) -> None:
     """The track's pit-lane rule into the state (a request thread: it reads the database, at most every 10 s)."""
     now = time.monotonic()
     if now - rc.pit_limit_at < 10.0:
         return
     rc.pit_limit_at = now
     gen = rc.pit_limit_gen
-    from app import pitlimits, vscrefs
-    key = vscrefs.key_of(inst.acsp.session)
-    limit = pitlimits.get(*key) if key else None
+    from app import league
+    limit = league.effective_rules(server_id)["pit"]
     with _lock:
         if gen == rc.pit_limit_gen:   # (not when the director saved a new limit while this was reading)
             rc.pit_limit = limit
@@ -786,18 +782,24 @@ def apply_last_lap(inst, rc, flag: str) -> None:
 
 @control_router.post("")
 def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
+    from app import league
     inst, rc = _control(server_id, sess)
+    cfg = league.effective_rules(server_id)["vsc"]   # what the director did not say is the server's rule (Reglas del servidor)
+    pace = body.pace_kmh if body.pace_kmh is not None else cfg["fcy_kmh" if body.flag == "fcy" else "vsc_kmh"] if body.flag in ("vsc", "fcy") else None
+    grace = body.grace_s if body.grace_s is not None else cfg["grace_s"]
+    tol = body.tolerance_kmh if body.tolerance_kmh is not None else cfg["tolerance_kmh"]
+    penalty = body.penalty or PenaltyCfg(kind=cfg["penalty"], laps=cfg["laps"], warnings=cfg["warnings"], severe_s=cfg["severe_s"])
     try:
-        actions = rc.set_flag(body.flag, body.pace_kmh, body.grace_s, body.tolerance_kmh, body.penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
+        actions = rc.set_flag(body.flag, pace, grace, tol, penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if body.flag == "vsc" and rc.vsc_mode == "delta":   # a VSC by delta is time per sector: it asks for no speed
-        pen = f" · si baja del límite: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
-        _say(rc, f"VIRTUAL SAFETY CAR: reduce el ritmo en {body.grace_s} s · mantén el delta positivo{pen}", "flag")
+        pen = f" · si baja del límite: drive-through de {penalty.laps} vueltas" if penalty.kind == "pits" else ""
+        _say(rc, f"VIRTUAL SAFETY CAR: reduce el ritmo en {grace} s · mantén el delta positivo{pen}", "flag")
     elif body.flag in ("vsc", "fcy"):
-        pen = f" · si sigues por encima: drive-through de {body.penalty.laps} vueltas" if body.penalty.kind == "pits" else ""
+        pen = f" · si sigues por encima: drive-through de {penalty.laps} vueltas" if penalty.kind == "pits" else ""
         name = "VIRTUAL SAFETY CAR" if body.flag == "vsc" else "FULL COURSE YELLOW"
-        _say(rc, f"{name}: baja a {body.pace_kmh} km/h en {body.grace_s} s{pen}", "flag")
+        _say(rc, f"{name}: baja a {pace} km/h en {grace} s{pen}", "flag")
     else:
         _say(rc, SAY[body.flag], "flag")
     if body.flag == "checkered":
