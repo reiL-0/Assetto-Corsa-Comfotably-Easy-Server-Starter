@@ -1216,19 +1216,20 @@ def vsc_refs_sync() -> None:
         if not rc or not key:
             continue
         try:
-            with _lock:
-                need, dirty = rc.ref_key != key, rc.reflaps.take_dirty()
-            if need:
+            if rc.ref_key != key:   # (read first: the laps learned here and not saved yet go after the stored window)
                 known = vscrefs.load(*key)
                 with _lock:
                     rc.reflaps.merge(known)
                     rc.ref_key = key
-            if dirty:
+            with _lock:
+                fresh = rc.reflaps.take_fresh()
+            if fresh:
                 try:
-                    vscrefs.save(*key, dirty)
+                    vscrefs.save(*key, fresh)
                 except Exception:
                     with _lock:
-                        rc.reflaps.dirty.update(dirty)   # (tried again at the next tick)
+                        for model, laps in fresh.items():
+                            rc.reflaps.fresh[model] = laps + rc.reflaps.fresh.get(model, [])   # (tried again at the next tick)
                     raise
         except Exception:
             log.exception("vsc refs: could not sync server %s", inst.server_id)

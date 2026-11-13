@@ -488,6 +488,7 @@ class VscRef(SQLModel, table=True):
     car_model: str = Field(primary_key=True)
     lap_s: float
     sectors: list = Field(default_factory=list, sa_type=JSON)   # the N sector times of that lap, in seconds
+    recent_laps: list = Field(default_factory=list, sa_type=JSON)   # the last clean laps of this combination, [[lap s, [the N sector times s]], ...]: the reference is the quickest of them that is no outlier (app/live/sectors.py `reference`)
     set_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

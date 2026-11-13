@@ -393,9 +393,9 @@ def test_the_reference_laps_of_the_vsc_survive_the_session_change_on_the_same_tr
     try:
         practice = {"session_type": 1, "track": "spa", "track_config": ""}
         rc = control.state_of(sid, True, practice, create=True)
-        rc.reflaps.best["gt3"] = (140.0, [10.0] * 20)   # the best clean lap of a gt3 in the practice
+        rc.reflaps.add_lap("gt3", 140.0, [7.0] * 20)   # the best clean lap of a gt3 in the practice
         race = control.state_of(sid, True, {"session_type": 3, "track": "spa", "track_config": ""})
-        assert race is not rc and race.reflaps.best == {"gt3": (140.0, [10.0] * 20)}, "same track: the race starts knowing the practice's laps"
+        assert race is not rc and race.reflaps.best == {"gt3": (140.0, [7.0] * 20)} and race.reflaps.fresh == rc.reflaps.fresh, "same track: the race starts knowing the practice's laps"
         assert set(race.reflaps.profiles(1.35)) == {"gt3"}, "so a VSC in the race has a reference for the gt3"
         other = control.state_of(sid, True, {"session_type": 3, "track": "imola", "track_config": ""})
         assert other.reflaps.best == {}, "another track: nothing carries over"
