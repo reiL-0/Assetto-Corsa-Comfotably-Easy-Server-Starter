@@ -1107,6 +1107,8 @@ class RaceControl:
     def autoflags_tick(self, samples: dict, speeds: dict[int, float], length: float | None, mono: float, now: float) -> None:
         """One look for the blue flag and the danger warning (shadow). `mono`: self.clock.monotonic(), the clock of the field's samples; `now`: wall clock, the one of the pit reports."""
         with _lock:
+            if length:
+                self.reflaps.track_m = length   # (a reference lap too quick for the track's length is not a lap)
             racing = self._sanctioned() and self.flag in ("green", "white")
             in_pit = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
             pc = self.pace_car
@@ -2094,7 +2096,7 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 fresh.auto_off = set(old.auto_off)   # (the director's choices outlive the session)
                 same = lambda k: old.session_ref.get(k) == session_ref.get(k)
                 if isinstance(old.session_ref, dict) and isinstance(session_ref, dict) and same("track") and same("track_config"):   # the reference laps of the VSC (best clean lap of each car model) come from practice and qualifying too: they survive the session change on the same track
-                    fresh.reflaps.best = dict(old.reflaps.best)
+                    fresh.reflaps.carry_from(old.reflaps)
                 _states[server_id] = fresh
                 fresh.audit("session_start", flag=fresh.flag, previous_flag=old.flag, executed=True)
                 return fresh

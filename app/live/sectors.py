@@ -47,15 +47,46 @@ class SectorClock:
         return out
 
 
+KEEP_LAPS = 10         # the clean laps kept per (track layout, car model): the window the reference is chosen from
+MIN_WINDOW = 3         # with fewer laps than this there is no average to compare with: the plausible ones count
+OUTLIER_RATIO = 0.85   # a lap this much quicker than the MEDIAN of the window (15 %) is not a reference: a teleport, a shortcut, a spline that jumped
+MAX_AVG_MS = 100.0     # m/s: a lap whose average speed over the track's length is higher than this (360 km/h) cannot be real
+
+
+def reference(laps: list[tuple[float, list[float]]]) -> tuple[float, list[float]] | None:
+    """The reference of a window of laps [(lap s, the N sector times s)]: the quickest lap that is not an outlier (a lap under 85 % of the median of the window is left out; with fewer than 3 laps all count)."""
+    if not laps:
+        return None
+    ok = laps
+    if len(laps) >= MIN_WINDOW:
+        ordered = sorted(lap for lap, _ in laps)
+        mid = len(ordered) // 2
+        median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+        ok = [x for x in laps if x[0] >= OUTLIER_RATIO * median] or laps
+    return min(ok, key=lambda x: x[0])
+
+
 class RefLaps:
     def __init__(self) -> None:
         self._cross: dict[int, dict[int, float]] = {}   # car -> boundary -> instant, since the last reset / pit lane
-        self._dirty: set[int] = set()
-        self.best: dict[str, tuple[float, list[float]]] = {}   # car model -> (lap time s, the N sector times s) of its fastest clean lap
-        self.dirty: set[str] = set()   # models whose best lap changed here and is not in the database yet (app/vscrefs.py)
+        self.recent: dict[str, list[tuple[float, list[float]]]] = {}   # car model -> its last KEEP_LAPS clean laps (lap s, the N sector times s): what the reference is chosen from
+        self.fresh: dict[str, list[tuple[float, list[float]]]] = {}    # laps learned here and not in the database yet (app/vscrefs.py)
+        self.best: dict[str, tuple[float, list[float]]] = {}           # car model -> (lap time s, the N sector times s) of its reference lap: the quickest that is no outlier of `recent`
+        self.track_m: float | None = None                              # the track's length in metres when known: a lap too quick for it is not a lap
 
     def reset(self) -> None:
-        self._cross.clear(); self._dirty.clear(); self.best.clear()
+        self._cross.clear(); self.recent.clear(); self.fresh.clear(); self.best.clear()
+
+    def add_lap(self, model: str, lap: float, secs: list[float], fresh: bool = True) -> None:
+        if self.track_m and self.track_m / lap > MAX_AVG_MS:   # (physically impossible: 20 s on a 1:20 track)
+            return
+        w = self.recent.setdefault(model, [])
+        w.append((lap, secs)); del w[:-KEEP_LAPS]
+        if fresh:
+            self.fresh.setdefault(model, []).append((lap, secs))
+        ref = reference(w)
+        if ref:
+            self.best[model] = ref
 
     def feed(self, car: int, model: str | None, events: list[tuple], in_pit: bool) -> None:
         if in_pit:   # (also with no crossing in this packet: a lap through the pit lane is never a reference)
@@ -70,25 +101,32 @@ class RefLaps:
             c[b] = t
             if b % N == 0 and model and all(k in c for k in range(b - N, b + 1)):
                 lap = c[b] - c[b - N]
-                if lap >= MIN_LAP_S and (model not in self.best or lap < self.best[model][0]):
-                    self.best[model] = (lap, [c[k + 1] - c[k] for k in range(b - N, b)])
-                    self.dirty.add(model)
+                if lap >= MIN_LAP_S:
+                    self.add_lap(model, lap, [c[k + 1] - c[k] for k in range(b - N, b)])
             for k in [k for k in c if k < b - N]:
                 del c[k]
 
+    def merge(self, known: dict[str, list[tuple[float, list[float]]]]) -> None:
+        """The windows kept in the database: the laps learned here since (not saved yet) go after them, and the reference is chosen again."""
+        for model, laps in known.items():
+            w = (list(laps) + self.fresh.get(model, []))[-KEEP_LAPS:]
+            self.recent[model] = w
+            ref = reference(w)
+            if ref:
+                self.best[model] = ref
+
+    def take_fresh(self) -> dict[str, list[tuple[float, list[float]]]]:
+        out, self.fresh = self.fresh, {}
+        return out
+
+    def carry_from(self, old: "RefLaps") -> None:
+        """A new session on the same track: what the old one knew (windows and laps not saved yet)."""
+        self.recent = {m: list(w) for m, w in old.recent.items()}
+        self.fresh = {m: list(w) for m, w in old.fresh.items()}
+        self.best = dict(old.best)
+
     def forget(self, car: int) -> None:
         self._cross.pop(car, None)
-
-    def merge(self, known: dict[str, tuple[float, list[float]]]) -> None:
-        """Laps kept in the database: they count where they beat what was learned here (the quickest per car model wins)."""
-        for model, (lap, secs) in known.items():
-            if model not in self.best or lap < self.best[model][0]:
-                self.best[model] = (lap, list(secs))
-
-    def take_dirty(self) -> dict[str, tuple[float, list[float]]]:
-        out = {m: self.best[m] for m in self.dirty if m in self.best}
-        self.dirty.clear()
-        return out
 
     def profiles(self, factor: float) -> dict[str, list[int]]:
         """The minimum time in ms of each sector, per car model that has a clean lap: factor x its best sector times."""
