@@ -74,6 +74,7 @@ JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
+PITSPEED_GAP_S = 20.0               # s between two pit-lane speed sanctions of one car (one per pass through the pit lane)
 HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart call...) stays on screen the whole caution: it is dropped when the flag leaves the cautions or when its tag is replaced (the TTL is only a ceiling)
 CUT_DT_LAPS = 3                 # laps to serve the drive-through of a cuts ladder step 0 (served = the hub reports the car in the pit lane afterwards)
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
@@ -157,6 +158,9 @@ class RaceControl:
         self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
+        self.pit_limit: dict | None = None                   # the pit-lane speed rule of this track ({limit_kmh, tolerance_kmh, penalty_s}, app/pitlimits.py); None = no rule
+        self.pit_limit_at = -1e9                             # when it was last read from the database (request threads refresh it)
+        self._pitspeed_at: dict[int, float] = {}             # car -> when it was last sanctioned for the pit lane speed (once per pass)
         self.ref_key: tuple[str, str] | None = None          # (track, layout) whose reference laps were read from the database (app/vscrefs.py)
         self.line_told: dict[str, str] = {}                  # hold tag -> the text of the order / "line up" notice on the screens now (a notice is only said again when its text changes)
         self.red_ref: dict | None = None                     # the F1 way: {"lap": n, "order": [cars]} = the last line every car of the leader's lap had crossed when the red flag came; the restart grid and the lap count come from it
@@ -1228,6 +1232,22 @@ class RaceControl:
         self._bump()
         return True
 
+    def pit_speed(self, car: int, kmh: float, now: float) -> dict | None:
+        """The hub of `car` says it is over the pit-lane limit; `kmh` is the manager's OWN reading of its speed (the hub is client evidence). One sanction per pass (PITSPEED_GAP_S): the track's penalty, a drive-through
+        or seconds on the race result, through the flag ledger. None when nothing is owed."""
+        with _lock:
+            lim = self.pit_limit
+            if not lim or car == self.pace_car or not self._sanctioned() or kmh < lim["limit_kmh"] + lim["tolerance_kmh"]:
+                return None
+            if now - self._pitspeed_at.get(car, -1e9) < PITSPEED_GAP_S:
+                return None
+            if not self._flag_sanction("pitspeed", car, {"ladder": [lim["penalty_s"]], "unserved_s": 10}, now, kmh=round(kmh), limit=lim["limit_kmh"]):
+                return None
+            self._pitspeed_at[car] = now
+            if self.flag_new and self.flag_new[-1].get("kind") == "pitspeed":
+                self.flag_new[-1].update(kmh=round(kmh), limit=lim["limit_kmh"])   # (the notice says how fast and what the limit is)
+            return {"kmh": round(kmh), "limit": lim["limit_kmh"], "step": lim["penalty_s"]}
+
     def conduct_add(self, guid: str, car: int | None = None) -> None:
         """One more sanction on this driver's conduct (any flag, DRS, a round of the cuts ladder): the black-and-white flag warns him at `bw_at`, the black one comes at `black_at` (rule `black`)."""
         rule = self._rule("black")
@@ -1828,7 +1848,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"]} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:

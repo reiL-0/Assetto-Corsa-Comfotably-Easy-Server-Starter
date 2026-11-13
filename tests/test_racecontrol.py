@@ -491,3 +491,41 @@ def test_the_directors_white_flag_is_the_last_lap_in_a_laps_race_and_in_a_timed_
     pkt, orig = last_lap_bytes(timed, 7, 12 * 60000 + 5000)
     assert pkt == acsp.encode_set_session_info(2, "Race", 3, 0, 12, 60) and orig == {"laps": 0, "time_min": 30}   # the time is up: the next crossing is the chequered
     assert last_lap_bytes({**laps_race, "session_type": 2}, 7, 0) is None
+
+
+def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_managers_own_speed(live):
+    from app import pitlimits
+    sid, client, sent = live
+    rc = state_of(sid, True, client.session, create=True)
+    rc.audit_guids = {3: client.cars[3]["driver_guid"]}
+    rc.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
+    steward = _client("steward")
+    client.session.update({"track": "imola", "track_config": ""})
+    assert steward.get(f"{V}/servers/{sid}/race-control/pit-limit").json()["limit_kmh"] == 0
+    assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}).status_code == 200
+    assert pitlimits.get("imola", "") == {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
+    api.get(f"{V}/servers/{sid}/race-state")   # (the state poll reads the track's rule)
+    assert rc.pit_limit and rc.snapshot()["pit_limit"] == {"limit_kmh": 80, "tolerance_kmh": 5}
+    assert rc.pit_speed(3, 84.0, 1000.0) is None, "inside the tolerance (80 + 5)"
+    assert rc.pit_speed(3, 90.0, 1001.0) == {"kmh": 90, "limit": 80, "step": 0} and [p["car_id"] for p in rc.penalties] == [3], "a drive-through"
+    assert rc.pit_speed(3, 95.0, 1005.0) is None, "the same pass: once"
+    assert rc.pit_speed(3, 95.0, 1030.0) is not None, "another pass: a new offence"
+    assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and pitlimits.get("imola", "") is None
+    rc2 = RaceControl(session_ref={"session_type": 3}); rc2.server_id = 9
+    rc2.audit_guids = {1: "G1"}; rc2.pit_limit = {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 5}
+    assert rc2.pit_speed(1, 70.0, 10.0)["step"] == 5 and not rc2.penalties, "seconds on the result, no drive-through"
+
+
+def test_the_hub_report_of_pit_speed_is_judged_with_the_managers_own_speed(live):
+    sid, client, sent = live
+    rc = state_of(sid, True, client.session, create=True)
+    rc.audit_guids = {3: client.cars[3]["driver_guid"]}
+    rc.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
+    rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
+    steward = _client("steward")
+    url, body = f"{V}/servers/{sid}/race-control/pit-speed", {"car_id": 3, "name": "Ana"}
+    client.cars[3]["velocity"] = [0.0, 0.0, 20.0]   # 72 km/h: the hub claims more, the server says no
+    assert steward.post(url, json=body).status_code == 204 and not rc.penalties
+    client.cars[3]["velocity"] = [0.0, 0.0, 25.0]   # 90 km/h
+    assert steward.post(url, json=body).status_code == 204 and [p["car_id"] for p in rc.penalties] == [3]
+    assert steward.post(url, json={"car_id": 3, "name": "Beto"}).status_code == 409, "not that driver"
