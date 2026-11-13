@@ -1497,3 +1497,24 @@ def test_the_directors_black_flag_disqualifies_who_ignores_it_and_a_disqualified
     sent.clear()
     client._apply({'type': 'new_connection', 'car_id': 7, 'driver_name': 'Ana', 'driver_guid': guid, 'car_model': 'bmw', 'car_skin': 'red'})
     assert acsp.encode_kick_user(7) in sent, 'and he is kicked again if he comes back'
+
+
+def test_withdrawing_the_red_flag_of_a_race_with_nascar_forms_the_grid_in_the_frozen_order(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    client.cars.update({i: {'driver_name': n} for i, n in ((3, 'Ana'), (4, 'Beto'), (5, 'Cleo'))})
+    for car, spline in ((3, 0.50), (4, 0.40), (5, 0.30)):
+        client.field.update(car, spline, 3)
+        client.field.completed_laps[car] = 3
+    rc.lap_times = {3: {3: 100.0, 4: 101.0, 5: 102.0}}   # the last line everybody crossed: the order of the reference
+    steward = _client('steward')
+    assert steward.post(f'{V}/servers/{sid}/race-control/flag-notice', json={'kind': 'red'}).status_code == 200
+    assert rc.red_ref and rc.red_ref['order'][:3] == [3, 4, 5] and rc.flag == 'green'
+    assert steward.post(f'{V}/servers/{sid}/race-control/flag-notice', json={'kind': 'red', 'on': False}).status_code == 200
+    assert rc.flag == 'yellow' and rc.caution and rc.caution.keep_frozen, 'the red withdrawn: the caution that holds the reference order'
+    adapter.line_up_notices(SimpleNamespace(server_id=sid, acsp=client), rc, dict(client.field.progress))
+    said = {(n['text'], n['to']) for n in rc.snapshot()['notices']}
+    assert ('ORDEN CONGELADO: P1 · FILA 1 · LADO DE LA POLE · LÍDER', 3) in said
+    assert ('ORDEN CONGELADO: P2 · FILA 1 · LADO CONTRARIO · detrás de Ana', 4) in said
+    assert ('ORDEN CONGELADO: P3 · FILA 2 · LADO DE LA POLE · detrás de Beto', 5) in said
