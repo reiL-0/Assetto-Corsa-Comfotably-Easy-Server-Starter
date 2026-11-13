@@ -170,6 +170,30 @@ def test_car_info_after_reattaching_fills_the_table_without_counting_a_join(monk
 
 
 
+def test_a_car_that_acserver_dropped_without_saying_so_is_closed_by_the_slot_question(monkeypatch):
+    """A kick for a wrong checksum sends NEW_CONNECTION and never CONNECTION_CLOSED: the empty-slot answer to the periodic question must close the car (table, board and leave metric)."""
+    from app import metrics
+    seen = []
+    monkeypatch.setattr(metrics, "log", lambda *a, **k: seen.append(a[1]))
+    c = acsp.ACSPClient(73)
+    c._apply({"type": "new_connection", "car_id": 5, "car_model": "bmw", "car_skin": "s", "driver_name": "Bea", "driver_team": "", "driver_guid": "76561198000000002"})
+    assert list(c.cars) == [5]
+    c._apply({"type": "car_info", "car_id": 5, "is_connected": True, "car_model": "bmw", "car_skin": "s", "driver_name": "Bea", "driver_team": "", "driver_guid": "76561198000000002"})
+    assert list(c.cars) == [5], "still there: the answer says so"
+    empty = {"type": "car_info", "car_id": 5, "is_connected": False, "car_model": "", "car_skin": "", "driver_name": "", "driver_team": "", "driver_guid": ""}
+    c._apply(empty)
+    assert list(c.cars) == [5], "nobody asked (no sweep): an answer alone closes nobody"
+    c._asked[5] = "76561198000000002"   # what `sweep` does before asking
+    c._apply(empty)
+    assert not c.cars and not [d for d in c.board.drivers if d.connected]
+    # a late empty answer must not close the driver who has just taken the slot
+    c._asked[5] = "76561198000000002"
+    c._apply({"type": "new_connection", "car_id": 5, "car_model": "bmw", "car_skin": "s", "driver_name": "Cris", "driver_team": "", "driver_guid": "76561198000000003"})
+    c._apply(empty)
+    assert list(c.cars) == [5] and c.cars[5]["driver_name"] == "Cris"
+    c._apply({"type": "car_info", "car_id": 6, "is_connected": False, "car_model": "", "car_skin": "", "driver_name": "", "driver_team": "", "driver_guid": ""})   # an empty slot we never had: nothing happens
+
+
 def test_ban_and_kick_by_steam_id(monkeypatch):
     from conftest import ADMIN
     from fastapi.testclient import TestClient

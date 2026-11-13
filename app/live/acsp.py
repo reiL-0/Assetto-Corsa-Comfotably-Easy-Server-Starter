@@ -60,6 +60,7 @@ COLLISION_WITH_ENV = 11
 
 
 TRAIL = 50  # position samples kept per car (~10 s at the 5 Hz asked for)
+SWEEP_S = 10  # s between the questions "who is in this slot?" to the cars we think are connected (see `sweep`)
 POS_INTERVAL_MS = 200  # car positions to ask the server for (5 Hz is plenty for a map)
 
 
@@ -367,6 +368,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self._length_logged: float | None = None
         self.transport: asyncio.DatagramTransport | None = None
         self._hello: asyncio.Task | None = None
+        self._sweep: asyncio.Task | None = None
+        self._asked: dict[int, str] = {}   # car_id -> the GUID that sat in the slot when `sweep` asked about it (an empty answer only closes THAT driver)
         self._claim_last: dict[int, float] = {}  # car_id -> monotonic time of the last automatic-token request answered (see `_claim_issue`)
         self._claim_tasks: set[asyncio.Task] = set()
 
@@ -387,6 +390,11 @@ class ACSPClient(asyncio.DatagramProtocol):
 
     def _apply(self, event: dict) -> None:
         t = event["type"]
+        if t == "car_info" and not event["is_connected"] and (old := self.cars.get(event["car_id"])) and self._asked.pop(event["car_id"], None) == old.get("driver_guid"):
+            # acServer let him go without a CONNECTION_CLOSED (a kick for a wrong checksum): the question of `sweep` found the slot empty, so it is the same as if it had said so
+            # (only if the one who is there now is the one we asked about: a late answer must not close a driver who has just taken the slot)
+            event = {**old, "type": "connection_closed"}
+            t = "connection_closed"
         self.board.apply(event)
         self._record(event)
         if t in ("new_session", "session_info"):
@@ -658,9 +666,20 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self.send(encode_get_car_info(car_id))
                 return
 
+    async def sweep(self) -> None:
+        """acServer does not always say that a car left (a kick for a wrong checksum sends NEW_CONNECTION and no CONNECTION_CLOSED): ask it, every SWEEP_S, about the slots we
+        think are taken; the answer for an empty one closes the car in `_apply`."""
+        while True:
+            await asyncio.sleep(SWEEP_S)
+            for car_id, car in list(self.cars.items()):
+                self._asked[car_id] = car.get("driver_guid")
+                self.send(encode_get_car_info(car_id))
+
     def close(self) -> None:
         if self._hello:
             self._hello.cancel()
+        if self._sweep:
+            self._sweep.cancel()
         if self.transport:
             self.transport.close()
 
@@ -682,4 +701,5 @@ async def connect(
         remote_addr=(host, remote_port),
     )
     protocol._hello = asyncio.create_task(protocol.hello())
+    protocol._sweep = asyncio.create_task(protocol.sweep())
     return protocol
