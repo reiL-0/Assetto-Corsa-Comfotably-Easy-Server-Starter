@@ -1326,7 +1326,9 @@ class RaceControl:
         n = self.flag_count.get((guid, "black"), 0) + 1
         key = (self.server_id, self.cuts_session_key, guid, "black", n)
         if len(_flag_dues_pending) >= MAX_FLAG_DUES_PENDING:
-            log.error("flags: pending ledger full; disqualification dropped: car %s", car)
+            log.error("flags: pending ledger full; disqualification not written on the result: car %s", car)
+            self.flag_new.append({"msg": "offence", "kind": "black", "car": car, "seq": n, "step": "dsq", "laps": 0})   # (he is still told and kicked: only the result line is missing)
+            self._bump()
             return
         self.flag_count[(guid, "black")] = n
         _flag_dues_pending[key] = dict(server_id=self.server_id, session_key=self.cuts_session_key, driver_guid=guid, kind="black", seq=n, seconds=0, ts=time.time())   # (0 s = the disqualification)

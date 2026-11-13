@@ -138,6 +138,9 @@ class Caution:
             elif now - self._stopped.setdefault(c, now) >= SPIN_HOLD:
                 self.spun.append(c)
                 out.append(c)
+                if c in self.restart:   # (the "to go" was called already: the restart line moves him to the back too, so the car that leads is the right one)
+                    self.restart.remove(c)
+                    self.restart.append(c)
         return out
 
     def line_up(self, in_pits=()) -> list[int]:
@@ -148,8 +151,9 @@ class Caution:
         free = [self.free_pass] if self.free_crossed and self.free_pass is not None else []
         back = pits | bad | set(free) | set(self.spun)
         line = [c for c in self.frozen if c not in back and c not in self.gone]
-        return line + [c for c in self.frozen if c in pits and c not in bad and c not in free and c not in self.spun] + [c for c in self.frozen if c in bad and c not in free and c not in self.spun] \
-            + [c for c in free if c not in self.spun] + [c for c in self.spun if c in self.frozen]
+        back_of = lambda c: c not in self.gone   # (a car that left: its slot may be somebody else's now, it is in no group)
+        return line + [c for c in self.frozen if c in pits and c not in bad and c not in free and c not in self.spun and back_of(c)] + [c for c in self.frozen if c in bad and c not in free and c not in self.spun and back_of(c)] \
+            + [c for c in free if c not in self.spun and back_of(c)] + [c for c in self.spun if c in self.frozen and back_of(c)]
 
     def early_formers(self, progress: dict[int, float], pace_progress: float | None, order: list[int]) -> dict[int, int]:
         """Lead-lap cars lining up behind the pace car BEFORE the leader has reached it (the field forms behind the leader, who is the one that meets the pace car first): {car: the car it has to line up behind}.

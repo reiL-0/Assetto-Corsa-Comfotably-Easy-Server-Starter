@@ -326,3 +326,16 @@ def test_the_lapped_cars_form_where_they_were_and_the_free_pass_goes_to_the_back
     assert c.line_up() == [1, 2, 4, 5, 3], "the free pass crossed the line: the very back"
     c.spun.append(2)
     assert c.line_up() == [1, 4, 5, 3, 2], "a spin goes behind even the free pass car"
+
+
+def test_a_car_that_left_is_in_no_group_of_the_line_and_a_spin_after_to_go_moves_the_restart_line_too():
+    c = Caution(field(5.20, 5.18, 5.16, 5.14), 0.0)
+    c.spun.append(2)
+    c.gone.add(2)
+    assert c.line_up() == [1, 3, 4], "the slot of a car that left may be somebody else's: it is nowhere in the line"
+    c = Caution(field(5.20, 5.18, 5.16), 0.0)
+    c.restart = [1, 2, 3]
+    prog = dict(c.p0)
+    c.check_spins({1: 3.0, 2: 60.0, 3: 60.0}, 60.0, set(), prog, 10.0)
+    assert c.check_spins({1: 3.0, 2: 60.0, 3: 60.0}, 60.0, set(), prog, 13.0) == [1]
+    assert c.restart == [2, 3, 1], "the leader spun after the 'to go': the new first leads the restart"
