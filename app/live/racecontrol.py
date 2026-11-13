@@ -162,6 +162,8 @@ class RaceControl:
         self.pit_limit: dict | None = None                   # the pit-lane speed rule of this track ({limit_kmh, tolerance_kmh, penalty_s}, app/pitlimits.py); None = no rule
         self.pit_limit_gen = 0                               # moves when the director changes the limit: a database read that began before it must not publish its old value
         self.pit_limit_at = -1e9                             # when it was last read from the database (request threads refresh it)
+        self._laps_of: dict[int, int] = {}                   # car -> its completed laps as the last lap_done said
+        self._pitspeed_lap: dict[int, int] = {}              # car -> its completed laps when it was last sanctioned for the pit-lane speed
         self._pitspeed_at: dict[int, float] = {}             # car -> when it was last sanctioned for the pit lane speed (once per pass)
         self.ref_key: tuple[str, str] | None = None          # (track, layout) whose reference laps were read from the database (app/vscrefs.py)
         self.line_told: dict[str, str] = {}                  # hold tag -> the text of the order / "line up" notice on the screens now (a notice is only said again when its text changes)
@@ -1155,6 +1157,7 @@ class RaceControl:
         """A car completed a lap (ACSP): it feeds the pace of the blue flag when it is a CLEAN lap (not the first, no server cut, no pit-lane pass, begun under green or white, not the pace car). `guid` is the driver
         in the slot now: a slot that changed hands starts from no pace, whatever the field's samples have already noticed."""
         with _lock:
+            self._laps_of[car] = laps   # (a new pass through the pit lane needs a lap completed since the last pit-speed sanction)
             if guid and self._pace_owner.get(car, guid) != guid:
                 self.pace.forget(car)
             if guid:
@@ -1244,11 +1247,12 @@ class RaceControl:
             if guid and str(self.audit_guids.get(car) or "") != guid:
                 return None   # (the slot changed hands since the monitor last looked: the driver who was reported is not the one who would be sanctioned)
             last = self._pitspeed_at.get(car)
-            if last is not None and (now - last < PITSPEED_GAP_S or self._pit_seen.get(car, -1e9) <= last):
-                return None   # (one sanction per pass: the next one needs the hub to say the car came into the pit lane AGAIN)
+            if last is not None and (now - last < PITSPEED_GAP_S or self._laps_of.get(car, 0) <= self._pitspeed_lap.get(car, -1)):
+                return None   # (one sanction per pass: the next one needs a lap completed since, which a new pass through the pit lane brings; the hub's pit reports also come while it STAYS there)
             if not self._flag_sanction("pitspeed", car, {"ladder": [lim["penalty_s"]], "unserved_s": 10}, now, kmh=round(kmh), limit=lim["limit_kmh"]):
                 return None
             self._pitspeed_at[car] = now
+            self._pitspeed_lap[car] = self._laps_of.get(car, 0)
             if self.flag_new and self.flag_new[-1].get("kind") == "pitspeed":
                 self.flag_new[-1].update(kmh=round(kmh), limit=lim["limit_kmh"])   # (the notice says how fast and what the limit is)
             return {"kmh": round(kmh), "limit": lim["limit_kmh"], "step": lim["penalty_s"]}
@@ -1356,7 +1360,7 @@ class RaceControl:
         with _lock:
             self.red_laps.pop(car, None)
             self.red_near.discard(car)
-            self._pitspeed_at.pop(car, None)   # (the slot may be somebody else's now: his first pit-lane offence is not forgiven by the one before)
+            self._pitspeed_at.pop(car, None); self._pitspeed_lap.pop(car, None); self._laps_of.pop(car, None)   # (the slot may be somebody else's now: his first pit-lane offence is not forgiven by the one before)
 
     def _disqualify(self, car: int, guid: str, live: bool) -> None:
         """The black flag was not obeyed: the driver is disqualified from the race (a `FlagDue` of kind black; the result turns it into a `dsq` penalty). Only when the black flag is live."""

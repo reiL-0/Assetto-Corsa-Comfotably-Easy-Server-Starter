@@ -623,7 +623,13 @@ def field_view(server_id: int, sess: SessionDep) -> dict:
     """The table of the director's «En vivo» tab: one row per connected driver in race order (best lap order outside a race) with gap, laps, best lap and what he has on him (drive-through, flags, disqualified,
     boxes). Positions and times come from the live board, the marks from the race control state."""
     inst, rc = _control(server_id, sess)
-    lb = inst.acsp.board.leaderboard()
+    for attempt in (0, 1):   # (the board is changed by the event loop while this worker reads it: a read that lands in the middle of a reset is read again)
+        try:
+            lb = inst.acsp.board.leaderboard()
+            break
+        except (IndexError, KeyError, RuntimeError):
+            if attempt:
+                raise HTTPException(503, "el tablero cambió mientras se leía: reintenta") from None
     race = lb.get("Type") == RACE_TYPE
     drivers = [d for d in lb["ConnectedDrivers"] if d["CarInfo"]["CarID"] != rc.pace_car]
     best = lambda d: (next(iter(d["Cars"].values()))["BestLap"] or 1 << 62)
