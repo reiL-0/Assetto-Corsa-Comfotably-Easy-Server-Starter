@@ -75,3 +75,14 @@ def test_the_monitor_sync_loads_the_stored_windows_and_writes_the_new_laps(monke
         assert not rc.reflaps.fresh
     finally:
         live_rc._states.pop(sid, None)
+
+
+def test_a_vsc_refs_table_from_before_the_window_column_is_migrated(tmp_path):
+    import sqlite3
+    from app import db
+    con = sqlite3.connect(tmp_path / "old.db")
+    con.execute('CREATE TABLE vsc_refs (track VARCHAR NOT NULL, track_config VARCHAR NOT NULL, car_model VARCHAR NOT NULL, lap_s FLOAT NOT NULL, sectors JSON NOT NULL, set_at DATETIME NOT NULL, PRIMARY KEY (track, track_config, car_model))')
+    con.execute("INSERT INTO vsc_refs VALUES ('spa', '', 'gt3', 140.0, '[]', '2026-11-13')")
+    db._m016_vsc_refs_window(con)
+    db._m016_vsc_refs_window(con)   # idempotent
+    assert con.execute("SELECT recent_laps FROM vsc_refs").fetchone()[0] == "[]"
