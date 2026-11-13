@@ -34,7 +34,7 @@ def enabled(server_id):
 EXCLUDED = {
     **dict.fromkeys(("track_clear", "without_pace_car", "pace_car_state", "caution_eta", "grace_left", "due",
                     "auto_for", "auto_live", "judging_continuously", "delta_block", "autoflags_view",
-                    "give_back_peek", "give_back_view", "cuts_view", "snapshot", "line_up", "black_view"), "Read-only view/filter"),
+                    "give_back_peek", "give_back_view", "cuts_view", "snapshot", "line_up"), "Read-only view/filter"),
     "audit": "Output sink; replay installs its own decision collector",
     "notify": "Presentation notices only; may contain private names",
     "drop_hold": "Presentation notice lifetime only",
@@ -46,6 +46,7 @@ EXCLUDED = {
     "damage_report": "Client-reported damage for the orange disc: evidence from the driver's game, not field data",
     "set_red": "The director's red flag: a manual input, not field data",
     "conduct_add": "Conduct counter fed by sanctions already decided elsewhere; not detector input",
+    "drop_red": "Disconnect bookkeeping: a car that left owes nothing under the red flag; not field data",
     "show_black": "The director shows the black flag: a manual input, not field data",
     "drs_tick": "DRS window from laps, flag and weather; no field judge reads it (app/live/drs.py)",
     "drs_use": "Client evidence of DRS use, sanctioned from the window state; not field data",

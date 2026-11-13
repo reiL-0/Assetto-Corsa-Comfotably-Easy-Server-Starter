@@ -148,7 +148,6 @@ class RaceControl:
         self.blue_ignored: set[tuple[int, int]] = set()      # the pairs whose present blue already cost an offence: one per appearance
         self.flag_count: dict[tuple, int] = {}               # (driver, flag kind) -> offences of this session (the n-th one picks the ladder step)
         self.conduct: dict[str, int] = {}                    # driver -> sanctions earned in this race (every flag, DRS, the cuts ladder): the black-and-white and the black flag come from it
-        self.black_proposed: set[str] = set()                # drivers whose conduct reached the black flag: written down once, the director decides
         self.disqualified: set[str] = set()                  # drivers disqualified in this race (a black flag the director showed and they ignored): out of the server, and they cannot come back to it
         self.bw_shown: set[str] = set()                      # drivers who have the black-and-white flag
         self.black: dict[str, dict] = {}                     # driver -> {car, laps}: the black flag, and the laps he has left to come into the pits
@@ -1234,11 +1233,12 @@ class RaceControl:
             car = next((c for c, g in self.audit_guids.items() if g == guid), None)
         if car is None or guid in self.black:
             return
-        if n >= rule["black_at"] and guid not in self.black_proposed:   # (the black flag is the director's: the conduct only writes it down)
-            self.black_proposed.add(guid)
-            self.audit("black_flag", car=car, driver=guid, conduct=n, why="conduct", executed=False, by="director_only")
-            self._bump()   # (the director's panel shows the proposal)
-        if n >= rule["bw_at"] and guid not in self.bw_shown:
+        if n >= rule["black_at"]:   # (the owner's rule: the sanctions of the race add up to the black flag; the black flag itself only disqualifies if it is ignored)
+            self.black[guid] = {"car": car, "laps": rule["pit_laps"], "since": self.clock.time()}
+            self.flag_new.append({"msg": "black", "car": car, "laps": rule["pit_laps"]})
+            self.audit("black_flag", car=car, driver=guid, conduct=n, why="conduct", executed=self.flag_modes.get("black") == "live")
+            self._bump()
+        elif n >= rule["bw_at"] and guid not in self.bw_shown:
             self.bw_shown.add(guid)
             self.flag_new.append({"msg": "bw", "car": car, "n": n})
             self.audit("bw_flag", car=car, driver=guid, conduct=n, executed=self.flag_modes.get("black") == "live")
@@ -1253,14 +1253,8 @@ class RaceControl:
             del self.meatball[guid]
             self.audit("meatball_served", car=car, driver=guid, executed=True)
         if guid in self.black and at > self.black[guid]["since"]:
-            del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid); self.black_proposed.discard(guid)
+            del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
-
-    def black_view(self) -> list[dict]:
-        """The proposals of a black flag for the director: drivers whose conduct reached `black_at` and who still have no black flag (`{car, conduct}`). Nothing is done until the director shows it."""
-        by_guid = {g: c for c, g in self.audit_guids.items()}
-        return [{"car": by_guid[g], "conduct": self.conduct.get(g, 0)} for g in sorted(self.black_proposed)
-                if g in by_guid and g not in self.black and g not in self.disqualified and by_guid[g] != self.pace_car]
 
     def show_black(self, car: int) -> bool:
         """The DIRECTOR shows the black flag to a car: it has `pit_laps` laps to come into the pits or it is disqualified (the only way a black flag is given: no rule gives it by itself). False when the car has no
@@ -1282,7 +1276,7 @@ class RaceControl:
         self._bump()
 
     def _flags_lap(self, car: int, in_pit_lap: bool, now: float) -> None:
-        """A car completed a lap: one lap fewer to come into the pits for the orange disc (then the black flag), for the red flag (then the black flag) and for the black flag (then the disqualification)."""
+        """A car completed a lap: one lap fewer to come into the pits for the orange disc (then a drive-through), for the red flag (then the disqualification) and for the black flag (then the disqualification)."""
         guid = str(self.audit_guids.get(car) or "")
         if not guid:
             return
@@ -1297,20 +1291,36 @@ class RaceControl:
                 if self.red_laps[car] <= 0:
                     del self.red_laps[car]
                     self.meatball.pop(guid, None)
-                    self.audit("black_flag", car=car, driver=guid, why="red", executed=False, by="director_only")   # (not obeyed: the black flag is the director's to show)
+                    self._disqualify(car, guid, live and self.flag_modes.get("red") == "live")   # (the red flag is a fact: the whole field must stop; the laps to come in are over: disqualified, no black flag in between)
         if in_pit_lap:
             return
         if guid in self.meatball:
             self.meatball[guid]["laps"] -= 1
             if self.meatball[guid]["laps"] <= 0:
                 del self.meatball[guid]
-                self.audit("black_flag", car=car, driver=guid, why="meatball", executed=False, by="director_only")
+                self._unrepaired(car, guid)
         elif guid in self.black:
             self.black[guid]["laps"] -= 1
             if self.black[guid]["laps"] <= 0:
                 del self.black[guid]
-                self.conduct[guid] = 0; self.bw_shown.discard(guid); self.black_proposed.discard(guid)
+                self.conduct[guid] = 0; self.bw_shown.discard(guid)
                 self._disqualify(car, guid, live)
+
+    def _unrepaired(self, car: int, guid: str) -> None:
+        """The orange disc was not obeyed (the damaged car did not come into the pits in time): a DRIVE-THROUGH, not the black flag. Passing through the pit lane serves it, so stopping to repair does too."""
+        live = self.flag_modes.get("meatball") == "live" and "meatball" not in self.auto_off
+        self.audit("flag_offence", flag="meatball", car=car, driver=guid, step="dt", executed=live)
+        if not live:
+            return
+        self.add_penalty(car, VIOLATION_LAPS)
+        self.flag_new.append({"msg": "offence", "kind": "meatball", "car": car, "seq": 1, "step": 0, "laps": VIOLATION_LAPS})
+        self.conduct_add(guid, car)
+
+    def drop_red(self, car: int) -> None:
+        """A car left the server under a red flag: it owes nothing (a driver who connects again is not penalised for the laps he was not there)."""
+        with _lock:
+            self.red_laps.pop(car, None)
+            self.red_near.discard(car)
 
     def _disqualify(self, car: int, guid: str, live: bool) -> None:
         """The black flag was not obeyed: the driver is disqualified from the race (a `FlagDue` of kind black; the result turns it into a `dsq` penalty). Only when the black flag is live."""
@@ -1495,7 +1505,7 @@ class RaceControl:
             return
         for car, (generation, real) in self.pacedelta.totals(self.vsc_id).items():
             if real < -self.pacedelta.tol_s:
-                self._queue_neutral_due(car, generation, "fcy", 0, severe_s, now, f"FCY: delta total {real:+.2f} s al volver a verde")
+                self._queue_neutral_due(car, generation, "fcy", 0, severe_s, now, f"FCY: ritmo no respetado ({abs(real):.2f} s de ventaja) al volver a verde")
 
     @fieldrec.capture(_lock)
     def pace_tick(self, samples: dict, speeds: dict[int, float], mono: float, now: float, models: dict[int, str] | None = None) -> list[dict]:
@@ -1815,7 +1825,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "black_proposals": self.black_view(), **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:
