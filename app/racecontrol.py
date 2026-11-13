@@ -114,21 +114,24 @@ def caution_tick(now: float) -> None:
 def line_up_notices(inst, rc, field: dict) -> None:
     """Under a caution of a race, every server (NASCAR or not): each driver is told his place in the frozen order and BEHIND WHOM he has to be (it updates when the car ahead goes into the pits), and a car that lines up
     behind the pace car before the leader has reached it is told to pass it and form behind the right car. Notices only: a text is said again only when it changes."""
-    order, early = rc.line_up(field)
-    texts: dict[str, tuple[int, str]] = {}
-    order = [c for c in order if c in inst.acsp.cars]   # (a car that left the server is not in the line)
-    for i, car in enumerate(order):
-        texts[f"order-{car}"] = (car, "ORDEN CONGELADO: P1 · LÍDER" if i == 0 else f"ORDEN CONGELADO: P{i + 1} · detrás de {_name(inst, order[i - 1])}")
-    for car, behind in early.items():
-        if car in inst.acsp.cars and behind in inst.acsp.cars:
-            texts[f"form-{car}"] = (car, f"PASA AL PACE CAR: ponte detrás de {_name(inst, behind)}")
-    for tag, (car, text) in texts.items():
-        if rc.line_told.get(tag) != text:
-            rc.line_told[tag] = text
-            _say(rc, text, "race", car, hold=tag)
-    for tag in [t for t in rc.line_told if t not in texts]:
-        del rc.line_told[tag]
-        rc.drop_hold(tag)
+    with _lock:   # (one step: a green that comes in between would clear the notices and these would be put back after it)
+        order, early = rc.line_up(field)
+        if not rc.caution:
+            return
+        texts: dict[str, tuple[int, str]] = {}
+        order = [c for c in order if c in inst.acsp.cars]   # (a car that left the server is not in the line)
+        for i, car in enumerate(order):
+            texts[f"order-{car}"] = (car, "ORDEN CONGELADO: P1 · LÍDER" if i == 0 else f"ORDEN CONGELADO: P{i + 1} · detrás de {_name(inst, order[i - 1])}")
+        for car, behind in early.items():
+            if car in inst.acsp.cars and behind in inst.acsp.cars:
+                texts[f"form-{car}"] = (car, f"PASA AL PACE CAR: ponte detrás de {_name(inst, behind)}")
+        for tag, (car, text) in texts.items():
+            if rc.line_told.get(tag) != text:
+                rc.line_told[tag] = text
+                _say(rc, text, "race", car, hold=tag)
+        for tag in [t for t in rc.line_told if t not in texts]:
+            del rc.line_told[tag]
+            rc.drop_hold(tag)
 
 
 def _due_row(inst, car: int, creditors: list[int], seconds: int, now: float, by: str = "auto", owner: str | None = None) -> dict | None:
