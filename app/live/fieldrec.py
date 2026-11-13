@@ -34,7 +34,7 @@ def enabled(server_id):
 EXCLUDED = {
     **dict.fromkeys(("track_clear", "without_pace_car", "pace_car_state", "caution_eta", "grace_left", "due",
                     "auto_for", "auto_live", "judging_continuously", "delta_block", "autoflags_view",
-                    "give_back_peek", "give_back_view", "cuts_view", "snapshot", "line_up"), "Read-only view/filter"),
+                    "give_back_peek", "give_back_view", "cuts_view", "snapshot", "line_up", "driver_marks"), "Read-only view/filter"),
     "audit": "Output sink; replay installs its own decision collector",
     "notify": "Presentation notices only; may contain private names",
     "drop_hold": "Presentation notice lifetime only",

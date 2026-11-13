@@ -509,7 +509,9 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_m
     assert rc.pit_speed(3, 84.0, 1000.0) is None, "inside the tolerance (80 + 5)"
     assert rc.pit_speed(3, 90.0, 1001.0) == {"kmh": 90, "limit": 80, "step": 0} and [p["car_id"] for p in rc.penalties] == [3], "a drive-through"
     assert rc.pit_speed(3, 95.0, 1005.0) is None, "the same pass: once"
-    assert rc.pit_speed(3, 95.0, 1030.0) is not None, "another pass: a new offence"
+    assert rc.pit_speed(3, 95.0, 1030.0) is None, "the same long pass: 20 s later he is still over, no second sanction without a new entry"
+    rc.report_pit(3, True, now=1040.0)   # the hub says the car came into the pit lane again
+    assert rc.pit_speed(3, 95.0, 1050.0) is not None, "another pass: a new offence"
     assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and pitlimits.get("imola", "") is None
     rc2 = RaceControl(session_ref={"session_type": 3}); rc2.server_id = 9
     rc2.audit_guids = {1: "G1"}; rc2.pit_limit = {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 5}
@@ -529,3 +531,23 @@ def test_the_hub_report_of_pit_speed_is_judged_with_the_managers_own_speed(live)
     client.cars[3]["velocity"] = [0.0, 0.0, 25.0]   # 90 km/h
     assert steward.post(url, json=body).status_code == 204 and [p["car_id"] for p in rc.penalties] == [3]
     assert steward.post(url, json={"car_id": 3, "name": "Beto"}).status_code == 409, "not that driver"
+
+
+def test_the_directors_field_table_has_the_race_order_gaps_and_what_each_driver_has_on_him(live):
+    from app.live.board import Driver
+    sid, client, sent = live
+    rc = state_of(sid, True, client.session, create=True)
+    client.board.session = {"session_type": 3, "name": "Race"}
+    for car, name, guid, laps, total, best in ((3, "Ana", "G3", 5, 500_000, 95_000), (4, "Beto", "G4", 5, 502_500, 96_000), (5, "Cleo", "G5", 4, 410_000, 97_000)):
+        client.board.drivers.append(Driver(car_id=car, name=name, guid=guid, model="bmw", skin="red", connected=True, laps=laps, total_ms=total, best_ms=best))
+    rc.audit_guids = {3: "G3", 4: "G4", 5: "G5"}
+    rc.bw_shown.add("G4"); rc.disqualified.add("G5"); rc.add_penalty(4, 3); rc.conduct["G4"] = 3
+    rc.report_pit(3, True)
+    steward = _client("steward")
+    r = steward.get(f"{V}/servers/{sid}/race-control/field")
+    assert r.status_code == 200
+    rows = r.json()["rows"]
+    assert [x["name"] for x in rows] == ["Ana", "Beto", "Cleo"] and rows[0]["gap"] is None and rows[0]["flags"] == ["boxes"]
+    assert rows[1]["gap"] == {"laps": 0, "ms": 2500} and rows[1]["flags"] == ["bw", "dt"] and rows[1]["conduct"] == 3 and rows[1]["best_ms"] == 96000
+    assert rows[2]["gap"] == {"laps": 1, "ms": None} and rows[2]["flags"] == ["dsq"]
+    assert _client("driver").get(f"{V}/servers/{sid}/race-control/field").status_code in (401, 403), "the director table is for stewards"

@@ -74,7 +74,8 @@ JUDGE_MIN_SAMPLES = 3
 PIT_EXEMPT_FOR = 4.0             # s a "I am in the pit lane" report counts for
 NEXT_SESSION_DELAY = 600        # s; initial delay to keep the finished race and results visible
 NOTICE_TTL, NOTICE_MAX = 10, 64   # s a notice stays on screen (the hub counts it from when it first sees it); how many are kept at once
-PITSPEED_GAP_S = 20.0               # s between two pit-lane speed sanctions of one car (one per pass through the pit lane)
+DRIVER_PITS_FOR = 15.0               # s a pit-lane report keeps a car marked «boxes» in the director's table (the hub reports the entry, not the whole stay)
+PITSPEED_GAP_S = 20.0               # s at least between two pit-lane speed sanctions of one car, and the hub has to report a new pit-lane entry in between (one per pass)
 HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart call...) stays on screen the whole caution: it is dropped when the flag leaves the cautions or when its tag is replaced (the TTL is only a ceiling)
 CUT_DT_LAPS = 3                 # laps to serve the drive-through of a cuts ladder step 0 (served = the hub reports the car in the pit lane afterwards)
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
@@ -1242,8 +1243,9 @@ class RaceControl:
                 return None
             if guid and str(self.audit_guids.get(car) or "") != guid:
                 return None   # (the slot changed hands since the monitor last looked: the driver who was reported is not the one who would be sanctioned)
-            if now - self._pitspeed_at.get(car, -1e9) < PITSPEED_GAP_S:
-                return None
+            last = self._pitspeed_at.get(car)
+            if last is not None and (now - last < PITSPEED_GAP_S or self._pit_seen.get(car, -1e9) <= last):
+                return None   # (one sanction per pass: the next one needs the hub to say the car came into the pit lane AGAIN)
             if not self._flag_sanction("pitspeed", car, {"ladder": [lim["penalty_s"]], "unserved_s": 10}, now, kmh=round(kmh), limit=lim["limit_kmh"]):
                 return None
             self._pitspeed_at[car] = now
@@ -1281,6 +1283,13 @@ class RaceControl:
         if guid in self.black and at > self.black[guid]["since"]:
             del self.black[guid]; self.conduct[guid] = 0; self.bw_shown.discard(guid)
             self.audit("black_served", car=car, driver=guid, executed=True)
+
+    def driver_marks(self, now: float) -> dict:
+        """What the director's table shows beside each driver (read-only, one look under the lock): who has a drive-through to serve, the black-and-white / orange / black flags, who is disqualified, who was
+        reported in the pit lane in the last seconds and who was judged under a VSC/FCY; `conduct` = the sanctions of each driver in this race (by Steam ID)."""
+        with _lock:
+            return {"dt": {p["car_id"] for p in self.penalties}, "bw": set(self.bw_shown), "black": set(self.black), "meatball": set(self.meatball), "dsq": set(self.disqualified),
+                    "conduct": dict(self.conduct), "pits": {c for c, t in self._pit_seen.items() if now - t < DRIVER_PITS_FOR}, "viol": {v["car_id"] for v in self.violations}}
 
     def show_black(self, car: int) -> bool:
         """The DIRECTOR shows the black flag to a car: it has `pit_laps` laps to come into the pits or it is disqualified (the only way a black flag is given: no rule gives it by itself). False when the car has no
