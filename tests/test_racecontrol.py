@@ -510,8 +510,10 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_tracks_penalty_and_the_m
     assert rc.pit_speed(3, 90.0, 1001.0) == {"kmh": 90, "limit": 80, "step": 0} and [p["car_id"] for p in rc.penalties] == [3], "a drive-through"
     assert rc.pit_speed(3, 95.0, 1005.0) is None, "the same pass: once"
     assert rc.pit_speed(3, 95.0, 1030.0) is None, "the same long pass: 20 s later he is still over, no second sanction without a new entry"
-    rc.report_pit(3, True, now=1040.0)   # the hub says the car came into the pit lane again
-    assert rc.pit_speed(3, 95.0, 1050.0) is not None, "another pass: a new offence"
+    rc.report_pit(3, True, now=1040.0)   # the hub's report while the car STAYS in the pit lane
+    assert rc.pit_speed(3, 95.0, 1050.0) is None, "a pit report is no new pass"
+    rc.lap_done(3, 95000, 0, 8, 1060.0, "")   # a lap completed since: another pass through the pit lane
+    assert rc.pit_speed(3, 95.0, 1070.0) is not None, "another pass: a new offence"
     assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and pitlimits.get("imola", "") is None
     rc2 = RaceControl(session_ref={"session_type": 3}); rc2.server_id = 9
     rc2.audit_guids = {1: "G1"}; rc2.pit_limit = {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 5}
