@@ -2091,6 +2091,9 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 old = _old
                 fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid
                 fresh.auto_off = set(old.auto_off)   # (the director's choices outlive the session)
+                same = lambda k: old.session_ref.get(k) == session_ref.get(k)
+                if isinstance(old.session_ref, dict) and isinstance(session_ref, dict) and same("track") and same("track_config"):   # the reference laps of the VSC (best clean lap of each car model) come from practice and qualifying too: they survive the session change on the same track
+                    fresh.reflaps.best = dict(old.reflaps.best)
                 _states[server_id] = fresh
                 fresh.audit("session_start", flag=fresh.flag, previous_flag=old.flag, executed=True)
                 return fresh

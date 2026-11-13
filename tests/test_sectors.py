@@ -385,3 +385,19 @@ def test_an_fcy_that_ends_before_the_judge_looked_at_it_does_not_inherit_the_tot
     rc.set_flag("green", now=1101.0)
     assert _dues() == [], "nothing is queued for the second FCY: nobody was judged in it"
     rcmod._neutral_dues_pending.clear()
+
+
+def test_the_reference_laps_of_the_vsc_survive_the_session_change_on_the_same_track_only():
+    from app.live import racecontrol as control
+    sid = 987
+    try:
+        practice = {"session_type": 1, "track": "spa", "track_config": ""}
+        rc = control.state_of(sid, True, practice, create=True)
+        rc.reflaps.best["gt3"] = (140.0, [10.0] * 20)   # the best clean lap of a gt3 in the practice
+        race = control.state_of(sid, True, {"session_type": 3, "track": "spa", "track_config": ""})
+        assert race is not rc and race.reflaps.best == {"gt3": (140.0, [10.0] * 20)}, "same track: the race starts knowing the practice's laps"
+        assert set(race.reflaps.profiles(1.35)) == {"gt3"}, "so a VSC in the race has a reference for the gt3"
+        other = control.state_of(sid, True, {"session_type": 3, "track": "imola", "track_config": ""})
+        assert other.reflaps.best == {}, "another track: nothing carries over"
+    finally:
+        control._states.pop(sid, None)
