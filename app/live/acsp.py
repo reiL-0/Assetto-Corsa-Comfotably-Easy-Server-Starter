@@ -477,6 +477,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned([event])
         elif t == "connection_closed":
             self.cars.pop(event["car_id"], None)
+            from app.live.racecontrol import state_of
+            if (rc := state_of(self.server_id, True, self.session)):
+                rc.drop_red(event["car_id"])
             self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])
         elif t == "client_loaded":
             if self.on_client_loaded:

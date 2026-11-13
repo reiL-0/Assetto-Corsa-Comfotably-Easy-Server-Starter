@@ -174,6 +174,8 @@ def _flag_messages(inst, rc) -> None:
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · drive-through ({laps} vueltas)", "penalty", car)
         elif kind == "yellow":
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
+        elif kind == "meatball":
+            _say(rc, f"PENALIZACIÓN: no reparaste el daño en boxes · drive-through ({o['laps']} vueltas)", "penalty", car)
         elif kind == "black":
             _say(rc, "DESCALIFICADO: ignoraste la bandera negra", "penalty", car)
             if str((inst.acsp.cars.get(car) or {}).get("driver_guid") or "") in rc.disqualified:   # (a race: out of the server; if he connects again acsp.py kicks him again)
@@ -310,7 +312,7 @@ def announce_neutral(rows: list[dict]) -> None:
         if not rc:
             continue
         who = _name(inst, r["car"])
-        why = "sectores en rojo bajo VSC" if r["kind"] == "vsc" else "delta de FCY no respetado al volver a verde"
+        why = "sectores en rojo bajo VSC" if r["kind"] == "vsc" else "ritmo de FCY no respetado al volver a verde"
         _say(rc, f"{who}: {why} · +{r['seconds']} s al resultado", "penalty")
         _say(rc, f"SANCIÓN: +{r['seconds']} s al resultado · {why}", "penalty", r["car"])
 
@@ -458,10 +460,11 @@ def autoflags_tick(now: float) -> None:
                 continue   # (the severe level is a time penalty: announced when it is saved, `announce_neutral`)
             if d["applied"]:   # (what the judge did, as it was when it did it: not re-read after the lock)
                 pen = d["pen"]
-                what = f"el delta ({d['delta_s']:+.2f} s)" if d["kind"] == "delta" else f"el ritmo ({d['speed_kmh']} km/h)"
-                _say(rc, f"{_name(inst, d['car'])}: no respetó {what}" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
+                flag = d["flag"].upper()
+                how = f"iba {abs(d['delta_s']):.2f} s más rápido de lo permitido" if d["kind"] == "delta" else f"{d['speed_kmh']} km/h"   # (the delta is the time ahead of the allowed pace: said in plain words)
+                _say(rc, f"{_name(inst, d['car'])}: no respetó el ritmo de {flag}: {how}" + (f" · DRIVE-THROUGH {pen['laps']} v." if pen["kind"] == "pits" else ""), "penalty")
                 if pen["kind"] == "pits":
-                    _say(rc, f"PENALIZACIÓN: {'delta' if d['kind'] == 'delta' else 'ritmo'} de {d['flag'].upper()} no respetado · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
+                    _say(rc, f"PENALIZACIÓN: no respetaste el ritmo de {flag} ({how}) · drive-through ({pen['laps']} vueltas)", "penalty", d["car"])
 
 
 def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = None) -> None:
@@ -482,7 +485,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "black_proposals": [], "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
