@@ -159,6 +159,7 @@ class RaceControl:
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
         self.pit_limit: dict | None = None                   # the pit-lane speed rule of this track ({limit_kmh, tolerance_kmh, penalty_s}, app/pitlimits.py); None = no rule
+        self.pit_limit_gen = 0                               # moves when the director changes the limit: a database read that began before it must not publish its old value
         self.pit_limit_at = -1e9                             # when it was last read from the database (request threads refresh it)
         self._pitspeed_at: dict[int, float] = {}             # car -> when it was last sanctioned for the pit lane speed (once per pass)
         self.ref_key: tuple[str, str] | None = None          # (track, layout) whose reference laps were read from the database (app/vscrefs.py)
@@ -1232,13 +1233,15 @@ class RaceControl:
         self._bump()
         return True
 
-    def pit_speed(self, car: int, kmh: float, now: float) -> dict | None:
+    def pit_speed(self, car: int, kmh: float, now: float, guid: str | None = None) -> dict | None:
         """The hub of `car` says it is over the pit-lane limit; `kmh` is the manager's OWN reading of its speed (the hub is client evidence). One sanction per pass (PITSPEED_GAP_S): the track's penalty, a drive-through
         or seconds on the race result, through the flag ledger. None when nothing is owed."""
         with _lock:
             lim = self.pit_limit
             if not lim or car == self.pace_car or not self._sanctioned() or kmh < lim["limit_kmh"] + lim["tolerance_kmh"]:
                 return None
+            if guid and str(self.audit_guids.get(car) or "") != guid:
+                return None   # (the slot changed hands since the monitor last looked: the driver who was reported is not the one who would be sanctioned)
             if now - self._pitspeed_at.get(car, -1e9) < PITSPEED_GAP_S:
                 return None
             if not self._flag_sanction("pitspeed", car, {"ladder": [lim["penalty_s"]], "unserved_s": 10}, now, kmh=round(kmh), limit=lim["limit_kmh"]):
@@ -1314,7 +1317,7 @@ class RaceControl:
                 if self.red_laps[car] <= 0:
                     del self.red_laps[car]
                     self.meatball.pop(guid, None)
-                    self._disqualify(car, guid, live and self.flag_modes.get("red") == "live")   # (the red flag is a fact: the whole field must stop; the laps to come in are over: disqualified, no black flag in between)
+                    self._disqualify(car, guid, self.flag_modes.get("red") == "live" and "red" not in self.auto_off)   # (the red flag is a fact: the whole field must stop; the laps to come in are over: disqualified, no black flag in between)
         if in_pit_lap:
             return
         if guid in self.meatball:
@@ -1344,6 +1347,7 @@ class RaceControl:
         with _lock:
             self.red_laps.pop(car, None)
             self.red_near.discard(car)
+            self._pitspeed_at.pop(car, None)   # (the slot may be somebody else's now: his first pit-lane offence is not forgiven by the one before)
 
     def _disqualify(self, car: int, guid: str, live: bool) -> None:
         """The black flag was not obeyed: the driver is disqualified from the race (a `FlagDue` of kind black; the result turns it into a `dsq` penalty). Only when the black flag is live."""

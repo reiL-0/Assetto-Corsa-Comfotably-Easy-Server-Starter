@@ -295,3 +295,19 @@ def test_a_car_that_left_under_the_red_flag_owes_nothing_and_the_unrepaired_disc
     rc._unrepaired(1, "G1")
     assert not rc.penalties, "shadow: written down, nothing done"
     rcmod._flag_dues_pending.clear()
+
+
+def test_the_red_flag_disqualifies_even_with_the_black_flag_switched_off_and_a_reused_slot_is_not_forgiven_a_pit_offence():
+    rcmod._flag_dues_pending.clear()
+    rc = rc_with(black="off"); rules(rc, red={"laps": 1})
+    rc.set_red(True, now=1000.0)
+    rc.lap_done(1, 100000, 0, 5, 1050.0, "G1")
+    assert "G1" in rc.disqualified, "the red flag is a fact: its own switch decides, not the black flag's"
+    rcmod._flag_dues_pending.clear()
+    rc = rc_with(); rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 5}
+    assert rc.pit_speed(1, 95.0, 100.0, "G1") is not None
+    assert rc.pit_speed(1, 95.0, 105.0, "G1") is None, "the same pass"
+    rc.drop_red(1)   # the car left: the slot is somebody else's
+    assert rc.pit_speed(1, 95.0, 106.0, "G1") is not None, "his first offence is not forgiven by the one before"
+    assert rc.pit_speed(1, 95.0, 200.0, "G9") is None, "a report about another driver than the one the ledger knows in that slot"
+    rcmod._flag_dues_pending.clear()

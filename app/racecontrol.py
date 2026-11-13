@@ -606,7 +606,7 @@ def report_pit_speed(server_id: int, body: PitSpeedIn, sess: SessionDep) -> None
     rc = state_of(server_id, True, inst.acsp.session)
     kmh = speed_kmh(car)
     if rc and kmh is not None:
-        rc.pit_speed(body.car_id, kmh, time.time())   # (the notice comes out of the flag ledger, `_flag_messages`)
+        rc.pit_speed(body.car_id, kmh, time.time(), str(car.get("driver_guid") or ""))   # (the notice comes out of the flag ledger, `_flag_messages`)
 
 
 class PitLimitIn(BaseModel):
@@ -638,6 +638,7 @@ def put_pit_limit(server_id: int, body: PitLimitIn, sess: SessionDep) -> dict:
     inst, rc = _control(server_id, sess)
     track, config = _pit_key(inst)
     pitlimits.put(track, config, body.limit_kmh, body.tolerance_kmh, body.penalty_s)
+    rc.pit_limit_gen += 1   # (a read that began before this is out of date)
     rc.pit_limit_at = -1e9   # (read again at the next state poll)
     return {"track": track, "track_config": config, **body.model_dump()}
 
@@ -648,9 +649,13 @@ def refresh_pit_limit(rc, inst) -> None:
     if now - rc.pit_limit_at < 10.0:
         return
     rc.pit_limit_at = now
+    gen = rc.pit_limit_gen
     from app import pitlimits, vscrefs
     key = vscrefs.key_of(inst.acsp.session)
-    rc.pit_limit = pitlimits.get(*key) if key else None
+    limit = pitlimits.get(*key) if key else None
+    with _lock:
+        if gen == rc.pit_limit_gen:   # (not when the director saved a new limit while this was reading)
+            rc.pit_limit = limit
 
 
 class DamageIn(BaseModel):

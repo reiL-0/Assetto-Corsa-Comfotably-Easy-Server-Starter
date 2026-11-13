@@ -120,9 +120,9 @@ class RefLaps:
         return out
 
     def carry_from(self, old: "RefLaps") -> None:
-        """A new session on the same track: what the old one knew (windows and laps not saved yet)."""
+        """A new session on the same track: the windows the old one knew. Its laps not saved yet stay with it (the monitor's worker saves them from the old state or, at most a second of laps, they are lost: carrying
+        them too would save them twice, once from each state)."""
         self.recent = {m: list(w) for m, w in old.recent.items()}
-        self.fresh = {m: list(w) for m, w in old.fresh.items()}
         self.best = dict(old.best)
 
     def forget(self, car: int) -> None:
