@@ -142,7 +142,10 @@ def test_neutralization_age_does_not_change_existing_judges(mode, killed, flag, 
         return events, [{k: v for k, v in p.items() if k != "id"} for p in rc.penalties], list(rc.violations)
 
     baseline = drive({"mode": "off"})
-    assert baseline[0] and baseline[1]
+    if (judge, flag) == ("pace", "vsc"):
+        assert not baseline[0] and not baseline[1], "a VSC is never judged by speed"
+    else:
+        assert baseline[0] and baseline[1]
     assert drive(Neutralization(mode=mode, stale_telemetry_s=.1).model_dump()) == baseline
 
 

@@ -1543,10 +1543,10 @@ class RaceControl:
             active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
             if self.vsc_mode == "delta":
                 covered = {c for c in samples if c != pc}   # every car is judged by a delta: by sectors when its model has a reference lap, else by its own speed against a virtual car at the limit
-                nolap = {c: s for c, s in samples.items() if c != pc and self.vsc_profiles.get(models.get(c)) is None}
+                nolap = {c: s for c, s in samples.items() if c != pc and self.vsc_profiles.get(models.get(c)) is None and self.flag != "vsc"}   # (a VSC is judged by delta only: a car with no reference lap is not sanctioned for its speed; the FCY has no reference laps, its speed is the delta)
                 found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, self.pace_kmh or 0, self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit)]
-            fixed = self.pacejudge.step(mono, self.vsc_id, active, (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc and c not in covered},
-                                        {c: v for c, v in speeds.items() if c != pc and c not in covered}, in_pit)
+            fixed = self.pacejudge.step(mono, self.vsc_id, active and self.flag != "vsc", (self.pace_kmh or 0) + self.tolerance_kmh, {c: s for c, s in samples.items() if c != pc and c not in covered},
+                                        {c: v for c, v in speeds.items() if c != pc and c not in covered}, in_pit)   # (never by speed under a VSC)
             found += [{**d, "kind": "pace"} for d in fixed]
             if not found:
                 return found

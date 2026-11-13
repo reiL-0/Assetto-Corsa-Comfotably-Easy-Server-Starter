@@ -88,7 +88,7 @@ def test_disabled_and_server_selection(monkeypatch):
 def test_pace_judge_and_auto_green_use_real_methods(monkeypatch):
     def feed(rc, field, clock):
         rc.neutralization_rule.update(green_after_laps=1, green_clear_s=1)
-        rc.set_flag("vsc", 100, grace_s=3, now=1000, field=field)
+        rc.set_flag("fcy", 100, grace_s=3, now=1000, field=field)
         for tick in range(21):
             t = tick / 2
             clock[0] = t
@@ -326,3 +326,19 @@ def test_armed_nascar_has_explicit_error(monkeypatch):
     events[0]['nascar'] = True
     with pytest.raises(ValueError, match='Armed NASCAR.*sessions without.*disarm'):
         replay(events)
+
+
+def test_a_vsc_never_sanctions_for_speed_only_the_fcy_does_when_there_is_no_reference_lap():
+    def run(flag, mode="delta"):
+        from app.live.field import Field
+        field, rc = Field(), control.RaceControl(session_ref={"session_type": 3})
+        rc.server_id = 9
+        rc.set_flag(flag, 60, grace_s=3, now=1000, field=field, mode=mode)
+        for tick in range(30):   # a car at 200 km/h under a 60 km/h flag, with no reference lap
+            t = tick / 2
+            field.update(0, .1, now=t)
+            field.progress[0] = 1 + t / 10
+            rc.pace_tick(field.samples(), {0: 200}, t, 1000 + t)
+        return list(rc.violations)
+    assert run("vsc") == [] and run("vsc", "fixed") == [], "a VSC is judged by delta only: nothing for the speed"
+    assert run("fcy") != [], "the FCY has no reference laps: its speed is its delta"

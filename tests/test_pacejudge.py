@@ -60,12 +60,12 @@ def test_the_log_is_bounded_and_says_who_why():
     assert len(j.log) == 100 and j.log[-1]["car"] == 3 and j.log[-1]["limit"] == 85 and j.log[-1]["flag"] == 149
 
 
-def test_the_registry_judges_a_vsc_after_its_grace_only_and_shows_the_log():
+def test_the_registry_judges_an_fcy_after_its_grace_only_and_shows_the_log():
     import time
     from app.live.racecontrol import RACE_TYPE, RaceControl
 
     rc = RaceControl({"session_type": RACE_TYPE})
-    rc.set_flag("vsc", 80, grace_s=10, tolerance_kmh=5, now=1000.0)
+    rc.set_flag("fcy", 80, grace_s=10, tolerance_kmh=5, now=1000.0)
     rc.auto_off.add("pace")   # (kill switch, in the middle of the flag: the judge only logs)
     out = []
     for i in range(30):   # 6 s at 100 km/h, 5 s after the grace ended at 1010
@@ -110,7 +110,7 @@ def test_the_judge_decides_by_default_the_drive_through_is_three_laps_and_the_di
     assert rc.snapshot()["violations"] == [{"car_id": 3, "speed_kmh": 100}]
     assert _run_vsc(rc) == [] and len(rc.penalties) == 1, "once per car and flag"
     rc2 = RaceControl({"session_type": RACE_TYPE})
-    rc2.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    rc2.set_flag("fcy", 80, grace_s=10, now=1000.0)
     rc2.set_pace_config(tolerance_kmh=30, penalty={"kind": "pits", "laps": 5})
     assert _run_vsc(rc2) == [] and rc2.vsc_penalty["laps"] == 5, "100 km/h is within 80 + 30"
     rc2.set_pace_config(tolerance_kmh=5)
@@ -127,7 +127,7 @@ def test_with_no_penalty_chosen_the_breach_is_only_recorded():
     from app.live.racecontrol import RACE_TYPE, RaceControl
 
     rc = RaceControl({"session_type": RACE_TYPE})
-    rc.set_flag("vsc", 80, grace_s=10, penalty={"kind": "none"}, now=1000.0)
+    rc.set_flag("fcy", 80, grace_s=10, penalty={"kind": "none"}, now=1000.0)
     assert len(_run_vsc(rc)) == 1 and rc.penalties == [] and len(rc.violations) == 1
 
 
@@ -135,7 +135,7 @@ def test_switching_the_judge_in_the_middle_of_a_flag_never_makes_two_judges_puni
     from app.live.racecontrol import RACE_TYPE, RaceControl, tick, _states
 
     rc = RaceControl({"session_type": RACE_TYPE})
-    rc.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    rc.set_flag("fcy", 80, grace_s=10, now=1000.0)
     assert len(_run_vsc(rc)) == 1 and len(rc.penalties) == 1
     rc.auto_off.add("pace")
     assert not rc.legacy and _run_vsc(rc, t_start=120.0, wall_start=1020.5, car=4)[0]["applied"] is False and len(rc.penalties) == 1, "switched off mid-flag: it only logs"
@@ -147,7 +147,7 @@ def test_switching_the_judge_in_the_middle_of_a_flag_never_makes_two_judges_puni
         _states.pop(907, None)
     leg = RaceControl({"session_type": RACE_TYPE})
     leg.auto_off.add("pace")
-    leg.set_flag("vsc", 80, grace_s=10, now=1000.0)
+    leg.set_flag("fcy", 80, grace_s=10, now=1000.0)
     assert leg.legacy and leg.judging_continuously() is False
     leg.auto_off.clear()
     assert _run_vsc(leg)[0]["applied"] is False and leg.penalties == [], "a flag that started with the switch on is judged by the old judgement only"
