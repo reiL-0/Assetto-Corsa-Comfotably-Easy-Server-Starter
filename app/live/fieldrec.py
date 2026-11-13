@@ -47,6 +47,7 @@ EXCLUDED = {
     "set_red": "The director's red flag: a manual input, not field data",
     "conduct_add": "Conduct counter fed by sanctions already decided elsewhere; not detector input",
     "drop_red": "Disconnect bookkeeping: a car that left owes nothing under the red flag; not field data",
+    "pit_speed": "Client evidence of pit-lane speed, sanctioned from the manager's own reading; not field data",
     "show_black": "The director shows the black flag: a manual input, not field data",
     "drs_tick": "DRS window from laps, flag and weather; no field judge reads it (app/live/drs.py)",
     "drs_use": "Client evidence of DRS use, sanctioned from the window state; not field data",

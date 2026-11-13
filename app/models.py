@@ -478,6 +478,18 @@ class PracticeKeep(SQLModel, table=True):
     drivers: list = Field(default_factory=list, sa_type=JSON)   # [{guid, name, model, skin, best_ms, best_valid_ms, laps, valid_laps}]
 
 
+class PitLimit(SQLModel, table=True):
+    """The pit-lane speed limit of a track layout (app/pitlimits.py): set by the director for the track, 0/absent = no rule. A car reported over `limit_kmh + tolerance_kmh` is sanctioned: `penalty_s` 0 = a drive-through,
+    N = N seconds on the race result."""
+    __tablename__ = "pit_limits"
+
+    track: str = Field(primary_key=True)
+    track_config: str = Field(default="", primary_key=True)
+    limit_kmh: int
+    tolerance_kmh: int = 5
+    penalty_s: int = 0
+
+
 class VscRef(SQLModel, table=True):
     """The reference lap of the VSC (app/vscrefs.py): the best clean lap of a car model on a track layout, from any session of this manager: ONE row per combination (the fastest). The VSC's minimum sector
     times are a factor of it."""

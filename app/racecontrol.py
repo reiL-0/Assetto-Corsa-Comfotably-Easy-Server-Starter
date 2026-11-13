@@ -176,6 +176,9 @@ def _flag_messages(inst, rc) -> None:
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · drive-through ({laps} vueltas)", "penalty", car)
         elif kind == "yellow":
             _say(rc, f"PENALIZACIÓN: adelantar bajo bandera amarilla · +{step} s", "penalty", car)
+        elif kind == "pitspeed":
+            how = "drive-through" if step == 0 else f"+{step} s"
+            _say(rc, f"PENALIZACIÓN: exceso de velocidad en boxes · {o.get('kmh', '?')} km/h, límite {o.get('limit', '?')} · {how}", "penalty", car)   # (from the flag ledger)
         elif kind == "meatball":
             _say(rc, f"PENALIZACIÓN: no reparaste el daño en boxes · drive-through ({o['laps']} vueltas)", "penalty", car)
         elif kind == "black":
@@ -481,13 +484,15 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     rc = state_of(server_id, bool(inst), inst.acsp.session if inst else None)
     if inst and _sanctioned(inst):
         cut_rule_of(server_id)   # (refreshes the cached rules here, in a request thread: the snapshot and the monitor never touch the database)
+        if rc:
+            refresh_pit_limit(rc, inst)
         give_back_rule_of(server_id)
     server = _get(sess, server_id)
     if rc:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -583,6 +588,69 @@ def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
     if verdict:
         laps = verdict["laps"]
         _say(rc, f"PENALIZACIÓN: DRS con el DRS inactivo · drive-through ({laps} vueltas)", "penalty", body.car_id)
+
+
+class PitSpeedIn(BaseModel):
+    car_id: int = Field(ge=0, le=255)
+    name: str = Field(max_length=80)
+
+
+@state_router.post("/race-control/pit-speed", status_code=204)
+def report_pit_speed(server_id: int, body: PitSpeedIn, sess: SessionDep) -> None:
+    """The hub of a car says it is over the pit-lane speed limit. Client evidence: the manager judges with its OWN reading of the car's speed (and the track's rule); 409 when that car is not that driver."""
+    _get(sess, server_id)
+    inst = _live(server_id)
+    car = inst.acsp.cars.get(body.car_id) if inst else None
+    if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
+        raise HTTPException(409, "that car is not that driver")
+    rc = state_of(server_id, True, inst.acsp.session)
+    kmh = speed_kmh(car)
+    if rc and kmh is not None:
+        rc.pit_speed(body.car_id, kmh, time.time())   # (the notice comes out of the flag ledger, `_flag_messages`)
+
+
+class PitLimitIn(BaseModel):
+    limit_kmh: int = Field(ge=0, le=300)   # 0 = no rule on this track
+    tolerance_kmh: int = Field(default=5, ge=0, le=30)
+    penalty_s: int = Field(default=0, ge=0, le=60)   # 0 = a drive-through; N = N seconds on the race result
+
+
+def _pit_key(inst) -> tuple[str, str]:
+    from app import vscrefs
+    key = vscrefs.key_of(inst.acsp.session)
+    if not key:
+        raise HTTPException(409, "el servidor aún no dice en qué pista corre")
+    return key
+
+
+@control_router.get("/pit-limit")
+def get_pit_limit(server_id: int, sess: SessionDep) -> dict:
+    """The pit-lane speed rule of the track this server runs now ({} fields null when there is none)."""
+    from app import pitlimits
+    inst, _ = _control(server_id, sess)
+    track, config = _pit_key(inst)
+    return {"track": track, "track_config": config, **(pitlimits.get(track, config) or {"limit_kmh": 0, "tolerance_kmh": 5, "penalty_s": 0})}
+
+
+@control_router.put("/pit-limit")
+def put_pit_limit(server_id: int, body: PitLimitIn, sess: SessionDep) -> dict:
+    from app import pitlimits
+    inst, rc = _control(server_id, sess)
+    track, config = _pit_key(inst)
+    pitlimits.put(track, config, body.limit_kmh, body.tolerance_kmh, body.penalty_s)
+    rc.pit_limit_at = -1e9   # (read again at the next state poll)
+    return {"track": track, "track_config": config, **body.model_dump()}
+
+
+def refresh_pit_limit(rc, inst) -> None:
+    """The track's pit-lane rule into the state (a request thread: it reads the database, at most every 10 s)."""
+    now = time.monotonic()
+    if now - rc.pit_limit_at < 10.0:
+        return
+    rc.pit_limit_at = now
+    from app import pitlimits, vscrefs
+    key = vscrefs.key_of(inst.acsp.session)
+    rc.pit_limit = pitlimits.get(*key) if key else None
 
 
 class DamageIn(BaseModel):
