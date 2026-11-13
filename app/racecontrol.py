@@ -609,6 +609,39 @@ def report_pit_speed(server_id: int, body: PitSpeedIn, sess: SessionDep) -> None
         rc.pit_speed(body.car_id, kmh, time.time(), str(car.get("driver_guid") or ""))   # (the notice comes out of the flag ledger, `_flag_messages`)
 
 
+def _gap_to(leader: dict, d: dict) -> dict:
+    """{laps, ms}: how far behind the leader a driver is, in whole laps or in time at the same lap count (the sum of lap times: an approximation of the gap, good for the director's eye)."""
+    laps = leader["TotalNumLaps"] - d["TotalNumLaps"]
+    if laps > 0:
+        return {"laps": laps, "ms": None}
+    car_l, car_d = next(iter(leader["Cars"].values())), next(iter(d["Cars"].values()))
+    return {"laps": 0, "ms": max(0, round((car_d["TotalLapTime"] - car_l["TotalLapTime"]) / 1_000_000))}   # (the board keeps times in ns units of its own: 1 ms = 1_000_000)
+
+
+@control_router.get("/field")
+def field_view(server_id: int, sess: SessionDep) -> dict:
+    """The table of the director's «En vivo» tab: one row per connected driver in race order (best lap order outside a race) with gap, laps, best lap and what he has on him (drive-through, flags, disqualified,
+    boxes). Positions and times come from the live board, the marks from the race control state."""
+    inst, rc = _control(server_id, sess)
+    lb = inst.acsp.board.leaderboard()
+    race = lb.get("Type") == RACE_TYPE
+    drivers = [d for d in lb["ConnectedDrivers"] if d["CarInfo"]["CarID"] != rc.pace_car]
+    best = lambda d: (next(iter(d["Cars"].values()))["BestLap"] or 1 << 62)
+    drivers.sort(key=(lambda d: d["Position"] or 999) if race else best)
+    marks = rc.driver_marks(time.time())
+    rows = []
+    for i, d in enumerate(drivers):
+        car = d["CarInfo"]["CarID"]
+        guid = d["CarInfo"]["DriverGUID"]
+        lap = next(iter(d["Cars"].values()))
+        flags = [k for k, on in (("dsq", guid in marks["dsq"]), ("black", guid in marks["black"]), ("meatball", guid in marks["meatball"]), ("bw", guid in marks["bw"]),
+                                 ("dt", car in marks["dt"]), ("viol", car in marks["viol"]), ("boxes", car in marks["pits"])) if on]
+        rows.append({"car_id": car, "name": d["CarInfo"]["DriverName"], "model": d["CarInfo"]["CarModel"], "position": i + 1, "laps": d["TotalNumLaps"],
+                     "best_ms": round(lap["BestLap"] / 1_000_000) or None, "last_ms": round(lap["LastLap"] / 1_000_000) or None,
+                     "gap": _gap_to(drivers[0], d) if race and i else None, "conduct": marks["conduct"].get(guid, 0), "flags": flags})
+    return {"race": race, "session": lb.get("Name", ""), "rows": rows}
+
+
 class PitLimitIn(BaseModel):
     limit_kmh: int = Field(ge=0, le=300)   # 0 = no rule on this track
     tolerance_kmh: int = Field(default=5, ge=0, le=30)
