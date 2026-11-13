@@ -103,9 +103,8 @@ def test_pace_judge_and_auto_green_use_real_methods(monkeypatch):
     events, rc = record_scenario(monkeypatch, feed)
     result = replay(events)
     assert result == replay(events)
-    assert result["summary"]["by_kind"] == {"auto_green_decision": 1, "pace": 1}
-    assert rc.pacejudge.log[-1]["car"] == 0
-    assert replay(events, {"detectors": {"pace": {"sustained_s": 10}}})["summary"]["by_kind"] == {"auto_green_decision": 1}
+    assert result["summary"]["by_kind"] == {"auto_green_decision": 1, "delta": 1}
+    assert rc.pacedelta.log[-1]["car"] == 0
     assert replay(events) == result  # scoped calibration restores the real constants
 
 
@@ -329,16 +328,16 @@ def test_armed_nascar_has_explicit_error(monkeypatch):
 
 
 def test_a_vsc_never_sanctions_for_speed_only_the_fcy_does_when_there_is_no_reference_lap():
-    def run(flag, mode="delta"):
+    def run(flag):
         from app.live.field import Field
         field, rc = Field(), control.RaceControl(session_ref={"session_type": 3})
         rc.server_id = 9
-        rc.set_flag(flag, 60, grace_s=3, now=1000, field=field, mode=mode)
+        rc.set_flag(flag, 60, grace_s=3, now=1000, field=field)
         for tick in range(30):   # a car at 200 km/h under a 60 km/h flag, with no reference lap
             t = tick / 2
             field.update(0, .1, now=t)
             field.progress[0] = 1 + t / 10
             rc.pace_tick(field.samples(), {0: 200}, t, 1000 + t)
         return list(rc.violations)
-    assert run("vsc") == [] and run("vsc", "fixed") == [], "a VSC is judged by delta only: nothing for the speed"
+    assert run("vsc") == [], "a VSC is judged by delta only: nothing for the speed"
     assert run("fcy") != [], "the FCY has no reference laps: its speed is its delta"

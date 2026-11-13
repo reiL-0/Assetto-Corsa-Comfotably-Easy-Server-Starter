@@ -43,7 +43,7 @@ from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
 from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
-from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, flag_rules_of, flag_rules_peek, flag_rules_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of, tick
+from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, flag_rules_of, flag_rules_peek, flag_rules_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of
 from app.servers import _get
 
 log = logging.getLogger("acmanager.racecontrol")
@@ -74,7 +74,6 @@ class FlagIn(BaseModel):
     grace_s: int | None = Field(default=None, ge=GRACE_MIN, le=GRACE_MAX)   # a VSC: seconds every driver gets to slow down by themselves (not said = the server's rule, `vsc.grace_s`)
     tolerance_kmh: int | None = Field(default=None, ge=0, le=TOL_MAX)         # a VSC: km/h over the pace that are forgiven when the grace ends (not said = the server's)
     penalty: PenaltyCfg | None = None                                         # a VSC: what whoever is still over gets (not said = the server's)
-    mode: Literal["fixed", "delta"] = "delta"                                  # VSC and FCY are judged by delta (the default); `fixed` is only the old single pace limit, kept for an API client that asks for it
 
 
 class PenaltyIn(BaseModel):
@@ -790,7 +789,7 @@ def set_flag(server_id: int, body: FlagIn, sess: SessionDep) -> dict:
     tol = body.tolerance_kmh if body.tolerance_kmh is not None else cfg["tolerance_kmh"]
     penalty = body.penalty or PenaltyCfg(kind=cfg["penalty"], laps=cfg["laps"], warnings=cfg["warnings"], severe_s=cfg["severe_s"])
     try:
-        actions = rc.set_flag(body.flag, pace, grace, tol, penalty.model_dump(), field=inst.acsp.field, mode=body.mode)
+        actions = rc.set_flag(body.flag, pace, grace, tol, penalty.model_dump(), field=inst.acsp.field)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if body.flag == "vsc" and rc.vsc_mode == "delta":   # a VSC by delta is time per sector: it asks for no speed
@@ -1317,21 +1316,6 @@ def clear_penalty(server_id: int, penalty_id: int, sess: SessionDep) -> None:
         raise HTTPException(404, "penalty not found")
 
 
-def announce(server_id: int, violations: list[dict]) -> None:
-    """The chat line of a judged VSC (names, not car numbers)."""
-    inst = _live(server_id)
-    if not inst:
-        return
-    rc = state_of(server_id, True, inst.acsp.session)
-    if not rc:
-        return
-    if not violations:
-        _say(rc, "VSC: todos al ritmo", "flag")
-        return
-    names = ", ".join((inst.acsp.cars.get(v["car_id"], {}).get("driver_name") or "#" + str(v["car_id"])) + f" ({v['speed_kmh']} km/h)" for v in violations)
-    _say(rc, "VSC: no bajaron a tiempo: " + names, "penalty")
-
-
 def vsc_refs_sync() -> None:
     """The reference laps of the VSC, between memory and the database (a worker thread: it blocks). A session on a track the state has not read yet takes the stored laps; a lap that was quicker than the stored one is
     written (one row per track layout and car model). Never raises: a lap not kept now is kept at the next one."""
@@ -1434,9 +1418,6 @@ async def monitor_forever() -> None:
             incident_tick(now)
             autoflags_tick(now)
             pace_car_check()
-            live = [(inst.server_id, inst.acsp.cars) for inst in supervisor.live()]
-            for server_id, violations in tick(now, live):
-                announce(server_id, violations)
         except Exception:   # a bug here must not stop the loop: the next tick tries again
             log.exception("race control monitor")
         await asyncio.sleep(MONITOR_EVERY)

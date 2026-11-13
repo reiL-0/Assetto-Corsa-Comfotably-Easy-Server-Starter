@@ -76,11 +76,10 @@ def test_the_director_changes_the_pace_rules_of_a_running_vsc_over_http(live):
     assert _client("steward").get(f"{url}/autoflags").json()["auto_off"] == ["pace"], "the panel reads the switch back from the manager"
 
 
-def test_a_vsc_can_ask_for_the_delta_mode_and_without_a_reference_lap_it_runs_the_fixed_pace(live):
+def test_a_vsc_is_judged_by_delta_and_without_a_reference_lap_it_runs_the_speed_delta(live):
     sid, client, rc, now = _ready(live)
     url = f"{V}/servers/{sid}/race-control"
-    assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "f1"}).status_code == 422
-    assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60, "mode": "delta"}).status_code == 200
+    assert _client("steward").post(url, json={"flag": "vsc", "pace_kmh": 60}).status_code == 200   # there is no other mode: delta
     view = _client("steward").get(f"{url}/autoflags").json()
     assert view["vsc_mode"] == "delta" and view["vsc_fallback"] is True and view["ref_models"] == [], view
     texts = [n["text"] for n in _client("steward").get(f"{V}/servers/{sid}/race-state").json()["notices"]]

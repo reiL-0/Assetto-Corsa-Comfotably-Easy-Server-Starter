@@ -19,7 +19,7 @@ METHODS = frozenset((
     "give_back_tick", "give_back_report", "contact", "report_pit", "set_flag",
     "start_formation", "formation_lap", "formation_green", "set_pace_car",
     "give_back_due_now", "caution_lap", "caution_tick", "restart_plan", "stage_break",
-    "sample", "evaluate", "autoflags_tick", "pit_exception",
+    "autoflags_tick", "pit_exception",
     "follow_pace_driver", "set_pace_config", "lap_done", "yellow_tick", "give_back_forgive", "give_back_restore",
 ))
 
@@ -32,7 +32,7 @@ def enabled(server_id):
 # Exhaustive public RaceControl inventory: see docs/neutralization.md for callers.
 # Exclusions are explicit so a new public entry requires a recording decision.
 EXCLUDED = {
-    **dict.fromkeys(("track_clear", "without_pace_car", "pace_car_state", "caution_eta", "grace_left", "due",
+    **dict.fromkeys(("track_clear", "without_pace_car", "pace_car_state", "caution_eta", "grace_left",
                     "auto_for", "auto_live", "judging_continuously", "delta_block", "autoflags_view",
                     "give_back_peek", "give_back_view", "cuts_view", "snapshot", "line_up", "driver_marks"), "Read-only view/filter"),
     "audit": "Output sink; replay installs its own decision collector",
