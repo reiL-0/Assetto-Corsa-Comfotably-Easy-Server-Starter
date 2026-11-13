@@ -224,6 +224,13 @@ def _m015_server_rules(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE "servers" ADD COLUMN "rules" JSON')
 
 
+def _m016_vsc_refs_window(con: sqlite3.Connection) -> None:
+    """The window of recent laps of the VSC's reference (vsc_refs, born one release before it had this column): an empty list, the stored reference lap alone is the window until new laps come."""
+    have = {row[1] for row in con.execute('PRAGMA table_info("vsc_refs")')}
+    if have and "recent_laps" not in have:
+        con.execute('ALTER TABLE "vsc_refs" ADD COLUMN "recent_laps" JSON NOT NULL DEFAULT \'[]\'')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -240,6 +247,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (13, _m013_cut_dues),
     (14, _m014_result_rulebook_snapshot),
     (15, _m015_server_rules),
+    (16, _m016_vsc_refs_window),
 ]
 
 
