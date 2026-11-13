@@ -157,16 +157,16 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert "min_ms" not in rc.delta_block("lmp") and rc.delta_block("lmp")["pace_kmh"] == 80   # lmp has no reference lap: the delta of its speed
     assert rc.delta_block(None)["pace_kmh"] == 80
     assert "vsc" in rc.auto_live() and rc.auto_for(1, 0, 500.0, None, "gt3")["vsc"]["min_ms"] == frozen["gt3"]
-    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference lap: the delta of its speed) drives at 120 km/h > 85 km/h
+    # car 1 and 2 (gt3) drive 10 % slower than their lap: faster than a VSC allows; car 3 keeps well below; car 4 (lmp, no reference lap) drives at 120 km/h > 85 km/h: a VSC is judged by delta only, so nothing for its speed
     bad = {1: lambda p: speed(p) / 1.10, 3: lambda p: speed(p) / 1.60, 4: lambda p: 120 / 3.6}
     out, p = _field(rc, bad, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.30, 3: 0.30, 4: 0.30})   # the grace (5 s)
     assert out == [], "nobody is judged during the grace"
     out, _ = _field(rc, bad, 505.0, 80.0, models, wall0=1006.0, p0=p)
     kinds = {(d["car"], d["kind"]) for d in out}
-    assert kinds == {(1, "delta"), (4, "delta")}, kinds
-    assert sorted(x["car_id"] for x in rc.violations) == [1, 4] and sorted((x["car_id"], x["laps"]) for x in rc.penalties) == [(1, 3), (4, 3)]
+    assert kinds == {(1, "delta")}, kinds
+    assert sorted(x["car_id"] for x in rc.violations) == [1] and sorted((x["car_id"], x["laps"]) for x in rc.penalties) == [(1, 3)], "car 4 is not sanctioned for its speed under a VSC"
     assert rc.vsc_profiles["gt3"] == frozen["gt3"], "the reference did not move while the VSC ran"
-    assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1, 4}
+    assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1}
     rc.set_flag("fcy", 80, grace_s=5, mode="delta", now=2000.0)
     assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
     assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: its reference is the speed, even with reference laps known"
