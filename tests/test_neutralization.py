@@ -149,35 +149,6 @@ def test_neutralization_age_does_not_change_existing_judges(mode, killed, flag, 
     assert drive(Neutralization(mode=mode, stale_telemetry_s=.1).model_dump()) == baseline
 
 
-def test_monitor_keeps_legacy_judge_cars_with_small_neutralization_age(monkeypatch):
-    import asyncio
-    from types import SimpleNamespace
-    from app import racecontrol as monitor
-
-    rc = RaceControl({"session_type": 3})
-    rc.neutralization_rule = Neutralization(mode="shadow", stale_telemetry_s=.1).model_dump()
-    cars = {1: {"speed_kmh": 100}}
-    inst = SimpleNamespace(server_id=42, acsp=SimpleNamespace(
-        session={}, cars=cars, field=SimpleNamespace(samples=lambda: {})))
-    monkeypatch.setattr(monitor.supervisor, "live", lambda: [inst])
-    monkeypatch.setattr(monitor, "state_of", lambda *args: rc)
-    for name in ("finish_nascar", "caution_tick", "incident_tick", "autoflags_tick", "pace_car_check"):
-        monkeypatch.setattr(monitor, name, lambda *args: None)
-    for name in ("flag_modes_stale_servers", "give_back_stale_servers", "give_back_tick"):
-        monkeypatch.setattr(monitor, name, lambda *args: [])
-    monkeypatch.setattr("app.league.neutralization_rule_stale", lambda sid: False)
-    monkeypatch.setattr(monitor, "_unsaved_dues", [])
-    seen = []
-    monkeypatch.setattr(monitor, "tick", lambda now, live: seen.extend(live) or [])
-
-    async def stop(*args):
-        raise asyncio.CancelledError
-    monkeypatch.setattr(monitor.asyncio, "sleep", stop)
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(monitor.monitor_forever())
-    assert seen == [(42, cars)]
-
-
 @pytest.mark.parametrize("later_stop, is_pileup", [(3, True), (5, False)])
 def test_pileup_window_counts_recent_involved_cars_even_after_recovery(later_stop, is_pileup):
     from app.live.field import Sample
@@ -433,7 +404,7 @@ def test_new_incident_neutralization_judges_share_one_penalty(monkeypatch, flag,
         feed(t, 0)
     assert rc.flag == flag
     sample = {1: Sample(5.1, 1, 0, 10, 0)}
-    monkeypatch.setattr(rc.pacejudge, "step", lambda *args: [{"car": 1, "generation": 0, "speed_kmh": 150, "over_s": 2}])
+    monkeypatch.setattr(rc.pacedelta, "step", lambda *args: [{"car": 1, "generation": 0, "speed_kmh": 150, "over_s": 2}])
     monkeypatch.setattr(rc.passjudge, "step", lambda *args: [("due", 1, 0)])
     judges = (rc.pace_tick, rc.pass_tick) if order == "pace_first" else (rc.pass_tick, rc.pace_tick)
     for judge in judges:

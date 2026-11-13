@@ -71,11 +71,11 @@ def test_the_state_changes_and_every_change_raises_rev():
     assert (rc.flag, rc.pace_kmh, rc.rev) == ("yellow", None, 1)
     rc.set_flag("vsc", 60)
     assert (rc.flag, rc.pace_kmh, rc.rev) == ("vsc", 60, 2) and rc.vsc_id
-    keep = (rc.flag, rc.pace_kmh, rc.vsc_id, rc.rev, rc.evaluated)
+    keep = (rc.flag, rc.pace_kmh, rc.vsc_id, rc.rev)
     for bad in ({"flag": "vsc"}, {"flag": "vsc", "pace_kmh": 60, "grace_s": 1}):
         with pytest.raises(ValueError):
             rc.set_flag(**bad)
-    assert (rc.flag, rc.pace_kmh, rc.vsc_id, rc.rev, rc.evaluated) == keep, "a refused VSC changes nothing"
+    assert (rc.flag, rc.pace_kmh, rc.vsc_id, rc.rev) == keep, "a refused VSC changes nothing"
     rc.set_flag("white")
     assert (rc.flag, rc.pace_kmh, rc.vsc_id) == ("white", None, 0)
     p = rc.add_penalty(3, 2)
@@ -169,68 +169,6 @@ def test_a_server_with_no_welcome_and_no_extra_still_gets_the_hub_in_cfg_welcome
     assert "SERVER = %d" % sid in csp.decode(text) and "WELCOME_MESSAGE" in (Path(d) / "cfg" / "server_cfg.ini").read_text()
 
 
-def _speeds(rc, grace_end, by_car, step=0.25, seconds=3.0):
-    """Feed `rc` samples (km/h by car id; a list = one value per sample, repeated if short) for the `seconds` before the grace ends."""
-    n = int(seconds / step)
-    for i in range(n):
-        t = grace_end - seconds + i * step
-        rc.sample({c: (v[min(i, len(v) - 1)] if isinstance(v, list) else v) for c, v in by_car.items()}, t)
-
-
-def test_a_vsc_judges_who_is_still_over_the_pace_when_the_grace_ends():
-    rc = RaceControl()
-    rc.set_flag("vsc", 60, grace_s=10, tolerance_kmh=5, penalty={"kind": "pits", "laps": 2}, now=1000.0)
-    assert rc.snapshot(now=1000.0)["grace_left"] == 10 and rc.snapshot(now=1004.2)["grace_left"] == 6 and rc.snapshot(now=1011)["grace_left"] == 0
-    assert not rc.due(1009.9) and rc.due(1010.0)
-    rc.report_pit(5, True, now=1008.5)
-    _speeds(rc, 1010.0, {
-        1: 62,                                   # at the pace: fine
-        2: 66,                                   # inside the tolerance (60 + 5 = 65)? 66 is over: judged
-        3: [150, 150, 150, 150, 40, 40, 40, 40, 40, 40, 40, 40],   # slowed down in time: the median of the last 1.5 s is 40
-        4: [60, 60, 60, 60, 60, 60, 200, 60, 60, 60, 60, 60],       # one wild sample (a lost packet): the median ignores it
-        5: 80,                                   # over, but the hub said it is in the pit lane
-        6: 3,                                    # standing still (spun, parked): not a violator
-        7: [90],                                 # fast
-    })
-    out = rc.evaluate(1010.0)
-    assert sorted((v["car_id"], v["speed_kmh"]) for v in out) == [(2, 66), (7, 90)]
-    assert [(p["car_id"], p["laps"]) for p in rc.penalties] == [(2, 2), (7, 2)], "the drive-through of the VSC setting, once per car"
-    assert rc.evaluate(1011.0) == [] and len(rc.penalties) == 2, "a VSC is judged only once"
-    assert rc.snapshot()["violations"] == out and rc.snapshot()["exempt"] == [{"car_id": 5, "speed_kmh": 80}], "the pit-lane exemption stays visible to the director"
-    late = RaceControl()   # the monitor ran late: the exemption is judged against the end of the grace, not against when it happened to run
-    late.set_flag("vsc", 60, grace_s=10, penalty={"kind": "pits", "laps": 1}, now=0.0)
-    late.report_pit(5, True, now=9.5)
-    _speeds(late, 10.0, {5: 80})
-    assert late.evaluate(30.0) == [] and late.penalties == [] and late.snapshot()["exempt"][0]["car_id"] == 5
-
-
-def test_a_vsc_without_penalty_only_records_and_too_few_samples_are_not_judged():
-    rc = RaceControl()
-    rc.set_flag("vsc", 60, grace_s=5, now=0.0, penalty={"kind": "none"})
-    rc.sample({1: 100}, 4.0); rc.sample({1: 100}, 4.5)   # two samples: not enough to judge a car fairly
-    _speeds(rc, 5.0, {2: 100})
-    out = rc.evaluate(5.0)
-    assert [v["car_id"] for v in out] == [2] and rc.penalties == [], "penalty none: recorded, not punished"
-    rc2 = RaceControl()
-    rc2.report_pit(3, False)   # a "no" is not kept: it can never cancel a "yes"
-    rc2.report_pit(3, True, now=100.0); rc2.report_pit(3, False, now=101.0)
-    assert rc2._pit_seen == {3: 100.0}
-
-
-def test_the_monitor_samples_and_judges_for_the_servers_it_is_given():
-    from app.live.racecontrol import _states, tick
-    rc = state_of(902, True, {"s": 1}, create=True)
-    rc.auto_off.add("pace")   # (the continuous judge decides by default; this single judgement is what is left when the director switches it off)
-    rc.set_flag("vsc", 60, grace_s=3, penalty={"kind": "pits", "laps": 1}, now=500.0)
-    cars = {1: {"velocity": [0, 0, 25.0]}, 2: {"velocity": [0, 0, 10.0]}, 3: {"driver_name": "no velocity yet"}}   # 90 km/h, 36 km/h
-    done = []
-    for i in range(14):
-        done += tick(500.0 + i * 0.25, [(902, cars)])
-    assert len(done) == 1 and done[0][0] == 902 and [v["car_id"] for v in done[0][1]] == [1], "judged once, only the fast car"
-    assert tick(600.0, [(902, cars)]) == [] and tick(600.0, [(999, cars)]) == []
-    _states.pop(902, None)
-
-
 def test_the_vsc_through_the_api_and_the_pit_report(live):
     sid, c, sent = live
     c.cars[3] = {"driver_name": "Ana", "driver_guid": "76561190000000001", "velocity": [0, 0, 33.0]}   # ~119 km/h
@@ -281,10 +219,6 @@ def test_an_fcy_is_a_pace_flag_too_and_its_notice_comes_with_the_state(live):
     r = steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy"})
     assert r.status_code == 200 and r.json()["pace_kmh"] == 70 and r.json()["grace_left"] in (6, 7), "the server's own settings: pace and grace"
     assert steward.post(f"{V}/servers/{sid}/race-control", json={"flag": "fcy", "pace_kmh": 90}).json()["pace_kmh"] == 90, "what the director says wins"
-    rc = RaceControl()
-    rc.set_flag("fcy", 60, 5, 5, {"kind": "pits", "laps": 1}, now=100.0)
-    rc.sample({1: 120.0}, 104.0); rc.sample({1: 120.0}, 104.3); rc.sample({1: 120.0}, 104.6)
-    assert rc.due(105.0) and [v["car_id"] for v in rc.evaluate(105.0)] == [1] and rc.penalties, "an FCY is judged like a VSC"
 
 
 def test_a_flag_shown_by_hand_is_a_notice_for_one_driver_or_for_everybody(live):

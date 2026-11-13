@@ -137,19 +137,19 @@ def _field(rc, cars, t0, seconds, models, in_green=True, wall0=1000.0, p0=None, 
     return out, p
 
 
-def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the_fixed_pace():
+def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the_speed_delta():
     from app.live.racecontrol import RACE_TYPE, RaceControl
 
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3", 4: "lmp"}
-    rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
+    rc.set_flag("vsc", 80, grace_s=5, now=1000.0)
     assert rc.vsc_mode == "delta" and rc.vsc_fallback, "no clean lap yet: delta mode, the cars are judged by the delta of their speed"
     blk0 = rc.delta_block("gt3")
     assert blk0 is not None and "min_ms" not in blk0 and blk0["pace_kmh"] == 80 and blk0["band_kmh"] == rc.tolerance_kmh and blk0["credit"] == 3.0 and "vsc" in rc.auto_live(), "no reference lap: a virtual car at the pace, no track length needed"
     rc.set_flag("green")
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # two gt3, in green racing: laps get timed
     assert "gt3" in rc.reflaps.best and "lmp" not in rc.reflaps.best
-    rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
+    rc.set_flag("vsc", 80, grace_s=5, now=1000.0)
     assert rc.vsc_mode == "delta" and not rc.vsc_fallback and set(rc.vsc_profiles) == {"gt3"} and len(rc.vsc_profiles["gt3"]) == 20
     frozen = {k: list(v) for k, v in rc.vsc_profiles.items()}
     blk = rc.delta_block("gt3")
@@ -167,16 +167,11 @@ def test_a_delta_vsc_freezes_the_reference_judges_by_delta_and_falls_back_to_the
     assert sorted(x["car_id"] for x in rc.violations) == [1] and sorted((x["car_id"], x["laps"]) for x in rc.penalties) == [(1, 3)], "car 4 is not sanctioned for its speed under a VSC"
     assert rc.vsc_profiles["gt3"] == frozen["gt3"], "the reference did not move while the VSC ran"
     assert rc.autoflags_view()["vsc_mode"] == "delta" and {x["car"] for x in rc.autoflags_view()["delta"]} == {1}
-    rc.set_flag("fcy", 80, grace_s=5, mode="delta", now=2000.0)
+    rc.set_flag("fcy", 80, grace_s=5, now=2000.0)
     assert rc.vsc_mode == "delta" and rc.delta_block("gt3") is not None, "an FCY supports delta mode too"
     assert rc.vsc_profiles == {} and not rc.vsc_fallback, "an FCY has no reference lap: its reference is the speed, even with reference laps known"
     fb1, fb2 = rc.delta_block("gt3"), rc.delta_block("lmp")
     assert fb1 == fb2 and "min_ms" not in fb1 and fb1["pace_kmh"] == 80 and fb1["band_kmh"] == rc.tolerance_kmh and fb1["credit"] == 3.0, "the same for every model: a virtual car at the pace"
-    rc.set_flag("fcy", 80, grace_s=5, mode="fixed", now=2100.0)
-    assert rc.vsc_mode == "fixed" and rc.delta_block("gt3") is None, "an FCY with mode=fixed is fixed pace"
-    import pytest
-    with pytest.raises(ValueError):
-        rc.set_flag("vsc", 80, mode="f1")
 
 
 def test_the_reference_does_not_learn_from_a_vsc_and_the_kill_switch_only_logs():
@@ -190,9 +185,9 @@ def test_the_reference_does_not_learn_from_a_vsc_and_the_kill_switch_only_logs()
     rc.set_flag("green")
     _field(rc, {1: speed}, 400.0, 300.0, models)
     rc.auto_off.add("pace")
-    rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
+    rc.set_flag("vsc", 80, grace_s=5, now=1000.0)
     out, _ = _field(rc, {1: lambda p: speed(p) / 1.10}, 800.0, 80.0, models, wall0=1006.0, p0={1: 0.3})
-    assert rc.legacy and rc.vsc_mode == "fixed" and all(d["applied"] is False for d in out), "a flag that started with the switch on is judged by the old judgement only"
+    assert out and all(d["applied"] is False for d in out) and not rc.penalties, "with the switch on the judge only logs: nobody is penalised"
 
 
 def test_the_pit_lane_without_a_crossing_and_a_neutralisation_spoil_a_lap_and_the_delta():
@@ -230,7 +225,7 @@ def test_the_start_of_the_judging_is_latched_once_and_a_green_drops_partial_laps
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3"}
     _field(rc, {1: speed}, 0.0, 300.0, models)
-    rc.set_flag("vsc", 80, grace_s=5, mode="delta", now=1000.0)
+    rc.set_flag("vsc", 80, grace_s=5, now=1000.0)
     rc.pace_tick({1: Sample(0.5, 1, 0, 500.0, 0.0)}, {1: 100.0}, 500.0, 1006.0, models)   # the grace ended 1 s ago
     first = rc._since
     assert first is not None and abs(first - 499.0) < 1e-6
@@ -247,7 +242,7 @@ def test_an_fcy_is_judged_by_the_delta_of_its_speed_without_a_reference_lap_or_t
 
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3"}
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)   # the pace, with the tolerance as a dead band
+    rc.set_flag("fcy", 60, grace_s=5, now=1000.0)   # the pace, with the tolerance as a dead band
     band = rc.tolerance_kmh
     assert rc.delta_block("gt3")["pace_kmh"] == 60 and rc.delta_block("gt3")["band_kmh"] == band and rc.delta_block("gt3").get("min_ms") is None
     cars = {1: lambda p: (60 + band + 55) / 3.6, 2: lambda p: (60 + band - 1) / 3.6, 3: lambda p: 30 / 3.6}
@@ -320,7 +315,7 @@ def test_a_vsc_by_sectors_escalates_from_the_drive_through_to_the_severe_time_pe
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3"}
     _field(rc, {1: speed, 2: lambda p: speed(p) * 0.9}, 0.0, 400.0, models)   # green racing: the reference laps
-    rc.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 12}, now=1000.0)
+    rc.set_flag("vsc", 80, grace_s=5, penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 12}, now=1000.0)
     cars = {1: lambda p: speed(p) / 1.10, 2: lambda p: speed(p) / 1.60}   # car 1 too fast in every sector, car 2 well below
     out, p = _field(rc, cars, 500.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3})
     out, p = _field(rc, cars, 505.0, 14.0, models, wall0=1006.0, p0=p)
@@ -334,13 +329,13 @@ def test_a_vsc_by_sectors_escalates_from_the_drive_through_to_the_severe_time_pe
     rcmod._neutral_dues_pending.clear()
     rc2 = RaceControl({"session_type": RACE_TYPE})
     _field(rc2, {1: speed}, 0.0, 400.0, {1: "gt3"})
-    rc2.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 0}, now=1000.0)
+    rc2.set_flag("vsc", 80, grace_s=5, penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 0}, now=1000.0)
     _field(rc2, {1: lambda p: speed(p) / 1.10}, 500.0, 5.0, {1: "gt3"}, wall0=1000.0, p0={1: 0.3})
     _field(rc2, {1: lambda p: speed(p) / 1.10}, 505.0, 60.0, {1: "gt3"}, wall0=1006.0, p0={1: 0.3})
     assert _dues() == [], "severe_s 0: no proposal"
     rc3 = RaceControl({"session_type": 1})
     _field(rc3, {1: speed}, 0.0, 400.0, {1: "gt3"})
-    rc3.set_flag("vsc", 80, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
+    rc3.set_flag("vsc", 80, grace_s=5, penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
     _field(rc3, {1: lambda p: speed(p) / 1.10}, 500.0, 5.0, {1: "gt3"}, wall0=1000.0, p0={1: 0.3})
     _field(rc3, {1: lambda p: speed(p) / 1.10}, 505.0, 60.0, {1: "gt3"}, wall0=1006.0, p0={1: 0.3})
     assert _dues() == [], "a practice session has no race result to put it on"
@@ -354,7 +349,7 @@ def test_an_fcy_proposes_the_severe_penalty_when_the_green_comes_if_the_delta_is
     rcmod._neutral_dues_pending.clear()
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3", 2: "gt3", 3: "gt3"}
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
+    rc.set_flag("fcy", 60, grace_s=5, penalty={"kind": "pits", "laps": 3, "warnings": 2, "severe_s": 10}, now=1000.0)
     band = rc.tolerance_kmh
     stay = lambda p: (60 + band + 40) / 3.6   # 40 km/h over the band: the delta falls 0.4 s per second
     _, p = _field(rc, {1: stay, 2: lambda p: 60 / 3.6, 3: stay}, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3, 2: 0.3, 3: 0.3})
@@ -377,11 +372,11 @@ def test_an_fcy_that_ends_before_the_judge_looked_at_it_does_not_inherit_the_tot
     rcmod._neutral_dues_pending.clear()
     rc = RaceControl({"session_type": RACE_TYPE})
     models = {1: "gt3"}
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1000.0)
+    rc.set_flag("fcy", 60, grace_s=5, now=1000.0)
     stay = {1: lambda p: 120 / 3.6}
     _, p = _field(rc, stay, 0.0, 5.0, models, wall0=1000.0, p0={1: 0.3})
     _field(rc, stay, 5.0, 20.0, models, wall0=1006.0, p0=p)   # the judge holds a negative total of this FCY
-    rc.set_flag("fcy", 60, grace_s=5, mode="delta", now=1100.0)   # a new FCY out and over before the judge looks at it
+    rc.set_flag("fcy", 60, grace_s=5, now=1100.0)   # a new FCY out and over before the judge looks at it
     rc.set_flag("green", now=1101.0)
     assert _dues() == [], "nothing is queued for the second FCY: nobody was judged in it"
     rcmod._neutral_dues_pending.clear()
