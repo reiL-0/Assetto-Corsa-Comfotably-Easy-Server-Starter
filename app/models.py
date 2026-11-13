@@ -478,6 +478,19 @@ class PracticeKeep(SQLModel, table=True):
     drivers: list = Field(default_factory=list, sa_type=JSON)   # [{guid, name, model, skin, best_ms, best_valid_ms, laps, valid_laps}]
 
 
+class VscRef(SQLModel, table=True):
+    """The reference lap of the VSC (app/vscrefs.py): the best clean lap of a car model on a track layout, from any session of this manager: ONE row per combination (the fastest). The VSC's minimum sector
+    times are a factor of it."""
+    __tablename__ = "vsc_refs"
+
+    track: str = Field(primary_key=True)
+    track_config: str = Field(default="", primary_key=True)   # "" = the track has no layouts
+    car_model: str = Field(primary_key=True)
+    lap_s: float
+    sectors: list = Field(default_factory=list, sa_type=JSON)   # the N sector times of that lap, in seconds
+    set_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class TrackRecord(SQLModel, table=True):
     """The best valid lap (no cuts) of a driver on a track layout with a car, from any session of any server of this manager (app/records.py)."""
     __tablename__ = "track_records"

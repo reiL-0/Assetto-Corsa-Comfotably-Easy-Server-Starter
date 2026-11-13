@@ -157,6 +157,7 @@ class RaceControl:
         self.damage: dict[int, tuple[int, float]] = {}       # car -> (damage % its own game reported, when): the orange disc (client evidence)
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
+        self.ref_key: tuple[str, str] | None = None          # (track, layout) whose reference laps were read from the database (app/vscrefs.py)
         self.line_told: dict[str, str] = {}                  # hold tag -> the text of the order / "line up" notice on the screens now (a notice is only said again when its text changes)
         self.red_ref: dict | None = None                     # the F1 way: {"lap": n, "order": [cars]} = the last line every car of the leader's lap had crossed when the red flag came; the restart grid and the lap count come from it
         self.red_near: set[int] = set()                      # cars that were about to cross the line when the red came: that crossing is not a lap they could use to come in

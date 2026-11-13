@@ -52,6 +52,7 @@ class RefLaps:
         self._cross: dict[int, dict[int, float]] = {}   # car -> boundary -> instant, since the last reset / pit lane
         self._dirty: set[int] = set()
         self.best: dict[str, tuple[float, list[float]]] = {}   # car model -> (lap time s, the N sector times s) of its fastest clean lap
+        self.dirty: set[str] = set()   # models whose best lap changed here and is not in the database yet (app/vscrefs.py)
 
     def reset(self) -> None:
         self._cross.clear(); self._dirty.clear(); self.best.clear()
@@ -71,11 +72,23 @@ class RefLaps:
                 lap = c[b] - c[b - N]
                 if lap >= MIN_LAP_S and (model not in self.best or lap < self.best[model][0]):
                     self.best[model] = (lap, [c[k + 1] - c[k] for k in range(b - N, b)])
+                    self.dirty.add(model)
             for k in [k for k in c if k < b - N]:
                 del c[k]
 
     def forget(self, car: int) -> None:
         self._cross.pop(car, None)
+
+    def merge(self, known: dict[str, tuple[float, list[float]]]) -> None:
+        """Laps kept in the database: they count where they beat what was learned here (the quickest per car model wins)."""
+        for model, (lap, secs) in known.items():
+            if model not in self.best or lap < self.best[model][0]:
+                self.best[model] = (lap, list(secs))
+
+    def take_dirty(self) -> dict[str, tuple[float, list[float]]]:
+        out = {m: self.best[m] for m in self.dirty if m in self.best}
+        self.dirty.clear()
+        return out
 
     def profiles(self, factor: float) -> dict[str, list[int]]:
         """The minimum time in ms of each sector, per car model that has a clean lap: factor x its best sector times."""
