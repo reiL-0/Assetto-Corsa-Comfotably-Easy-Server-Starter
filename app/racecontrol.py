@@ -120,8 +120,10 @@ def line_up_notices(inst, rc, field: dict) -> None:
             return
         texts: dict[str, tuple[int, str]] = {}
         order = [c for c in order if c in inst.acsp.cars]   # (a car that left the server is not in the line)
+        grid = bool(rc.caution.keep_frozen)   # (the restart of a red flag: the grid, in rows of two: the odd places on the pole's side, the even ones on the other)
         for i, car in enumerate(order):
-            texts[f"order-{car}"] = (car, "ORDEN CONGELADO: P1 · LÍDER" if i == 0 else f"ORDEN CONGELADO: P{i + 1} · detrás de {_name(inst, order[i - 1])}")
+            slot = f" · FILA {i // 2 + 1} · {'LADO DE LA POLE' if i % 2 == 0 else 'LADO CONTRARIO'}" if grid else ""
+            texts[f"order-{car}"] = (car, f"ORDEN CONGELADO: P{i + 1}{slot} · LÍDER" if i == 0 else f"ORDEN CONGELADO: P{i + 1}{slot} · detrás de {_name(inst, order[i - 1])}")
         for car, behind in early.items():
             if car in inst.acsp.cars and behind in inst.acsp.cars:
                 texts[f"form-{car}"] = (car, f"PASA AL PACE CAR: ponte detrás de {_name(inst, behind)}")
@@ -708,6 +710,10 @@ def flag_notice(server_id: int, body: FlagNoticeIn, sess: SessionDep) -> dict:
         rc.set_red(body.on, field=inst.acsp.field if inst else None)   # (the cars have `pit_s` seconds to be in the pit lane; it stays beside any track flag until withdrawn)
         if not body.on:
             rc.drop_hold("red-order")
+            if inst and rc.red_ref and rc._is_race() and rc.flag not in CAUTION and (rc.nascar or rc.pace_car is not None):   # a race with a pace car: the field goes out, laps the track and forms up on the grid in the frozen order
+                actions = rc.set_flag("yellow", field=inst.acsp.field)   # (the caution holds the red's reference order: nobody passes, the line-up notices say each place)
+                _say(rc, "BANDERA ROJA RETIRADA: salid a pista, una vuelta y formad la parrilla en el orden congelado", "flag")
+                nascar_actions(server_id, rc, actions)
             return rc.snapshot()
         if rc.red_ref and inst:
             top = " · ".join(f"{i + 1} {_name(inst, c)}" for i, c in enumerate(rc.red_ref["order"][:10]))
