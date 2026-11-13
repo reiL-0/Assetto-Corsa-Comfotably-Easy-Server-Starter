@@ -1206,6 +1206,34 @@ def announce(server_id: int, violations: list[dict]) -> None:
     _say(rc, "VSC: no bajaron a tiempo: " + names, "penalty")
 
 
+def vsc_refs_sync() -> None:
+    """The reference laps of the VSC, between memory and the database (a worker thread: it blocks). A session on a track the state has not read yet takes the stored laps; a lap that was quicker than the stored one is
+    written (one row per track layout and car model). Never raises: a lap not kept now is kept at the next one."""
+    from app import vscrefs
+    for inst in supervisor.live():
+        rc = state_of(inst.server_id, True, inst.acsp.session)
+        key = vscrefs.key_of(inst.acsp.session)
+        if not rc or not key:
+            continue
+        try:
+            with _lock:
+                need, dirty = rc.ref_key != key, rc.reflaps.take_dirty()
+            if need:
+                known = vscrefs.load(*key)
+                with _lock:
+                    rc.reflaps.merge(known)
+                    rc.ref_key = key
+            if dirty:
+                try:
+                    vscrefs.save(*key, dirty)
+                except Exception:
+                    with _lock:
+                        rc.reflaps.dirty.update(dirty)   # (tried again at the next tick)
+                    raise
+        except Exception:
+            log.exception("vsc refs: could not sync server %s", inst.server_id)
+
+
 async def monitor_forever() -> None:
     """Judges every VSC when its grace ends (one loop for all servers, started by the app's lifespan)."""
     while True:
@@ -1223,6 +1251,7 @@ async def monitor_forever() -> None:
                 await asyncio.to_thread(flag_rules_of, sid)
             for sid in drs_stale_servers():
                 await asyncio.to_thread(drs_rule_of, sid)
+            await asyncio.to_thread(vsc_refs_sync)
             for sid in give_back_stale_servers():
                 await asyncio.to_thread(give_back_rule_of, sid)   # (the league's rule, from the database, off the event loop)
             from app.league import cut_rule_stale
