@@ -1518,3 +1518,52 @@ def test_withdrawing_the_red_flag_of_a_race_with_nascar_forms_the_grid_in_the_fr
     assert ('ORDEN CONGELADO: P1 · FILA 1 · LADO DE LA POLE · LÍDER', 3) in said
     assert ('ORDEN CONGELADO: P2 · FILA 1 · LADO CONTRARIO · detrás de Ana', 4) in said
     assert ('ORDEN CONGELADO: P3 · FILA 2 · LADO DE LA POLE · detrás de Beto', 5) in said
+
+
+def test_finish_does_not_wait_for_spectators_or_the_safety_car(live, monkeypatch):
+    sid, client, sent = live
+    monkeypatch.setattr(adapter, '_say', lambda *args: None)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [SimpleNamespace(server_id=sid, acsp=client)])
+    monkeypatch.setattr(adapter, '_non_racing_guids', lambda now: frozenset({'SPECTATOR'}))
+    client.cars[4] = {'driver_name': 'Rezagado', 'driver_guid': '76561190000000002'}
+    client.cars[5] = {'driver_name': 'Caster', 'driver_guid': 'SPECTATOR'}
+    client.cars[6] = {'driver_name': 'Safety', 'driver_guid': '76561190000000009'}
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.pace_car = 6
+    rc.configure_nascar(2, stages=[2])
+    state, actions = live_rc.on_lap(sid, 2, 3)
+    adapter.nascar_actions(sid, state, actions, 3)
+    assert rc.finish_wait == {4}   # the straggler holds the result; the spectator and the safety car do not
+
+
+def test_stop_after_the_flag_waits_for_the_saved_result(live, monkeypatch, tmp_path):
+    import asyncio, json, os
+    sid, client, sent = live
+    inst = SimpleNamespace(server_id=sid, acsp=client)
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: [inst])
+    monkeypatch.setattr(adapter.supervisor, 'get', lambda i: inst)
+    monkeypatch.setattr(adapter, '_results_dir', lambda i: tmp_path)
+    stopped = []
+    async def fake_stop(i, ins, reason):
+        stopped.append(reason)
+    monkeypatch.setattr(adapter.server_service, 'stop_instance', fake_stop)
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(2)
+    now = adapter.time.time()
+    assert not adapter.stop_after_save(sid)                                  # no flag yet: stop right away
+    (tmp_path / '1.finish').write_text(json.dumps({'at': now - 30, 'laps': 2}))
+    rc.next_at = now + 600
+    assert adapter.stop_after_save(sid) and sid in adapter._STOP_AFTER and rc.next_at <= adapter.time.time()
+    first = adapter._STOP_AFTER[sid]
+    assert adapter.stop_after_save(sid) and adapter._STOP_AFTER[sid] == first   # asking again does not push the deadline back
+    live_rc.state_of(sid, True, {'session_type': 3, 'fresh': 1}, create=True)    # NEXT_SESSION replaces the state: the stop must survive it
+    asyncio.run(adapter.stop_saved_races(now))
+    assert not stopped                                                       # nothing saved yet: keeps waiting
+    (tmp_path / 'x_RACE.json').write_text('{}')
+    asyncio.run(adapter.stop_saved_races(now))
+    assert stopped == ['manual'] and sid not in adapter._STOP_AFTER                   # acServer wrote the file: stops, once
+    asyncio.run(adapter.stop_saved_races(now))
+    assert stopped == ['manual']
+    adapter._STOP_AFTER[sid] = (now + 999, object())                         # asked for an instance that is gone: dropped, never applied to the one running now
+    asyncio.run(adapter.stop_saved_races(now))
+    assert stopped == ['manual'] and sid not in adapter._STOP_AFTER
