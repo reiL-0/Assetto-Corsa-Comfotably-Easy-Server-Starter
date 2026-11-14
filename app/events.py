@@ -37,6 +37,14 @@ class EventIn(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _off_is_not_a_rule(self) -> EventIn:
+        if self.cuts_rule is not None and "race" in self.session.cuts_off:
+            raise ValueError("cuts_off: la carrera no puede tener cortes apagados y regla propia a la vez")
+        if self.drs_rule is not None and self.session.drs_off:
+            raise ValueError("drs_off: el DRS no puede estar apagado y tener regla propia a la vez")
+        return self
+
+    @model_validator(mode="after")
     def _entries_fit(self) -> EventIn:
         """An entry list saved in a preset must be usable: each Steam ID once, each car one the session enables.
         (Not on SessionIn: presets saved before this check must still load.)"""
