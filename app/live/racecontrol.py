@@ -1194,6 +1194,8 @@ class RaceControl:
                 return None
             if guid and str(self.audit_guids.get(car) or "") != guid:
                 return None   # (the slot changed hands since the monitor last looked: the driver who was reported is not the one who would be sanctioned)
+            if car not in self._visit_start:
+                return None   # (the hub does not have it in the pit lane now: it left (or never came in) before this report landed, and a speed read out on the track is no pit-lane speed)
             last = self._pitspeed_at.get(car)
             if last is not None and (now - last < PITSPEED_GAP_S or self._laps_of.get(car, 0) <= self._pitspeed_lap.get(car, -1)):
                 return None   # (one sanction per pass: the next one needs a lap completed since, which a new pass through the pit lane brings; the hub's pit reports also come while it STAYS there)

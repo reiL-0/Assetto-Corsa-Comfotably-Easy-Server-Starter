@@ -450,6 +450,8 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_servers_penalty_and_the_
     assert steward.get(f"{V}/servers/{sid}/rules").json()["detectors"]["pit"]["limit_kmh"] == 80
     api.get(f"{V}/servers/{sid}/race-state")   # (the state poll reads the track's rule)
     assert rc.pit_limit and rc.snapshot()["pit_limit"] == {"limit_kmh": 80, "tolerance_kmh": 5}
+    assert rc.pit_speed(3, 90.0, 999.0) is None, "the hub has not put it in the pit lane: a speed on the track is no pit-lane speed"
+    rc.report_pit(3, True, now=999.5)
     assert rc.pit_speed(3, 84.0, 1000.0) is None, "inside the tolerance (80 + 5)"
     assert rc.pit_speed(3, 90.0, 1001.0) == {"kmh": 90, "limit": 80, "step": 0} and [p["car_id"] for p in rc.penalties] == [3], "a drive-through"
     assert rc.pit_speed(3, 95.0, 1005.0) is None, "the same pass: once"
@@ -457,10 +459,12 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_servers_penalty_and_the_
     rc.report_pit(3, True, now=1040.0)   # the hub's report while the car STAYS in the pit lane
     assert rc.pit_speed(3, 95.0, 1050.0) is None, "a pit report is no new pass"
     rc.lap_done(3, 95000, 0, 8, 1060.0, "")   # a lap completed since: another pass through the pit lane
+    rc.report_pit(3, True, now=1065.0)
     assert rc.pit_speed(3, 95.0, 1070.0) is not None, "another pass: a new offence"
     assert steward.put(f"{V}/servers/{sid}/race-control/pit-limit", json={"limit_kmh": 0}).status_code == 200 and league.effective_rules(sid)["pit"] is None
     rc2 = RaceControl(session_ref={"session_type": 3}); rc2.server_id = 9
     rc2.audit_guids = {1: "G1"}; rc2.pit_limit = {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 5}
+    rc2.report_pit(1, True, now=9.0)
     assert rc2.pit_speed(1, 70.0, 10.0)["step"] == 5 and not rc2.penalties, "seconds on the result, no drive-through"
 
 
@@ -469,6 +473,7 @@ def test_the_pit_speed_notice_keeps_its_numbers_when_a_conduct_warning_follows_t
     rc.audit_guids = {1: "G1"}; rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
     rc.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
     rc.conduct["G1"] = 2   # one more sanction reaches the black-and-white warning (rule bw_at): its message lands after the offence's in flag_new
+    rc.report_pit(1, True, now=9.0)
     assert rc.pit_speed(1, 124.0, 10.0)
     msgs = rc.take_flag_messages()
     off = [m for m in msgs if m["msg"] == "offence"]
@@ -506,6 +511,9 @@ def test_the_hub_report_of_pit_speed_is_judged_with_the_managers_own_speed(live)
     rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
     steward = _client("steward")
     url, body = f"{V}/servers/{sid}/race-control/pit-speed", {"car_id": 3, "name": "Ana"}
+    client.cars[3]["velocity"] = [0.0, 0.0, 25.0]   # 90 km/h
+    assert steward.post(url, json=body).status_code == 204 and not rc.penalties, "fast, but the hub never put it in the pit lane (it turned away at the entry): nothing owed"
+    rc.report_pit(3, True)
     client.cars[3]["velocity"] = [0.0, 0.0, 20.0]   # 72 km/h: the hub claims more, the server says no
     assert steward.post(url, json=body).status_code == 204 and not rc.penalties
     client.cars[3]["velocity"] = [0.0, 0.0, 25.0]   # 90 km/h
