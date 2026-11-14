@@ -646,6 +646,9 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
 async def stop_server(server_id: int, sess: SessionDep, force: bool = False) -> dict:
     _get(sess, server_id)
     if not force and unsaved_race_finish(Path(settings.data_dir) / "instances" / str(server_id) / "results", time.time()):
-        raise HTTPException(409, "the race result is not saved yet (acServer writes it when the session ends): wait for the next session, or stop with ?force=true to lose it")
+        from app.racecontrol import stop_after_save   # (racecontrol imports this module)
+        if stop_after_save(server_id):
+            return {"running": True, "stopping_after_result": True}   # the field is still finishing: it stops by itself once the result is written
+        raise HTTPException(409, "the race result is not saved yet and nothing is closing the race: stop with ?force=true to lose it")
     await server_service.stop(server_id)
     return {"running": False}

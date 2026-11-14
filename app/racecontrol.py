@@ -36,11 +36,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app import supervisor
+from app.services import server_service
 from app.auth import CurrentUser, require, require_any
 from app.config import settings
 from app.db import SessionDep, engine
 from app.models import GiveBackDue, LeagueMember, NeutralDue, Server
-from app.results import FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
+from app.results import unsaved_race_finish, FINISH_SUFFIX, STAGES_PENDING, STAGES_SUFFIX, claim_orphan, pending_is_unclaimed
 from app.live import acsp, fieldrec, raceaudit
 from app.live.nascar import CAUTION, DRAINING, MAX_SHARE, MAX_SHARES, MAX_TOTAL
 from app.live.racecontrol import RaceControl, GRACE_DEFAULT, GRACE_MAX, GRACE_MIN, LAPS_MAX, NEXT_SESSION_DELAY, PACE_CAR_KMH, PACE_MAX, PACE_MIN, RACE_TYPE, TOL_DEFAULT, TOL_MAX, _lock, flag_rules_of, flag_rules_peek, flag_rules_stale, cut_rule_of, drs_rule_of, drs_rule_peek, drs_rule_stale, flag_modes_of, flag_modes_peek, flag_modes_stale, give_back_rule_of, give_back_rule_peek, give_back_rule_stale, speed_kmh, state_of
@@ -944,6 +945,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
     inst = _live(server_id)
     if not inst:
         return
+    nonracing = _non_racing_guids(time.time())   # (read outside the lock: it may query the database)
     queue = sorted(actions, key=lambda a: a[0] == "say")   # flags and the finish first, the messages after: the notice never shows before the flag it announces
     while queue:
         action = queue.pop(0)
@@ -953,7 +955,7 @@ def nascar_actions(server_id: int, rc, actions: list[tuple], crossing: int | Non
             if action[0] == "flag" and rc.nascar.flag == action[1]:
                 queue += rc.set_flag(action[1], source="nascar", field=inst.acsp.field)   # (a stage-break yellow starts a caution: its free pass and order notices come back)
             elif action[0] == "finish" and rc.nascar.phase == DRAINING and rc.finish_wait is None:
-                rc.finish_wait = {i for i in inst.acsp.cars if i != crossing}
+                rc.finish_wait = {i for i, c in inst.acsp.cars.items() if i != crossing and i != rc.pace_car and c.get("driver_guid") not in nonracing}   # (spectators and the safety car do not hold the result)
                 rc.finish_deadline = time.time() + 90
                 rc._bump()
         if action[0] == "say":
@@ -1105,13 +1107,51 @@ def finish_nascar(now: float) -> None:
                     continue
                 rc.finish_wait = None
                 rc.nascar.done()
-                rc.next_at = now + rc.next_delay_s
+                rc.next_at = now + (0 if _STOP_AFTER.get(inst.server_id, (0, None))[1] is inst else rc.next_delay_s)
                 rc._bump()
             if rc.next_at is None or now < rc.next_at:
                 continue
             rc.next_at = None
             rc._bump()
         inst.acsp.send(acsp.encode_next_session())
+
+
+_STOP_AFTER: dict[int, tuple[float, object]] = {}   # server id -> (deadline, the instance it was asked for; another instance never inherits it): a stop was asked after the chequered flag, the server stops when the result is saved. Not in RaceControl: NEXT_SESSION replaces that state just as acServer writes the file.
+
+
+def stop_after_save(server_id: int, wait_s: float = 240) -> bool:
+    """A stop asked between the chequered flag and the saved result: the field finishes, NEXT_SESSION goes out at once, and `stop_saved_races` stops the server when acServer has written the file.
+    False = no race is closing here (stop right away)."""
+    inst = supervisor.get(server_id)
+    if not inst or not inst.acsp:
+        return False
+    rc = state_of(server_id, True, inst.acsp.session)
+    now = time.time()
+    closing = unsaved_race_finish(_results_dir(server_id), now)   # (disk: outside the lock)
+    with _lock:
+        if not rc or not rc.nascar or not closing:
+            return False
+        _STOP_AFTER.setdefault(server_id, (now + wait_s, inst))   # (asking again does not push the deadline back)
+        if rc.next_at is not None:
+            rc.next_at = now
+        rc._bump()
+    return True
+
+
+async def stop_saved_races(now: float) -> None:
+    live = {i.server_id: i for i in supervisor.live()}
+    with _lock:
+        for sid in [k for k, (_, ins) in _STOP_AFTER.items() if live.get(k) is not ins]:
+            del _STOP_AFTER[sid]   # the server stopped (or was replaced) some other way: nothing left to wait for
+        pending = dict(_STOP_AFTER)
+    for sid, (at, inst) in pending.items():
+        if now < at and unsaved_race_finish(_results_dir(sid), now, max_age=1e9):
+            continue   # the field is still crossing, or NEXT_SESSION has not made acServer write the file yet
+        with _lock:
+            if _STOP_AFTER.pop(sid, None) is None:
+                continue
+        log.info("server %s: race result saved, stopping as asked", sid)
+        await server_service.stop_instance(sid, inst, "manual")   # (no-op if an apply replaced the instance meanwhile)
 
 
 class AutoYellowIn(BaseModel):
@@ -1351,6 +1391,7 @@ async def monitor_forever() -> None:
         try:
             now = time.time()
             finish_nascar(now)
+            await stop_saved_races(now)
             caution_tick(now)
             from app.league import neutralization_rule, neutralization_rule_stale
             for inst in supervisor.live():
