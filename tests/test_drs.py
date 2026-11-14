@@ -118,6 +118,7 @@ def test_the_live_offence_is_queued_once_and_a_pit_pass_serves_it():
     assert (row["driver_guid"], row["period"], row["seconds"]) == ("G1", 1, 15)
     assert rc.drs_use(3, "G1", 1001.0) is None and len(rcmod.pending_drs_dues()) == 1
     rc.report_pit(3, True, now=rc.clock.time() + 5)   # a pit-lane pass after the offence serves the drive-through
+    rc.report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert rcmod.pending_drs_served() == {(5, rc.cuts_session_key, "G1", 1)}
     rcmod.acknowledge_drs(rcmod.pending_drs_dues(), rcmod.pending_drs_served())
     assert not rcmod.pending_drs_dues() and not rcmod.pending_drs_served()

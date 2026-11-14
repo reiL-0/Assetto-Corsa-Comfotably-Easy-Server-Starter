@@ -295,6 +295,8 @@ class Caution:
                     continue
                 if rank.get(passer, 0) < rank.get(passed, 0):
                     continue   # (it was ahead in the frozen order: getting the place back, or a lapped car the leader goes by, is not a pass)
+                if passed in self.involved:
+                    continue   # (the car of the incident that brought the yellow out: the field goes by it while it gets going again, and it restarts behind anyway)
                 if speeds.get(passed, 0.0) <= max(SLOW_KMH, SLOW_RATIO * speeds.get(passer, 0.0)):   # (stopped, much slower, or its speed is not known: not judged)
                     continue
                 seen = [(when, c) for when, c in self._passed_by.get(passed, []) if now - when <= GIVE_BACK_MAX + CASCADE_S]   # (older ones can no longer be near a pass that is still waiting)

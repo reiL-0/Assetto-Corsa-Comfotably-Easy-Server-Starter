@@ -331,8 +331,10 @@ def test_drive_through_first_step_is_issued_live_and_served_by_a_pit_pass(live, 
     rc = live_rc.state_of(sid, True, client.session)
     assert [(p["car_id"], p["laps"]) for p in rc.penalties] == [(3, live_rc.CUT_DT_LAPS)], "the drive-through is a live penalty"
     rc.report_pit(3, True, now=rc.dt_open and min(t for _, t in rc.dt_open.values()) - 1)   # a pass from before the penalty does not serve it
+    rc.report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert len(live_rc.pending_cut_served()) == 0
     rc.report_pit(3, True)
+    rc.report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert len(live_rc.pending_cut_served()) == 1 and not rc.dt_open
     adapter.save_cut_dues()   # served marks are saved with their rows, once
     adapter.save_cut_dues()
@@ -355,6 +357,7 @@ def test_served_mark_outlives_the_session_state_and_is_saved_with_the_row(live, 
     monkeypatch.setattr(live_rc, "_cut_served", set())
     live_rc.on_cuts(sid, client.session, 3, 4, True)
     live_rc.state_of(sid, True, client.session).report_pit(3, True)
+    live_rc.state_of(sid, True, client.session).report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     live_rc.state_of(sid, False)   # the session ends before the monitor saved anything
     assert count(sid) == [], "result counting stages the row and the served mark together"
     adapter.save_cut_dues()
@@ -380,6 +383,7 @@ def test_a_pass_after_the_row_was_saved_still_serves_it_before_the_result_is_cou
     rc = live_rc.state_of(sid, True, client.session)
     assert rc.cuts_view(DT_RULE)["cuts_rule"] == {k: DT_RULE[k] for k in ("cap", "max", "per", "step")}, "the hub contract does not see the 0"
     rc.report_pit(3, True)   # ...and the pass comes later, still unsaved
+    rc.report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert count(sid) == [], "result counting applies the mark to the saved row before it reads the dues"
 
 

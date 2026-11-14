@@ -86,6 +86,7 @@ SC_INCIDENT_COOLDOWN_S = 120.0     # minimum interval after an automatic SC ends
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 RACE_TYPE = 3                     # ACSP session_type of a race
+DT_STOP_KMH = 5.0                 # a car this slow in the pit lane has stopped: a stop (tyres, fuel, repairs) is not a drive-through
 PIT_CLEAR = 6.0                  # s after a pit-lane report during which a standing car is not a stopped car on the track (two reports of the hub)
 STANDING = 5.0                   # km/h under which a car is standing (a spun or parked car is not a violator)
 
@@ -255,6 +256,8 @@ class RaceControl:
         self._limits_counted: dict[int, float] = {}  # monotonic; session-owned, at most 256 slots, under _lock
         self._pit_lap: set[int] = set()  # pit observed during the current lap; protected by _lock
         self._pit_seen: dict[int, float] = {}  # car id -> when the hub last said it is in the pit lane
+        self._visit_start: dict[int, float] = {}   # car id -> when its pit-lane visit of now began (a drive-through is served when the visit ENDS: `_close_visit`)
+        self._visit_stopped: set[int] = set()      # cars that stood still at some point of that visit
 
     def audit(self, kind, **fields):
         session = self.session_ref if isinstance(self.session_ref, dict) else {}
@@ -827,28 +830,21 @@ class RaceControl:
 
     # ---- the VSC monitor ------------------------------------------------------------------------------------------------------------------------------------------------
     @fieldrec.capture(_lock)
-    def report_pit(self, car_id: int, in_pit: bool, now: float | None = None) -> None:
-        """The hub of that car says whether it is in the pit lane. Only a yes is kept (a no never cancels one), and it expires: see the module docstring."""
+    def report_pit(self, car_id: int, in_pit: bool, now: float | None = None, kmh: float | None = None) -> None:
+        """The hub of that car says whether it is in the pit lane. Only a yes is kept (a no never cancels one), and it expires: see the module docstring. `kmh` = the manager's own reading of the car's speed
+        (a visit in which the car stood still is a stop, not a drive-through); a no ends the visit (`_close_visit`)."""
+        if not in_pit:
+            with _lock:
+                self._close_visit(car_id)
+            return
         if in_pit:
             with _lock:
                 self._pit_lap.add(car_id)
                 self._pit_seen[car_id] = self.clock.time() if now is None else now
                 self._pit_visit(car_id, self._pit_seen[car_id])
-                for key, (car, issued) in list(self.dt_open.items()):
-                    if car == car_id and self._pit_seen[car_id] > issued:   # a pit-lane pass after the penalty came out serves it
-                        del self.dt_open[key]
-                        if key in self._manual_dt_keys:
-                            self._manual_dt_keys.discard(key)
-                        else:
-                            _cut_served.add(key)
-                for key, (car, issued) in list(self.flag_dt_open.items()):   # (and a blue-flag one)
-                    if car == car_id and self._pit_seen[car_id] > issued:
-                        del self.flag_dt_open[key]
-                        _flag_served.add(key)
-                for key, (car, issued) in list(self.drs_dt_open.items()):   # (the same pit pass serves a DRS drive-through)
-                    if car == car_id and self._pit_seen[car_id] > issued:
-                        del self.drs_dt_open[key]
-                        _drs_served.add(key)
+                self._visit_start.setdefault(car_id, self._pit_seen[car_id])
+                if kmh is not None and kmh < DT_STOP_KMH:   # ponytail: the speed is read when a report comes (every 1-3 s): a stop shorter than that is not seen. A real stop (tyres, fuel) is longer; a sampled minimum speed if it ever matters
+                    self._visit_stopped.add(car_id)
                 # Keep the return command through parking: pit-lane entry is not
                 # the box, and switching to wait would release the hub's brake.
                 if car_id == self.pace_car and self.pace_car_in:
@@ -1108,6 +1104,8 @@ class RaceControl:
         in the slot now: a slot that changed hands starts from no pace, whatever the field's samples have already noticed."""
         with _lock:
             self._laps_of[car] = laps   # (a new pass through the pit lane needs a lap completed since the last pit-speed sanction)
+            if car in self._visit_start and now - self._pit_seen.get(car, -1e9) > PIT_CLEAR:
+                self._close_visit(car)   # (under green the hub only reports while the car is IN the pit lane: the lap that follows ends the visit)
             if guid and self._pace_owner.get(car, guid) != guid:
                 self.pace.forget(car)
             if guid:
@@ -1208,6 +1206,33 @@ class RaceControl:
                     m.update(kmh=round(kmh), limit=lim["limit_kmh"])
                     break
             return {"kmh": round(kmh), "limit": lim["limit_kmh"], "step": lim["penalty_s"]}
+
+    def _close_visit(self, car: int) -> None:
+        """The pit-lane visit of `car` is over (its hub said it is out, or it completed a lap with no report since): the drive-throughs (cuts, flags, DRS) that came out BEFORE the visit began are served if
+        the car never stood still in it. One issued during the visit (too fast in the pit lane) needs another pass; a stop serves nothing and the driver is told. Under the lock."""
+        start = self._visit_start.pop(car, None)
+        stopped = car in self._visit_stopped
+        self._visit_stopped.discard(car)
+        if start is None:
+            return
+        due = [(book, key) for book in (self.dt_open, self.flag_dt_open, self.drs_dt_open) for key, (c, issued) in book.items() if c == car and start > issued]
+        if not due:
+            return
+        self.audit("drive_through_visit", car=car, served=not stopped, stopped=stopped, open=len(due), executed=True)
+        if stopped:
+            self.flag_new.append({"msg": "dt_stop", "car": car})
+            self._bump()
+            return
+        for book, key in due:
+            del book[key]
+            if book is self.flag_dt_open:
+                _flag_served.add(key)
+            elif book is self.drs_dt_open:
+                _drs_served.add(key)
+            elif key in self._manual_dt_keys:
+                self._manual_dt_keys.discard(key)
+            else:
+                _cut_served.add(key)
 
     def conduct_add(self, guid: str, car: int | None = None) -> None:
         """One more sanction on this driver's conduct (any flag, DRS, a round of the cuts ladder): the black-and-white flag warns him at `bw_at`, the black one comes at `black_at` (rule `black`)."""
@@ -1313,6 +1338,7 @@ class RaceControl:
             self.red_laps.pop(car, None)
             self.red_near.discard(car)
             self._pitspeed_at.pop(car, None); self._pitspeed_lap.pop(car, None); self._laps_of.pop(car, None)   # (the slot may be somebody else's now: his first pit-lane offence is not forgiven by the one before)
+            self._visit_start.pop(car, None); self._visit_stopped.discard(car)   # (nor does he inherit a pit-lane visit, or a stop in it)
 
     def _disqualify(self, car: int, guid: str, live: bool) -> None:
         """The black flag was not obeyed: the driver is disqualified from the race (a `FlagDue` of kind black; the result turns it into a `dsq` penalty). Only when the black flag is live."""
