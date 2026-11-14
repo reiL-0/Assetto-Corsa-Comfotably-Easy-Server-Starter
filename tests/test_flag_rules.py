@@ -305,9 +305,11 @@ def test_the_red_flag_disqualifies_even_with_the_black_flag_switched_off_and_a_r
     assert "G1" in rc.disqualified, "the red flag is a fact: its own switch decides, not the black flag's"
     rcmod._flag_dues_pending.clear()
     rc = rc_with(); rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 5}
+    rc.report_pit(1, True, now=99.0)
     assert rc.pit_speed(1, 95.0, 100.0, "G1") is not None
     assert rc.pit_speed(1, 95.0, 105.0, "G1") is None, "the same pass"
     rc.drop_red(1)   # the car left: the slot is somebody else's
+    rc.report_pit(1, True, now=105.5)
     assert rc.pit_speed(1, 95.0, 106.0, "G1") is not None, "his first offence is not forgiven by the one before"
     assert rc.pit_speed(1, 95.0, 200.0, "G9") is None, "a report about another driver than the one the ledger knows in that slot"
     rcmod._flag_dues_pending.clear()
