@@ -153,9 +153,10 @@ async def _signal(pid: int, sig: int) -> None:
 class Instance:
     def __init__(self, server_id: int, cwd: Path, *, proc: asyncio.subprocess.Process | None = None, pid: int | None = None,
                  started_at: float | None = None, log_from: int = 0, http_port: int | None = None,
-                 nascar_config: dict | None = None) -> None:
+                 nascar_config: dict | None = None, rolling: str = "off") -> None:
         self.server_id = server_id
         self.nascar_config = nascar_config  # snapshot of Server.session.nascar; replaced on apply, read by ACSP without I/O
+        self.rolling = rolling   # how a race starts (Server.session: nascar / f1 / off); like nascar_config it is known before the first UDP event; replaced on apply (live.racecontrol.load_rolling)
         self.pace_steam_id: str | None = None   # Server.session.pace_steam_id until pace_car_check names him (then None); set on start / apply / adopt
         self.cwd = cwd
         self.proc = proc  # only for a process this manager spawned; an adopted one is known by its pid alone
@@ -361,6 +362,7 @@ async def _start(
     acsp_host: str = "127.0.0.1",
     http_port: int | None = None,
     nascar_config: dict | None = None,
+    rolling: str = "off",
 ) -> Instance:
     current = _instances.get(server_id)
     if current and current.running:
@@ -387,7 +389,7 @@ async def _start(
             stderr=out,
             start_new_session=True,  # its own session: a signal or exit of the manager does not reach it
         )
-    inst = Instance(server_id, cwd, proc=proc, http_port=http_port, nascar_config=nascar_config)
+    inst = Instance(server_id, cwd, proc=proc, http_port=http_port, nascar_config=nascar_config, rolling=rolling)
     record = {"pid": proc.pid, "started_at": inst.started_at}   # (started_at is taken once the spawn returns: a stalled event loop would move it; proc_started is the process' own, from /proc)
     try:
         record["proc_started"] = _proc_started(proc.pid)
@@ -411,6 +413,7 @@ async def adopt(
     acsp_host: str = "127.0.0.1",
     http_port: int | None = None,
     nascar_config: dict | None = None,
+    rolling: str = "off",
 ) -> Instance | None:
     """Take back an acServer left running by a previous manager process. None when there is nothing to take back."""
     try:
@@ -423,7 +426,7 @@ async def adopt(
         return None
     log_size = (cwd / "server.log").stat().st_size if (cwd / "server.log").exists() else 0
     inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384), http_port=http_port,
-                    nascar_config=nascar_config)
+                    nascar_config=nascar_config, rolling=rolling)
     _instances[server_id] = inst
     if acsp_local_port and acsp_remote_port:
         await inst.connect_acsp(acsp_remote_port, acsp_local_port, acsp_host, car_slots)
