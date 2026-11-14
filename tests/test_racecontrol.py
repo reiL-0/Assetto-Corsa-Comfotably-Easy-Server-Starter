@@ -464,6 +464,17 @@ def test_pit_speed_is_sanctioned_once_per_pass_with_the_servers_penalty_and_the_
     assert rc2.pit_speed(1, 70.0, 10.0)["step"] == 5 and not rc2.penalties, "seconds on the result, no drive-through"
 
 
+def test_the_pit_speed_notice_keeps_its_numbers_when_a_conduct_warning_follows_the_offence():
+    rc = RaceControl(session_ref={"session_type": 3}); rc.server_id = 9
+    rc.audit_guids = {1: "G1"}; rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
+    rc.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
+    rc.conduct["G1"] = 2   # one more sanction reaches the black-and-white warning (rule bw_at): its message lands after the offence's in flag_new
+    assert rc.pit_speed(1, 124.0, 10.0)
+    msgs = rc.take_flag_messages()
+    off = [m for m in msgs if m["msg"] == "offence"]
+    assert any(m["msg"] == "bw" for m in msgs) and off and off[0]["kmh"] == 124 and off[0]["limit"] == 80, msgs
+
+
 def test_the_hub_report_of_pit_speed_is_judged_with_the_managers_own_speed(live):
     sid, client, sent = live
     rc = state_of(sid, True, client.session, create=True)

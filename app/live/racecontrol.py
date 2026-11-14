@@ -1203,8 +1203,10 @@ class RaceControl:
                 return None
             self._pitspeed_at[car] = now
             self._pitspeed_lap[car] = self._laps_of.get(car, 0)
-            if self.flag_new and self.flag_new[-1].get("kind") == "pitspeed":
-                self.flag_new[-1].update(kmh=round(kmh), limit=lim["limit_kmh"])   # (the notice says how fast and what the limit is)
+            for m in reversed(self.flag_new):   # (the notice says how fast and what the limit is; the offence is not always the last message: a conduct warning can follow it)
+                if m.get("kind") == "pitspeed" and m.get("car") == car:
+                    m.update(kmh=round(kmh), limit=lim["limit_kmh"])
+                    break
             return {"kmh": round(kmh), "limit": lim["limit_kmh"], "step": lim["penalty_s"]}
 
     def conduct_add(self, guid: str, car: int | None = None) -> None:
@@ -1804,7 +1806,7 @@ class RaceControl:
         with _lock:
             at = self.clock.time() if now is None else now
             notices = [{"id": n["id"], "kind": n["kind"], "left_s": math.ceil(n["until"] - at), "text": n["text"], "to": n["to"]} for n in self.notices if n["until"] > at]
-            nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60} if self.nascar else None
+            nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60, "formation_laps": self.lap_base} if self.nascar else None   # (formation_laps: the game counts them in its lap number, the race does not)
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "red_ref": self.red_ref, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),

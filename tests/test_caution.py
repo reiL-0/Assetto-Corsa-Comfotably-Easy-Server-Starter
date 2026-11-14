@@ -284,6 +284,8 @@ def test_line_up_says_behind_whom_and_a_car_in_the_pits_loses_the_place():
     c = Caution(field(5.20, 5.18, 5.16, 5.14, 5.12), 0.0)   # cars 1..5, frozen in that order
     assert c.line_up() == [1, 2, 3, 4, 5]
     assert c.line_up({3}) == [1, 2, 4, 5, 3], "car 3 goes into the pits: 4 is now behind 2, 3 goes to the tail"
+    c.pitted.add(3)
+    assert c.line_up() == [1, 2, 4, 5, 3], "car 3 left the pit lane: it does not get the old place back (the restart order does not either)"
 
 
 def test_a_car_lining_up_behind_the_pace_car_before_the_leader_is_told_to_form_behind_the_right_car():
