@@ -68,6 +68,21 @@ def read_stages(path: Path) -> list[dict]:
         return []
 
 
+def unsaved_race_finish(d: Path, now: float, max_age: float = 300) -> bool:
+    """A chequered flag fell less than `max_age` s ago and no race result has been written since: acServer only saves the file when the session ends, so stopping the server now loses the race."""
+    ats = []
+    for f in d.glob("*" + FINISH_SUFFIX):
+        try:
+            ats.append(float(json.loads(f.read_text())["at"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue   # a broken marker never hides a good one nor blocks a stop
+    try:
+        saved = max((p.stat().st_mtime for p in d.glob("*_RACE.json")), default=0.0)
+    except OSError:
+        return False
+    return any(now - max_age <= at <= now and at > saved for at in ats)   # (a marker from the future, or inf, never blocks)
+
+
 def _finish_cut(path: Path, laps: list[dict]) -> tuple[int, set[str] | None] | None:
     """The race is long in acServer and the manager decides when it ends, so the cars keep lapping after the chequered flag and acServer would rank them on those laps. -> the session time
     (ms) at which the winner completed the distance: every car's race ends at its first lap completed from then on, and the SteamIDs that were connected at the flag (None = unknown: nobody is left out). None = nothing to cut. The flag a result file belongs to is the last one
