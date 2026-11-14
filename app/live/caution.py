@@ -147,7 +147,7 @@ class Caution:
         """The line the field forms behind the pace car as it stands now: every car where it was when the yellow came out, the lapped ones too (between the same cars), with the cars that lose the place at
         the back: the ones in the pit lane at this moment, the penalised and the violators, the free pass car once it has crossed the line (`free_crossed`) and, last of all, the cars that spun or stopped on the
         track (in the order it happened), with or without contact. The car behind one that leaves simply moves up behind the one that is now ahead of it."""
-        pits, bad = set(in_pits), self.penalised | self.violators
+        pits, bad = set(in_pits) | self.pitted, self.penalised | self.violators   # (a car that pitted keeps losing the place after it leaves the pit lane: `pitted` is what the restart order uses too)
         free = [self.free_pass] if self.free_crossed and self.free_pass is not None else []
         back = pits | bad | set(free) | set(self.spun)
         line = [c for c in self.frozen if c not in back and c not in self.gone]
