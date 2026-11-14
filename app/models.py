@@ -515,3 +515,6 @@ class TrackRecord(SQLModel, table=True):
     name: str = ""
     best_ms: int
     set_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    s1_ms: int | None = None   # the three sectors of THAT lap (None: the board had no split for it, or the record is older than they were kept)
+    s2_ms: int | None = None
+    s3_ms: int | None = None

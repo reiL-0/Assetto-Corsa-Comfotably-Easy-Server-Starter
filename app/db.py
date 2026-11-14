@@ -249,6 +249,15 @@ def _m017_pit_rule_per_server(con: sqlite3.Connection) -> None:
         con.execute("UPDATE servers SET rules = ? WHERE id = ?", (json.dumps(r), sid))
 
 
+def _m018_record_sectors(con: sqlite3.Connection) -> None:
+    """The sectors of a track record's lap (track_records.s1_ms..s3_ms, nullable): old records have none and the panel shows them as unknown."""
+    have = {row[1] for row in con.execute('PRAGMA table_info("track_records")')}
+    if have:
+        for col in ("s1_ms", "s2_ms", "s3_ms"):
+            if col not in have:
+                con.execute(f'ALTER TABLE "track_records" ADD COLUMN "{col}" INTEGER')
+
+
 MIGRATIONS = [   # (version, function): append only, never edit or reorder one that has been released
     (1, _m001_add_missing_columns),
     (2, _m002_domain_defaults_and_indexes),
@@ -267,6 +276,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (15, _m015_server_rules),
     (16, _m016_vsc_refs_window),
     (17, _m017_pit_rule_per_server),
+    (18, _m018_record_sectors),
 ]
 
 
