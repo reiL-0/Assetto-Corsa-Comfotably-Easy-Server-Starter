@@ -83,6 +83,11 @@ PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' repor
 PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
 SC_INCIDENT_COOLDOWN_S = 120.0     # minimum interval after an automatic SC ends before another can deploy
+START_HOLD_STEP_S: dict[int, float] = {}   # server id -> seconds between the rows of the orderly start (0 / absent = off): what the director chose, kept across sessions (in memory)
+START_HOLD_MOVE_KMH = 5.0          # a car over this speed after the start was armed = the green light went: the rows count from there
+START_HOLD_LIGHTS_MARGIN_S = 2.0   # after the session's wait time (the countdown) the lights are out even if nobody has been seen moving (an absent P1 / P2 must not hold the field)
+START_HOLD_MAX_S = 30.0            # the orderly start is over this long after it began, whatever the rows say (the hub also lets go when the state stops saying it)
+START_HOLD_ARMED_MAX_S = 100.0     # armed and nobody ever moved (the countdown is 60 s; first row away or absent): it lets go, so an absent P1/P2 cannot hold the rest
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 RACE_TYPE = 3                     # ACSP session_type of a race
@@ -214,6 +219,7 @@ class RaceControl:
         self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
+        self._hold_id, self._hold_armed, self._hold_go, self._hold_step = 0, None, None, 0.0   # the orderly start: its number, when it was armed, when the first car moved (monotonic), the step in s
         self.formation = False             # a rolling start is being run: the race begins under yellow behind the pace car (no Caution procedures, the NASCAR engine does not hear of it)
         self.lap_base = self.leader_laps_seen = 0   # leader laps run in the formation: the engine counts the race from the green
         self.caution_laps = -1             # laps the pace car (the leader when there is none) has done under this caution; -1 = the first crossing is still to come
@@ -350,8 +356,30 @@ class RaceControl:
         mode = "in" if self.pace_car_in or self.pace_park else ("lead" if self.pace_out else "wait")   # only yellow deploys it; green returns it even without "to go", without arming the restart
         return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
 
+    def start_hold_view(self) -> dict | None:
+        """The orderly start for the hubs: {id, row, step_ms}: the rows 0..row may go (a row = two cars of the grid, P1 and P2 are row 0 and are never held); the rest keep their brake. Relative on purpose (no clock of
+        ours reaches the hub: the website caches the state a second or two): the hub only compares its own row with `row`. None = nobody is held (not armed, or over: it ends START_HOLD_MAX_S after the first car moved,
+        or START_HOLD_ARMED_MAX_S after it was armed if nobody ever did)."""
+        with _lock:
+            if self._hold_armed is None or not self.formation:
+                return None
+            mono = self.clock.monotonic()
+            go = self._hold_go
+            wait = self.session_ref.get("wait_time") if isinstance(self.session_ref, dict) else None
+            if isinstance(wait, (int, float)) and wait >= 0:   # (the countdown is over: the rows count from the lights, moved or not; a first mover seen LATER than that never moves them back)
+                lights = self._hold_armed + wait + START_HOLD_LIGHTS_MARGIN_S
+                if mono >= lights and (go is None or lights < go):
+                    go = lights
+            if go is None:
+                return None if mono - self._hold_armed > START_HOLD_ARMED_MAX_S else {"id": self._hold_id, "row": 0, "step_ms": int(self._hold_step * 1000)}
+            gone = mono - go
+            if gone > START_HOLD_MAX_S:
+                return None
+            return {"id": self._hold_id, "row": int(gone // self._hold_step), "step_ms": int(self._hold_step * 1000)}
+
     def _end_formation(self) -> None:
         self.formation = False
+        self._hold_armed = self._hold_go = None   # (the orderly start is part of the formation)
         self.lap_base = self.leader_laps_seen   # (the laps of the formation are not race laps)
 
     @fieldrec.capture(_lock)
@@ -361,6 +389,10 @@ class RaceControl:
             if not (self.nascar and self.pace_car is not None and self.flag == "green" and self.nascar.laps == 0 and not self.formation):
                 return False
             self.formation = True
+            step = START_HOLD_STEP_S.get(self.server_id, 0.0)
+            if step > 0:   # (arm the orderly start: the hubs hold every car but the first row until the rows are called)
+                self._hold_id, self._hold_step, self._hold_armed, self._hold_go = self._hold_id + 1, step, self.clock.monotonic(), None
+                self.audit("start_hold_armed", id=self._hold_id, step_s=step, executed=True)
             self.caution_laps, self.pace_car_in, self.pace_car_pitted, self.one_more = -1, False, False, False
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
             return True
@@ -883,6 +915,9 @@ class RaceControl:
             mono = self.clock.monotonic()
             samples = field.samples()
             self.neutralization_clear_tick(samples, speeds, mono, now, connected)
+            if self._hold_armed is not None and self._hold_go is None and any(v > START_HOLD_MOVE_KMH for c, v in speeds.items() if c != self.pace_car):   # (the pace car leaves the pits during the countdown: it is not the lights)
+                self._hold_go = mono   # (the lights went out: the first row is free from the start, the rest follow every step)
+                self.audit("start_hold_go", id=self._hold_id, executed=True)
             if self.flag in CAUTION and mono - self._audit_last_status >= 5:
                 self.audit("neutralization_status", flag=self.flag, pacecar=self.pace_car_state(),
                            leader=max((c for c in samples if c != self.pace_car), key=lambda c: samples[c].progress, default=None),
@@ -1856,7 +1891,7 @@ class RaceControl:
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60, "formation_laps": self.lap_base} if self.nascar else None   # (formation_laps: the game counts them in its lap number, the race does not)
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "red_ref": self.red_ref, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"]} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 

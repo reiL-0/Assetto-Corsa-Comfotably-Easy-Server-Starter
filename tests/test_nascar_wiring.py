@@ -407,7 +407,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'red_ref', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -1033,6 +1033,62 @@ def test_the_directors_to_go_in_the_formation_brings_the_pace_car_in_and_pace_to
     rc2.pace_out = True
     assert rc2.pace_to_pits() and rc2.pace_park and rc2.pace_car_state()['mode'] == 'in' and not rc2.pace_car_in, 'out leading a caution: it only goes back, no restart armed'
     assert rc2.pace_to_pits(), 'again: already on its way in'
+
+
+def test_the_orderly_start_holds_every_row_but_the_first_until_the_rows_are_called(live, monkeypatch):
+    from app.live.field import Field
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    assert rc.start_hold_view() is None, 'off by default: nobody is held'
+    live_rc.START_HOLD_STEP_S[sid] = 1.5
+    try:
+        t = [100.0]
+        monkeypatch.setattr(rc.clock, 'monotonic', lambda: t[0])
+        rc.nascar.laps = 0
+        assert rc.start_formation()
+        assert rc.start_hold_view() == {'id': 1, 'row': 0, 'step_ms': 1500}, 'armed before the lights: only the first row is free'
+        t[0] += 40
+        field = Field()
+        rc.incident_step({3: 0.0, 9: 0.0}, field, 0.0)
+        assert rc.start_hold_view()['row'] == 0 and rc._hold_go is None, 'nobody moved: the rows do not count'
+        rc.incident_step({3: 12.0, 9: 0.0}, field, 0.0)   # the first row left: the lights went out
+        assert rc._hold_go == t[0]
+        t[0] += 1.4
+        assert rc.start_hold_view()['row'] == 0
+        t[0] += 0.2
+        assert rc.start_hold_view()['row'] == 1, 'row 1 (P3, P4) after one step'
+        t[0] += 3.0
+        assert rc.start_hold_view()['row'] == 3
+        t[0] += 30
+        assert rc.start_hold_view() is None, 'over: it lets go whatever the rows say'
+        rc._hold_go = t[0]
+        assert rc.start_hold_view()['row'] == 0
+        rc._end_formation()
+        assert rc.start_hold_view() is None, 'the formation is over: nobody is held'
+        rc.formation, rc._hold_armed, rc._hold_go = True, t[0], None
+        t[0] += 101
+        assert rc.start_hold_view() is None, 'armed and nobody ever moved: it lets go'
+        rc._hold_armed = t[0]
+        rc.incident_step({9: 40.0}, field, 0.0)
+        assert rc._hold_go is None, 'the pace car leaving the pits is not the lights'
+        rc.session_ref = {'wait_time': 60}   # (an absent P1 / P2: nobody moves, the rows still count from when the countdown ends)
+        rc._hold_armed = t[0]
+        t[0] += 61
+        assert rc.start_hold_view()['row'] == 0 and rc._hold_go is None
+        t[0] += 2
+        assert rc.start_hold_view()['row'] == 0
+        t[0] += 1.6
+        assert rc.start_hold_view()['row'] == 1, 'one step after the lights: row 1 goes without anybody having moved'
+        t[0] += 3.0
+        rc.incident_step({3: 15.0}, field, 0.0)   # (the first car moves only now, after the lights: the rows must not go back)
+        assert rc.start_hold_view()['row'] == 3, 'a late first mover does not hold back rows already called'
+        rc.session_ref = {'wait_time': 0}
+        rc._hold_armed, rc._hold_go = t[0], None
+        t[0] += 2.0
+        assert rc.start_hold_view()['row'] == 0
+        t[0] += 1.6
+        assert rc.start_hold_view()['row'] == 1, 'no countdown: the lights are the arming plus the margin'
+    finally:
+        live_rc.START_HOLD_STEP_S.pop(sid, None)
 
 
 def test_a_rolling_start_needs_the_pace_car_and_alone_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):

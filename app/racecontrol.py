@@ -500,7 +500,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -1243,6 +1243,24 @@ def pace_car_to_pits(server_id: int, sess: SessionDep) -> dict:
     if not rc.pace_to_pits():
         raise HTTPException(409, "no hay pace car en pista")
     return rc.snapshot()
+
+
+class StartHoldIn(BaseModel):
+    step_s: float = Field(ge=0, le=5)   # seconds between the rows of the orderly rolling start; 0 = off
+
+
+@control_router.put("/start-hold")
+def set_start_hold(server_id: int, body: StartHoldIn, sess: SessionDep) -> dict:
+    """The orderly start of the rolling start: every driver's hub keeps the car on the brake until its row (two cars of the grid) is called, one row every `step_s`; P1 and P2 are free. It applies to the NEXT rolling start
+    (it is armed when the formation begins) and stays until it is switched off (0). In memory: a manager restart forgets it."""
+    _, rc = _control(server_id, sess)
+    from app.live import racecontrol as live_rc
+    if body.step_s > 0:
+        live_rc.START_HOLD_STEP_S[server_id] = body.step_s
+    else:
+        live_rc.START_HOLD_STEP_S.pop(server_id, None)
+    rc.audit("start_hold_config", step_s=body.step_s, executed=True)
+    return {"step_s": body.step_s}
 
 
 class PitOkIn(BaseModel):
