@@ -469,7 +469,7 @@ def test_practice_and_qualifying_count_only_the_drivers_own_cuts(monkeypatch, se
         live_rc.on_cuts(sid, client.session, 4, 1, True)
     live_rc.on_cuts(sid, client.session, 3, 20, False)
     view = rc.cuts_view(informational_rule)
-    assert view['cuts'] == {'3': 10} and 'cuts_info' not in view, 'only the drivers own CSP reports count, not the pace car, not the native ones'
+    assert view['cuts'] == {'3': 10} and view['cuts_info'] is True and 'cuts_round' not in view and 'cuts_ladder' not in view, 'only the drivers own CSP reports count, not the pace car, not the native ones: informational, no rounds'
     assert view['cuts_rule'] == {k: informational_rule[k] for k in ('cap', 'max', 'per', 'step')}
     assert rc.rev > rev
     assert not rc.cuts_emitted and not rc.dt_open and not rc.penalties
@@ -509,13 +509,14 @@ def test_other_sessions_ignore_cuts(monkeypatch, session):
 
 @pytest.mark.parametrize("session_type", [1, 2, 3, 0])
 @pytest.mark.parametrize("ladder", [None, [], [0, 5, 5, 10]])
-def test_ladder_payload_in_every_session_with_a_ladder(session_type, ladder):
+def test_ladder_payload_only_in_a_race_with_a_ladder(session_type, ladder):
     rc = live_rc.RaceControl({"session_type": session_type})
     current = {k: v for k, v in RULE.items() if k != "ladder"}
     if ladder is not None:
         current["ladder"] = ladder
     view = rc.cuts_view(current)
-    assert ("cuts_ladder" in view) == (session_type in (1, 2, 3) and bool(ladder))
+    assert ("cuts_ladder" in view) == (session_type == 3 and bool(ladder)), "practice and qualifying are informational: no rounds, no ladder"
+    assert view.get("cuts_info") == (True if session_type in (1, 2) else None)
     if "cuts_ladder" in view:
         assert view["cuts_ladder"] == ladder
         assert set(view["cuts_rule"]) == {"cap", "max", "per", "step"}

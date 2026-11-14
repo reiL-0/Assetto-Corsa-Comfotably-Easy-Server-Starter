@@ -67,9 +67,10 @@ def test_the_counter_exposes_driving_sessions_shows_the_larger_race_count_and_re
     client.session = {"session_index": 1, "session_type": 2}   # qualifying
     live_rc.on_cuts(sid, client.session, 3, 2, False)
     qualy = api.get(f"{V}/servers/{sid}/race-state").json()
-    assert qualy["cuts_rule"] == rule and "cuts_info" not in qualy, "qualifying has the same counter as a race"
+    assert qualy["cuts_rule"] == rule and qualy["cuts_info"] is True and "cuts_round" not in qualy and "cuts_ladder" not in qualy, "qualifying is informational: the lap is invalid, no rounds"
     client.session = {"session_index": 2, "session_type": 3}   # the race
-    assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts_rule"] == rule, "the rule is there before the first cut: CUTS 0/5"
+    race = api.get(f"{V}/servers/{sid}/race-state").json()
+    assert race["cuts_rule"] == rule and "cuts_info" not in race, "the rule is there before the first cut: CUTS 0/5, and a race is not informational"
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {}
     live_rc.on_cuts(sid, client.session, 3, 1, True)      # the driver's own game: an excursion, live
     assert api.get(f"{V}/servers/{sid}/race-state").json()["cuts"] == {"3": 1}
