@@ -40,7 +40,7 @@ from app.live import (
 )
 from app.live.autoflags import AutoFlags
 from app.live.caution import Caution
-from app.live.drs import Drs
+from app.live.drs import GRACE_S, Drs
 from app.live.flagpace import Pace
 from app.live.giveback import GiveBack
 from app.live.incidents import MOVING_KMH, STOP_KMH, NeutralizationWatch, Watch
@@ -1947,9 +1947,13 @@ class RaceControl:
                 self._bump()
 
     def drs_tick(self, rule: dict | None, now: float, laps: int, signal: float | None) -> None:
-        """The DRS state of a race: `rule` is the cached rule (None = off, or not a race), `laps` the leader's completed laps, `signal` the weather's wetness 0..1 (None = unknown). Event loop, no database."""
+        """The DRS state of a session: `rule` is the cached rule (None = off), `laps` the leader's completed laps, `signal` the weather's wetness 0..1 (None = unknown). Event loop, no database.
+        A race has all of it (start laps, restart laps, flags, rain). Practice and qualifying only the rain (`rain_disables`): DRS closes on a wet track and nothing else closes it; using it then is no penalty but an invalid lap (`drs_closed`)."""
         with _lock:
-            if not rule or (self.session_ref or {}).get("session_type") != RACE_TYPE:
+            stype = (self.session_ref or {}).get("session_type")
+            if rule and stype in (1, 2):
+                rule = type(rule)({**rule, "start_laps_off": 0, "restart_laps_off": 0}) if rule.get("rain_disables") else None
+            if not rule or stype not in (1, 2, RACE_TYPE):
                 if self.drs:
                     self.drs = None
                     self._bump()
@@ -1959,9 +1963,14 @@ class RaceControl:
                 self._bump()
             elif self.drs.rule != rule:
                 self.drs.rule = rule   # (the rule changed mid-session: the periods, the restart count and who was already sanctioned stay; the next step applies the new numbers)
-            if self.drs.step(now, laps, self.flag in ("green", "white"), signal):
+            if self.drs.step(now, laps, stype != RACE_TYPE or self.flag in ("green", "white"), signal):   # (outside a race no flag closes it)
                 self._bump()
                 self.audit("drs", state=self.drs.view(), window=self.drs.window, executed=True)
+
+    def drs_closed(self, car: int, now: float) -> bool:
+        """Practice / qualifying: the hub of `car` saw it using DRS. True when DRS is closed now (outside the grace the hub needs to learn it), so the lap is invalid. Nothing is queued: no drive-through, no due, no conduct."""
+        with _lock:
+            return bool(self.drs and car != self.pace_car and not self.drs.on and now - self.drs.off_since >= GRACE_S)
 
     def drs_use(self, car: int, guid: str, now: float) -> dict | None:
         """The hub of `car` saw it using DRS. None when nothing is owed (DRS is on, inside the grace, already sanctioned in this period, the pace car, no rule). Otherwise a drive-through is queued (one per car at a time:

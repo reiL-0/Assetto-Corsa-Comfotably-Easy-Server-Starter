@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -43,6 +44,8 @@ class LiveBoard:
         self.keep_next = False  # the drivers of the kept practice (app/practicekeep.py) were seeded: the next practice session does not wipe them
         self.drivers: list[Driver] = []
         self._sector_track: dict[int, dict] = {}  # car_id -> {"last_t", "last_s", "t_start", "t_s1", "t_s2", "pending"}
+        self._lap_invalid: dict[int, object] = {}  # car_id -> the lap in progress was ruled invalid by the manager (DRS used while closed, in practice / qualifying): it is not a valid lap when completed (acServer's own table does not know it)
+        self._inv_lock = threading.Lock()  # the mark is set from a request thread and everything that decides whose it is (a new session, a connection, a lap) runs on the event loop: the check of the driver and the mark, and every change of who sits in a slot with its clearing, are one step under this lock
 
     def has_kept(self) -> bool:
         return self.keep_next or any(d.kept_ms for d in self.drivers)
@@ -62,6 +65,14 @@ class LiveBoard:
         for d in self.drivers:
             if d.kept_ms:
                 self._reset(d)
+
+    def invalidate_lap(self, car_id: int) -> bool:
+        """The manager rules the lap `car_id` is driving invalid (it still counts as a lap, never as a valid one). True when it was not already: the caller says it once per lap."""
+        with self._inv_lock:
+            if self._by_car(car_id) is None or car_id in self._lap_invalid:
+                return False
+            self._lap_invalid[car_id] = True
+            return True
 
     def _by_car(self, car_id: int) -> Driver | None:
         """Newest driver that used this car slot (slots are reused by whoever joins next)."""
@@ -123,24 +134,30 @@ class LiveBoard:
             if t == "new_session" and not (self.keep_next and e.get("session_type") == 1):  # each session starts its own table; whoever is still connected stays
                 self.drop_kept()
                 self._sector_track.clear()
-                self.drivers = [d for d in self.drivers if d.connected]
-                for d in self.drivers:
-                    self._reset(d)
+                with self._inv_lock:
+                    self.drivers = [d for d in self.drivers if d.connected]
+                    for d in self.drivers:
+                        self._reset(d)
+                    self._lap_invalid.clear()
             self.keep_next = False   # the first session event (new_session or the session_info that finds it) is the one the kept practice belongs to; a later one is another session
         elif t == "new_connection":
             self._sector_track.pop(e["car_id"], None)
             old = next((d for d in self.drivers if e["driver_guid"] and d.guid == e["driver_guid"]), None)
             d = old or Driver(car_id=e["car_id"])
-            d.car_id, d.connected = e["car_id"], True
-            d.name, d.guid = e["driver_name"], e["driver_guid"]
-            d.model, d.skin = e["car_model"], e["car_skin"]
-            if not old:
-                self.drivers.append(d)
+            with self._inv_lock:
+                d.car_id, d.connected = e["car_id"], True
+                d.name, d.guid = e["driver_name"], e["driver_guid"]
+                d.model, d.skin = e["car_model"], e["car_skin"]
+                if not old:
+                    self.drivers.append(d)
+                self._lap_invalid.pop(e["car_id"], None)   # (whoever sat there before leaves nothing behind)
         elif t == "connection_closed":
             self._sector_track.pop(e["car_id"], None)
-            d = self._by_car(e["car_id"])
-            if d:
-                d.connected = False
+            with self._inv_lock:
+                d = self._by_car(e["car_id"])
+                if d:
+                    d.connected = False
+                self._lap_invalid.pop(e["car_id"], None)   # (a lap ruled invalid does not follow the driver to his next slot)
         elif t == "car_update":
             cid = e["car_id"]
             d = self._by_car(cid)
@@ -182,7 +199,9 @@ class LiveBoard:
                 d.last_ms, d.laps = lap_ms, d.laps + 1
                 d.last_splits = lap_splits
                 d.total_ms += lap_ms
-                valid = e.get("cuts", 0) == 0 and 0 < lap_ms < NO_TIME
+                with self._inv_lock:
+                    ruled_invalid = self._lap_invalid.pop(e["car_id"], None) is not None   # (read and clear in one step: it was for the lap that just ended)
+                valid = e.get("cuts", 0) == 0 and 0 < lap_ms < NO_TIME and not ruled_invalid
                 d.valid_laps = (d.valid_laps or 0) + valid
                 if valid:
                     d.best_valid_ms = min(d.best_valid_ms or NO_TIME, lap_ms)
