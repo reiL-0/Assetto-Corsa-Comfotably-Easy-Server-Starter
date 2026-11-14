@@ -989,9 +989,8 @@ def test_a_rolling_start_runs_one_formation_lap_then_the_one_to_go_and_the_green
     adapter.rolling_start(rc, client.cars)
     assert rc.formation and rc.flag == 'yellow' and rc.caution is None and rc.pace_car_state()['mode'] == 'lead'
     assert rc.nascar.cautions_in_stage == 0 and rc.nascar.flag == 'green', 'the engine does not hear of the formation yellow'
-    lap(3, 1)
     assert rc.nascar.laps == 0, 'the formation lap is not a lap of the race'
-    assert rc.formation and not rc.pace_car_in, 'no crossing of the pace car yet'
+    assert rc.formation and not rc.pace_car_in, 'no crossing yet'
     lap(9, 1)
     assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the first crossing brings the one to go: it pits at the end of the formation lap'
     lap(3, 1)
@@ -1005,6 +1004,35 @@ def test_a_rolling_start_runs_one_formation_lap_then_the_one_to_go_and_the_green
     assert rc.flag == 'green' and not rc.formation and rc.nascar.cautions_in_stage == 0
     lap(3, 2)
     assert rc.nascar.laps == 1, 'the race counts from the green: the formation lap is out'
+
+
+def test_a_competitor_crossing_ends_the_formation_lap_when_the_pace_car_never_crosses(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    assert rc.formation and not rc.pace_car_in
+    lap(3, 1)   # (2026-11-14: the pace car started at the back and spun, it never crossed: the field came round and the formation hung until the director put the green by hand)
+    assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'a competitor crossing is the end of the formation lap too'
+    rc.report_pit(9, True)
+    rc.pace_car_pitted = True
+    lap(3, 1)
+    assert rc.flag == 'green' and not rc.formation, 'the pace car is in the pits: the next crossing is the green'
+
+
+def test_the_directors_to_go_in_the_formation_brings_the_pace_car_in_and_pace_to_pits_is_idempotent(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    inst = SimpleNamespace(acsp=client)
+    adapter._restart(inst, rc, 1)   # (it was ignored: no caution in the formation, only the notice)
+    assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the director\'s one to go is the first crossing'
+    n = len(rc.notices)
+    assert rc.pace_to_pits() and rc.pace_car_in and len(rc.notices) == n, 'idempotent'
+    rc2 = live_rc.RaceControl({'session_type': 3})
+    assert not rc2.pace_to_pits(), 'no pace car: nothing to send'
+    rc2.pace_car = 9
+    assert not rc2.pace_to_pits(), 'not out: nothing to send'
+    rc2.pace_out = True
+    assert rc2.pace_to_pits() and rc2.pace_park and rc2.pace_car_state()['mode'] == 'in' and not rc2.pace_car_in, 'out leading a caution: it only goes back, no restart armed'
+    assert rc2.pace_to_pits(), 'again: already on its way in'
 
 
 def test_a_rolling_start_needs_the_pace_car_and_alone_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):

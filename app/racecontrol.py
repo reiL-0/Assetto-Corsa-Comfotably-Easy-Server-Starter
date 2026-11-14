@@ -1236,6 +1236,15 @@ def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+@control_router.post("/pace-car/pit")
+def pace_car_to_pits(server_id: int, sess: SessionDep) -> dict:
+    """The director sends the pace car to the pits (it spun, it drives oddly). In a rolling start the green follows when it is in and a competitor crosses; out leading a caution it only goes back (the 'to go' stays the director's)."""
+    _, rc = _control(server_id, sess)
+    if not rc.pace_to_pits():
+        raise HTTPException(409, "no hay pace car en pista")
+    return rc.snapshot()
+
+
 class PitOkIn(BaseModel):
     car_id: int = Field(ge=0, le=255)
     allowed: bool = True
@@ -1268,6 +1277,12 @@ class RestartIn(BaseModel):
 
 
 def _restart(inst, rc, to_go: int) -> dict:
+    if rc.formation:   # (a rolling start: there is no caution to arm; the 'to go' brings the pace car in, which is what the first crossing does. The formation is one lap: 'two to go' is the same call)
+        rc.pace_to_pits()
+        log.info("restart called in the formation: %s to go", to_go)
+        rc.audit("manual_to_go", to_go=to_go, flag=rc.flag, nascar_caution=False, formation=True, executed=True)
+        _say(rc, "UNA PARA VERDE", "flag", hold="togo")
+        return rc.snapshot()
     plan = rc.restart_plan(inst.acsp.field.snapshot(), to_go)
     if plan is None:
         if rc.flag not in CAUTION:

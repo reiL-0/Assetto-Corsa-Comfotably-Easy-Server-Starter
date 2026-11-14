@@ -367,17 +367,36 @@ class RaceControl:
 
     @fieldrec.capture(_lock)
     def formation_lap(self, car: int) -> bool:
-        """The pace car crossed the line in the formation: the first crossing (from the grid) brings the 'one to go' -> True: the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing."""
+        """A car crossed the line in the formation: the first crossing (the pace car's from the grid, or a competitor's when the pace car never got there: it started behind, spun, was held) brings the 'one to go' -> True:
+        the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing. It cannot depend on the pace car alone: a pace car that never crosses would hold the race."""
         with _lock:
-            if not self.formation or self.pace_car_in or car != self.pace_car:
+            if not self.formation or self.pace_car_in:
                 return False
             if self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return False
             self.caution_laps += 1
-            self.audit("formation_lap", car=car, laps=self.caution_laps, executed=True)
+            self.audit("formation_lap", car=car, pace_car=car == self.pace_car, laps=self.caution_laps, executed=True)
             if self.caution_laps < FORMATION_LAPS:
                 return False
             self.pace_car_in, self.pace_car_pitted = True, False
+            self._bump()
+            return True
+
+    @fieldrec.capture(_lock)
+    def pace_to_pits(self) -> bool:
+        """The director sends the pace car to the pits (it spun, it drives oddly, the formation lap is over and nobody crossed). In the formation: the same 'one to go' the first crossing brings (the green follows when it is in the pits
+        and a competitor crosses). Out leading a caution: it only goes back, with no restart armed (`pace_park`: the 'to go' stays the director's). False when it is not out. Idempotent."""
+        with _lock:
+            if self.pace_car is None:
+                return False
+            if self.formation:
+                if not self.pace_car_in:
+                    self.pace_car_in, self.pace_car_pitted = True, False
+            elif self.pace_out and not (self.pace_car_in or self.pace_park):
+                self.pace_park = True
+            else:
+                return self.pace_car_in or self.pace_park   # (already on its way in: nothing to do; not out: nothing to send)
+            self.audit("pace_to_pits", car=self.pace_car, formation=self.formation, executed=True)
             self._bump()
             return True
 
