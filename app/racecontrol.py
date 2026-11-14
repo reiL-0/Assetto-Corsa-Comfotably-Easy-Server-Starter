@@ -696,9 +696,16 @@ def refresh_pit_limit(rc, server_id: int) -> None:
     gen = rc.pit_limit_gen
     from app import league
     limit = league.effective_rules(server_id)["pit"]
+    entry = None
+    session = rc.session_ref if isinstance(rc.session_ref, dict) else {}
+    track, config = str(session.get("track") or ""), str(session.get("track_config") or "")
+    if limit and re.fullmatch(r"[\w.\-]+", track) and re.fullmatch(r"[\w.\-]*", config) and ".." not in track + config:   # (names from the server's own session, still never a path)
+        from app import content, pitentry
+        entry = pitentry.read(content._tracks_dir() / track, config)
     with _lock:
         if gen == rc.pit_limit_gen:   # (not when the director saved a new limit while this was reading)
             rc.pit_limit = limit
+            rc.pit_entry = entry
 
 
 class DamageIn(BaseModel):

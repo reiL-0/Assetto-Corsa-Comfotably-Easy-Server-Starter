@@ -157,6 +157,7 @@ class RaceControl:
         self.red_laps: dict[int, int] = {}                   # car -> laps it has left to come into the pits under the red flag
         self.lap_times: dict[int, dict[int, float]] = {}      # completed lap number -> {car: wall time it crossed the line}: what the red flag's reference order is made from (the last 4 laps)
         self.pit_limit: dict | None = None                   # the pit-lane speed rule of this track ({limit_kmh, tolerance_kmh, penalty_s}, app/pitlimits.py); None = no rule
+        self.pit_entry: float | None = None                  # where the pit lane begins on the lap (0..1), from the track's own files (app/pitentry.py); None = not known: the hub learns it
         self.pit_limit_gen = 0                               # moves when the director changes the limit: a database read that began before it must not publish its old value
         self.pit_limit_at = -1e9                             # when it was last read from the database (request threads refresh it)
         self._laps_of: dict[int, int] = {}                   # car -> its completed laps as the last lap_done said
@@ -1837,7 +1838,7 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"]} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"], **({"entry": self.pit_entry} if self.pit_entry is not None else {})} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cut_rule_peek(server_id: int) -> dict | None:

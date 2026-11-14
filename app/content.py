@@ -287,6 +287,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         if dest_parent in (_cars_dir(), _tracks_dir()):   # cars and tracks are ALWAYS cut down to the server pack (a track keeps its map.png/map.ini for the live map)
             full_digest = catalog.digest_dir(top)[0]   # hash of the WHOLE upload: a rights claim blocked that one, and cutting the pack down must not let it back in
             catalog.check_not_blocked(full_digest)
+            if dest_parent == _tracks_dir():
+                try:
+                    from app import pitentry
+                    pitentry.write_all(top)   # (before the cut: `ai/` does not stay on the server, the pit entry worked out from it does, in each layout's data/)
+                except Exception:
+                    import logging
+                    logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
             uploadguard.prune(top, "car" if dest_parent == _cars_dir() else "track")
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
         kind = "car" if dest_parent == _cars_dir() else "track"
