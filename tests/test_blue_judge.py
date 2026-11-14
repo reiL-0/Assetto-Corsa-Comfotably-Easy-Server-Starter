@@ -64,6 +64,7 @@ def test_the_offence_comes_after_yield_s_once_per_appearance_and_follows_the_lad
     assert (o2["seq"], o2["step"]) == (2, 5) and len(rc.penalties) == 1, "step 1 of the ladder: 5 s on the result, no second drive-through"
     assert sorted(r["seconds"] for r in rcmod.pending_flag_dues()) == [5, 10]
     rc.report_pit(1, True, now=rc.clock.time() + 5)   # a pit-lane pass serves the drive-through only
+    rc.report_pit(1, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert rcmod.pending_flag_served() == {(7, rc.cuts_session_key, "GA", "blue", 1)}
     rcmod._flag_dues_pending.clear(); rcmod._flag_served.clear()
 
@@ -103,6 +104,7 @@ def test_a_second_drive_through_is_not_added_but_the_one_pit_pass_serves_both():
     tick(rc, 10.0); tick(rc, 26.0)
     assert len(rc.penalties) == 1 and [o["step"] for o in offences(rc)] == [0]
     rc.report_pit(1, True, now=rc.clock.time() + 5)
+    rc.report_pit(1, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert rcmod.pending_flag_served() == {(7, rc.cuts_session_key, "GA", "blue", 1)}, "its due is closed by the same pass"
     rcmod._flag_dues_pending.clear(); rcmod._flag_served.clear()
 

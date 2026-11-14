@@ -164,6 +164,8 @@ def _flag_messages(inst, rc) -> None:
             names = ", ".join(_name(inst, c) for c in o["passed"])
             secs = o["seconds"]
             _say(rc, f"ADELANTASTE BAJO AMARILLA: devuelve la posición a {names} · {secs} s", "flag", car)
+        elif o["msg"] == "dt_stop":
+            _say(rc, "DRIVE-THROUGH PENDIENTE: una parada no cuenta · pasa por boxes sin detenerte", "penalty", car)
         elif o["msg"] != "offence":
             continue
         elif kind == "blue" and step == 0:
@@ -571,7 +573,7 @@ def report_pit(server_id: int, body: PitIn, sess: SessionDep) -> None:
         raise HTTPException(409, "that car is not that driver")
     rc = state_of(server_id, True, inst.acsp.session)
     if rc:
-        rc.report_pit(body.car_id, body.pit)
+        rc.report_pit(body.car_id, body.pit, kmh=speed_kmh(car))
         if body.pit and rc.pace_car_in and body.car_id == rc.pace_car:
             auto_green(server_id, rc, body.car_id)   # (alone on the track the pace car IS the restart: its arrival in the pits brings the green)
 

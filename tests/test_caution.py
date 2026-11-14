@@ -64,6 +64,15 @@ def run(c, steps, speeds=None, exempt=()):
     return out
 
 
+def test_going_by_the_car_of_the_incident_is_not_a_pass():
+    start = field(5.20, 5.19, 5.18)
+    swapped = field(5.20, 5.215, 5.18)   # car 2 goes by car 1 and stays there
+    t = 1.5 + PASS_HOLD + 0.1
+    steps = [(1.0, start), (1.5, swapped), (t, swapped), (t + GIVE_BACK_MAX + 0.1, swapped)]
+    assert run(Caution(start, 0.0, involved=[1]), steps) == [], "car 1 spun and brought the yellow out: it is up to speed again, but the cars that go by it are not violators"
+    assert run(Caution(start, 0.0), steps) == [2], "the same pass on a car that was not involved is a violation"
+
+
 def test_a_pass_that_lasts_is_a_violation_once_and_a_short_swap_is_not():
     start = field(5.20, 5.19, 5.18)   # cars 1, 2, 3 in a line, 0.01 apart
     c = Caution(start, 0.0)

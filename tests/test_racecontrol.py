@@ -475,6 +475,29 @@ def test_the_pit_speed_notice_keeps_its_numbers_when_a_conduct_warning_follows_t
     assert any(m["msg"] == "bw" for m in msgs) and off and off[0]["kmh"] == 124 and off[0]["limit"] == 80, msgs
 
 
+def test_a_drive_through_is_a_pit_lane_pass_without_a_stop_begun_after_the_penalty(monkeypatch):
+    from app.live import racecontrol as rcmod
+    monkeypatch.setattr(rcmod, "_flag_served", set()); monkeypatch.setattr(rcmod, "_flag_dues_pending", {})
+    rc = RaceControl(session_ref={"session_type": 3}); rc.server_id = 9
+    rc.audit_guids = {1: "G1"}; rc.pit_limit = {"limit_kmh": 80, "tolerance_kmh": 5, "penalty_s": 0}
+    rc.flag_modes = {k: "live" for k in ("blue", "danger", "yellow", "meatball", "black", "red")}
+    t = rc.clock.time()   # (the penalty is stamped with the state's own clock)
+    rc.report_pit(1, True, now=t - 1, kmh=120.0)
+    assert rc.pit_speed(1, 124.0, t) and rc.flag_dt_open
+    rc.report_pit(1, True, now=t + 12, kmh=80.0); rc.report_pit(1, False)
+    assert rc.flag_dt_open and not rcmod.pending_flag_served(), "the pass in which he was too fast does not serve the drive-through it earned"
+    rc.take_flag_messages()
+    rc.report_pit(1, True, now=t + 100, kmh=80.0); rc.report_pit(1, True, now=t + 103, kmh=0.0); rc.report_pit(1, True, now=t + 130, kmh=60.0); rc.report_pit(1, False)
+    assert rc.flag_dt_open and [m["msg"] for m in rc.take_flag_messages()] == ["dt_stop"], "a stop (tyres, fuel) is not a drive-through, and he is told"
+    rc.report_pit(1, True, now=t + 200, kmh=80.0)   # under green the hub only reports from inside the pit lane: nothing says he left
+    rc.lap_done(1, 90000, 0, 5, t + 203, "")
+    assert rc.flag_dt_open, "the line is in the pit lane: that crossing is not the end of the visit"
+    rc.lap_done(1, 70000, 0, 6, t + 280, "")
+    assert not rc.flag_dt_open and len(rcmod.pending_flag_served()) == 1, "the next lap ends the visit: a pass without a stop, served"
+    rc.report_pit(1, True, now=t + 300, kmh=0.0); rc.drop_red(1)
+    assert 1 not in rc._visit_start and 1 not in rc._visit_stopped, "the car left the server: whoever takes the slot does not inherit the visit or its stop"
+
+
 def test_the_hub_report_of_pit_speed_is_judged_with_the_managers_own_speed(live):
     sid, client, sent = live
     rc = state_of(sid, True, client.session, create=True)

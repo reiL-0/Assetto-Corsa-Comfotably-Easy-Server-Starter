@@ -84,6 +84,7 @@ def test_live_dt_and_result_queue(monkeypatch, manual):
     assert re.search(r'"cuts_rule":\{"cap":60,"max":2,"per":1,"step":5\}', encoded)
 
     state.report_pit(3, True, now=state.clock.time() + 1)
+    state.report_pit(3, False)   # (out of the pit lane again: the visit is over, and that is when a drive-through is served)
     assert len(rc.pending_cut_served()) == (0 if manual else 1)
 
 
