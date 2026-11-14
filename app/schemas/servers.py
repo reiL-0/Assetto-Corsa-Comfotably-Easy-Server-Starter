@@ -174,6 +174,7 @@ class SessionIn(BaseModel):
     rulebook_event_id: int | None = None  # binds the snapshot to the scheduled event's results
     rulebook_snapshot: Rulebook | None = None  # versioned copy saved with the applied session
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
+    rolling: Literal["off", "nascar", "f1"] | None = None   # how the RACE starts: off = standing start, nascar = a formation lap behind the pace car and the green on the line, f1 = formation lap, back to the grid, standing start. None = the old behaviour (NASCAR: rolling; the rest: standing). A NASCAR race is always rolling (see _nascar_is_rolling)
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
@@ -187,6 +188,12 @@ class SessionIn(BaseModel):
                 raise ValueError("car_setups: a setup name is empty")
             _setup_name(name)
         return v
+
+    @model_validator(mode="after")
+    def _nascar_is_rolling(self) -> SessionIn:
+        if self.nascar and self.rolling not in (None, "nascar"):
+            raise ValueError("rolling: una carrera NASCAR siempre es rolling start (nascar)")
+        return self
 
     @model_validator(mode="after")
     def _has_cars(self) -> SessionIn:

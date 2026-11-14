@@ -401,7 +401,9 @@ class ACSPClient(asyncio.DatagramProtocol):
             from app import supervisor   # late: supervisor owns this client and the applied preset snapshot
             from app.live.racecontrol import _lock, state_of
             inst = supervisor.get(self.server_id)
-            nascar = getattr(inst, "nascar_config", None) if t == "new_session" and event.get("session_type") == 3 else None
+            race = t == "new_session" and event.get("session_type") == 3
+            nascar = getattr(inst, "nascar_config", None) if race else None
+            rolling = race and nascar is None and getattr(inst, "rolling", None) in ("nascar", "f1")   # (a race that is not NASCAR but asks for a rolling start)
             with _lock:
                 if t == "session_info":
                     if event.get("session_index", event.get("current_session_index")) == event.get("current_session_index"):   # (only the description of the CURRENT session: the answer about another one, e.g. to the redefinition of session 0 the timeline makes when a race starts, must not turn the race into a practice)
@@ -415,7 +417,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
                 self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
-                rc = state_of(self.server_id, True, self.session, create=nascar is not None)
+                rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
                 if nascar is not None:
                     try:
                         rc.configure_nascar(nascar["total"], None, tuple(nascar["shares"]) if nascar.get("shares") is not None else None)
@@ -424,6 +426,9 @@ class ACSPClient(asyncio.DatagramProtocol):
                     else:
                         from app.racecontrol import rolling_start
                         rolling_start(rc, self.cars)
+                elif rolling and rc is not None:
+                    from app.racecontrol import rolling_start
+                    rolling_start(rc, self.cars)
             if event.get("session_type") != 1 and (t == "new_session" or self.board.has_kept()):   # qualify / race (also when found already running): what the practice kept is over
                 from app import practicekeep
                 practicekeep.clear(self.server_id)

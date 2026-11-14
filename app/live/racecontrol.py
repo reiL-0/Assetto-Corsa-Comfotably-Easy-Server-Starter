@@ -97,6 +97,29 @@ F1_STILL_KMH, F1_STILL_S = 3.0, 2.0   # standing = under this speed for this lon
 F1_GO_DELAY_S = 4.0               # from every car formed to the green
 F1_REGROUP_MAX_S = 90.0           # after the pace car came in: past this the director is told (the green is never automatic on a broken field)
 PACE_ADAPT_HYST_KMH = 3           # the adaptive pace moves only by at least this much
+
+
+def rolling_mode(session: dict | None) -> str:
+    """How a race of this applied session starts: a NASCAR one is always rolling (nascar); the rest what `rolling` says (absent = off)."""
+    s = session or {}
+    return "nascar" if s.get("nascar") else (s.get("rolling") or "off")
+
+
+def formation_style(server_id: int, session: dict | None) -> str:
+    """Put the applied session's start style in FORMATION_MODE (which rolling start) and return it (is there one: the Instance's `rolling`). Start and adopt call it BEFORE the server's UDP opens: the first `new_session` already needs it."""
+    mode = rolling_mode(session)
+    if mode == "f1":
+        FORMATION_MODE[server_id] = "f1"
+    else:
+        FORMATION_MODE.pop(server_id, None)
+    return mode
+
+
+def load_rolling(server_id: int, inst: object, session: dict | None) -> None:
+    """The same for a live instance (an apply that changed the style)."""
+    inst.rolling = formation_style(server_id, session)
+
+
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 RACE_TYPE = 3                     # ACSP session_type of a race
@@ -407,9 +430,9 @@ class RaceControl:
 
     @fieldrec.capture(_lock)
     def start_formation(self) -> bool:
-        """The race begins: a rolling start behind the pace car. Only with NASCAR armed, a pace car and nothing run yet; otherwise the standing start goes on as always."""
+        """The race begins: a rolling start behind the pace car. Only with a pace car and nothing run yet (a NASCAR race: its engine at lap 0; any other race asks for it with `rolling`); otherwise the standing start goes on as always."""
         with _lock:
-            if not (self.nascar and self.pace_car is not None and self.flag == "green" and self.nascar.laps == 0 and not self.formation):
+            if not (self.pace_car is not None and self.flag == "green" and (self.nascar is None or self.nascar.laps == 0) and not self.formation):
                 return False
             self.formation = True
             f1 = FORMATION_MODE.get(self.server_id) == "f1"
