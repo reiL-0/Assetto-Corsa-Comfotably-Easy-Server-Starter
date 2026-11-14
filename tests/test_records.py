@@ -77,3 +77,4 @@ def test_the_sectors_belong_to_the_lap_of_the_record():
     assert top()["best_ms"] == 99_000 and top()["splits"] is None   # NULL, never the sectors of the older lap
     assert records.submit("sectors-track", "", "gt3", G3, "Eva", 98_000, 0, [0, 50_000, 48_000])   # a zero is not a sector: unknown, not stored
     assert top()["splits"] is None
+    assert records.submit("sectors-track", "", "gt3", G3, "Eva", 97_000, 0, [True, 50_000, 47_000]) and top()["splits"] is None   # a bool is not a sector
