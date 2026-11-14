@@ -83,6 +83,20 @@ PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' repor
 PITS_OPEN_LAP = 1                 # caution laps (as counted by caution_lap: 0 is the first, partial crossing) after which the pit lane opens by itself: the first full lap is the field lining up
 CAUTION_MIN_LAPS, CAUTION_MAX_LAPS = 3, 6   # laps the pace car leads under a caution before the automatic 'to go' (earliest / latest: if the track is not clear by the last one the director takes over)
 SC_INCIDENT_COOLDOWN_S = 120.0     # minimum interval after an automatic SC ends before another can deploy
+START_HOLD_STEP_S: dict[int, float] = {}   # server id -> seconds between the rows of the orderly start (0 / absent = off): what the director chose, kept across sessions (in memory)
+START_HOLD_MOVE_KMH = 5.0          # a car over this speed after the start was armed = the green light went: the rows count from there
+START_HOLD_LIGHTS_MARGIN_S = 2.0   # after the session's wait time (the countdown) the lights are out even if nobody has been seen moving (an absent P1 / P2 must not hold the field)
+START_HOLD_MAX_S = 30.0            # the orderly start is over this long after it began, whatever the rows say (the hub also lets go when the state stops saying it)
+START_HOLD_ARMED_MAX_S = 100.0     # armed and nobody ever moved (the countdown is 60 s; first row away or absent): it lets go, so an absent P1/P2 cannot hold the rest
+FORMATION_MODE: dict[int, str] = {}   # server id -> "f1" (formation lap, back to the grid, a standing start); absent = "nascar" (the pace car pits and the green comes on the restart line): the director's choice, in memory
+PACE_ADAPT: set[int] = set()          # servers whose pace car adapts its speed to the gap of the field behind it (the director's choice, in memory)
+F1_LEAD_DONE = 0.75               # laps the leader has driven when the pace car is told to come in (the pit entry is before the line)
+F1_LAP_MIN = 0.8                  # a car counts as back on the grid only after it drove this much of the formation lap
+F1_GRID_FROM = 0.96               # of the lap: just behind the line (on the grid the progress is negative: -0.02 = 0.98) a car standing from here on is back on the grid
+F1_STILL_KMH, F1_STILL_S = 3.0, 2.0   # standing = under this speed for this long
+F1_GO_DELAY_S = 4.0               # from every car formed to the green
+F1_REGROUP_MAX_S = 90.0           # after the pace car came in: past this the director is told (the green is never automatic on a broken field)
+PACE_ADAPT_HYST_KMH = 3           # the adaptive pace moves only by at least this much
 FORMATION_LAPS = 0                # crossings after the first one at which the pace car gets the 'one to go' in a rolling start: 0 = at the first (the pit entry is before the line, so the formation lap that follows ends in the pits and the green comes at the next crossing)
 GO_ARM_FROM, GO_ARM_TO = 0.25, 0.75   # of a lap: after "one to go" the car that takes the restart has to be seen in this stretch before its next crossing can bring the green
 RACE_TYPE = 3                     # ACSP session_type of a race
@@ -100,6 +114,16 @@ class TrackClear(NamedTuple):
     @property
     def clear(self):
         return not self.stopped and not self.involved and not self.missing and not self.slow
+
+
+def adaptive_pace(base: int, gap_m: float | None, prev: int | None = None) -> int:
+    """The speed the pace car leads at, from the gap to the car right behind it: the field stretches (> 80 m) it eases to 75 % of `base`, > 50 m to 90 %, bunches up (< 15 m) it goes a little faster (115 %), otherwise `base`.
+    Within PACE_MIN..PACE_MAX, and it only changes by at least PACE_ADAPT_HYST_KMH from the last one (no flutter). No gap known: the base."""
+    if gap_m is None:
+        return base
+    f = 0.75 if gap_m > 80 else 0.9 if gap_m > 50 else 1.15 if gap_m < 15 else 1.0
+    kmh = int(max(PACE_MIN, min(PACE_MAX, round(base * f))))
+    return prev if prev is not None and abs(kmh - prev) < PACE_ADAPT_HYST_KMH else kmh
 
 
 def red_reference(progress: dict[int, float], lap_times: dict[int, dict[int, float]]) -> dict | None:
@@ -214,6 +238,9 @@ class RaceControl:
         self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
+        self._f1: dict | None = None       # the F1 rolling start: {phase: lap | regroup | count, t, still: {car: since}, warned, go_at}; None in a NASCAR one
+        self.pace_live: int | None = None  # the adaptive pace the pace car is told now (None = the configured one)
+        self._hold_id, self._hold_armed, self._hold_go, self._hold_step = 0, None, None, 0.0   # the orderly start: its number, when it was armed, when the first car moved (monotonic), the step in s
         self.formation = False             # a rolling start is being run: the race begins under yellow behind the pace car (no Caution procedures, the NASCAR engine does not hear of it)
         self.lap_base = self.leader_laps_seen = 0   # leader laps run in the formation: the engine counts the race from the green
         self.caution_laps = -1             # laps the pace car (the leader when there is none) has done under this caution; -1 = the first crossing is still to come
@@ -348,10 +375,34 @@ class RaceControl:
         if self.pace_car is None:
             return None
         mode = "in" if self.pace_car_in or self.pace_park else ("lead" if self.pace_out else "wait")   # only yellow deploys it; green returns it even without "to go", without arming the restart
-        return {"car": self.pace_car, "kmh": self.pace_car_kmh, "mode": mode}
+        return {"car": self.pace_car, "kmh": self.pace_live or self.pace_car_kmh, "mode": mode}
 
-    def _end_formation(self) -> None:
+    def start_hold_view(self) -> dict | None:
+        """The orderly start for the hubs: {id, row, step_ms}: the rows 0..row may go (a row = two cars of the grid, P1 and P2 are row 0 and are never held); the rest keep their brake. Relative on purpose (no clock of
+        ours reaches the hub: the website caches the state a second or two): the hub only compares its own row with `row`. None = nobody is held (not armed, or over: it ends START_HOLD_MAX_S after the first car moved,
+        or START_HOLD_ARMED_MAX_S after it was armed if nobody ever did)."""
+        with _lock:
+            if self._hold_armed is None:
+                return None
+            mono = self.clock.monotonic()
+            go = self._hold_go
+            wait = self.session_ref.get("wait_time") if isinstance(self.session_ref, dict) else None
+            if isinstance(wait, (int, float)) and wait >= 0:   # (the countdown is over: the rows count from the lights, moved or not; a first mover seen LATER than that never moves them back)
+                lights = self._hold_armed + wait + START_HOLD_LIGHTS_MARGIN_S
+                if mono >= lights and (go is None or lights < go):
+                    go = lights
+            if go is None:
+                return None if mono - self._hold_armed > START_HOLD_ARMED_MAX_S else {"id": self._hold_id, "row": 0, "step_ms": int(self._hold_step * 1000)}
+            gone = mono - go
+            if gone > START_HOLD_MAX_S:
+                return None
+            return {"id": self._hold_id, "row": max(0, int(gone // self._hold_step)), "step_ms": int(self._hold_step * 1000)}
+
+    def _end_formation(self, keep_hold: bool = False) -> None:
         self.formation = False
+        self._f1 = None
+        if not keep_hold:   # (the orderly start of a NASCAR rolling start is part of the formation; the F1 one goes on after the green, row by row)
+            self._hold_armed = self._hold_go = None
         self.lap_base = self.leader_laps_seen   # (the laps of the formation are not race laps)
 
     @fieldrec.capture(_lock)
@@ -361,25 +412,127 @@ class RaceControl:
             if not (self.nascar and self.pace_car is not None and self.flag == "green" and self.nascar.laps == 0 and not self.formation):
                 return False
             self.formation = True
+            f1 = FORMATION_MODE.get(self.server_id) == "f1"
+            self._f1 = {"phase": "lap", "t": self.clock.monotonic(), "still": {}, "warned": False, "go_at": None} if f1 else None
+            self.pace_live = None
+            step = START_HOLD_STEP_S.get(self.server_id, 0.0)
+            if step > 0 and not f1:   # (arm the orderly start: the hubs hold every car but the first row until the rows are called)
+                self._hold_id, self._hold_step, self._hold_armed, self._hold_go = self._hold_id + 1, step, self.clock.monotonic(), None
+                self.audit("start_hold_armed", id=self._hold_id, step_s=step, executed=True)
             self.caution_laps, self.pace_car_in, self.pace_car_pitted, self.one_more = -1, False, False, False
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
             return True
 
     @fieldrec.capture(_lock)
     def formation_lap(self, car: int) -> bool:
-        """The pace car crossed the line in the formation: the first crossing (from the grid) brings the 'one to go' -> True: the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing."""
+        """A car crossed the line in the formation: the first crossing (the pace car's from the grid, or a competitor's when the pace car never got there: it started behind, spun, was held) brings the 'one to go' -> True:
+        the pace car goes in at the end of the formation lap that follows, before the line, and the green comes at the next crossing. It cannot depend on the pace car alone: a pace car that never crosses would hold the race."""
         with _lock:
-            if not self.formation or self.pace_car_in or car != self.pace_car:
+            if not self.formation or self.pace_car_in or self._f1 is not None:   # (the F1 start follows the leader's progress, not a crossing: the cars stop BEHIND the line)
                 return False
             if self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return False
             self.caution_laps += 1
-            self.audit("formation_lap", car=car, laps=self.caution_laps, executed=True)
+            self.audit("formation_lap", car=car, pace_car=car == self.pace_car, laps=self.caution_laps, executed=True)
             if self.caution_laps < FORMATION_LAPS:
                 return False
             self.pace_car_in, self.pace_car_pitted = True, False
             self._bump()
             return True
+
+    @fieldrec.capture(_lock)
+    def pace_to_pits(self) -> bool:
+        """The director sends the pace car to the pits (it spun, it drives oddly, the formation lap is over and nobody crossed). In the formation: the same 'one to go' the first crossing brings (the green follows when it is in the pits
+        and a competitor crosses). Out leading a caution: it only goes back, with no restart armed (`pace_park`: the 'to go' stays the director's). False when it is not out. Idempotent."""
+        with _lock:
+            if self.pace_car is None:
+                return False
+            if self.formation:
+                if not self.pace_car_in:
+                    self.pace_car_in, self.pace_car_pitted = True, False
+            elif self.pace_out and not (self.pace_car_in or self.pace_park):
+                self.pace_park = True
+            else:
+                return self.pace_car_in or self.pace_park   # (already on its way in: nothing to do; not out: nothing to send)
+            self.audit("pace_to_pits", car=self.pace_car, formation=self.formation, executed=True)
+            self._bump()
+            return True
+
+    @fieldrec.capture(_lock)
+    def formation_tick(self, samples: dict, speeds: dict[int, float]) -> list[tuple]:
+        """The F1 rolling start, one look (every monitor tick): LAP the field follows the pace car round; when the leader has driven `F1_LEAD_DONE` of the lap the pace car is told to come in (it pits before the line)
+        -> REGROUP every car goes back to its slot just behind the line and stands (under F1_STILL_KMH for F1_STILL_S), the pace car in the pits -> COUNT F1_GO_DELAY_S -> the green (`formation_go`).
+        Never an automatic green on a field that did not form: past F1_REGROUP_MAX_S the director is told once and the green is theirs. A NASCAR start (`_f1` None) is not touched. -> [("regroup",) | ("late",) | ("green",)]: the adapter says them (the texts are its own)."""
+        with _lock:
+            f = self._f1
+            if f is None or not self.formation:
+                return []
+            now_m = self.clock.monotonic()
+            field = {c: s for c, s in samples.items() if c != self.pace_car}
+            if f["phase"] == "lap":
+                lead = max((s.progress for s in field.values()), default=None)
+                if lead is not None and lead >= F1_LEAD_DONE:
+                    self.pace_car_in, self.pace_car_pitted = True, False
+                    f["phase"], f["t"] = "regroup", now_m
+                    self.audit("f1_regroup", lead=lead, executed=True)
+                    self._bump()
+                    return [("regroup",)]
+                return []
+            if f["phase"] == "regroup":
+                t = self.clock.time()
+                in_pit = {c for c, seen in self._pit_seen.items() if t - seen < PIT_CLEAR}
+                present = [c for c in field if c not in in_pit]
+                for c in present:
+                    v, p = speeds.get(c), field[c].progress
+                    if v is not None and v < F1_STILL_KMH and p >= F1_LAP_MIN and F1_GRID_FROM <= p % 1.0 < 1.0:
+                        f["still"].setdefault(c, now_m)
+                    else:
+                        f["still"].pop(c, None)
+                formed = all(c in f["still"] and now_m - f["still"][c] >= F1_STILL_S for c in present)
+                if formed and (self.pace_car_pitted or self.pace_car is None):
+                    f["phase"], f["go_at"] = "count", now_m + F1_GO_DELAY_S
+                    step = START_HOLD_STEP_S.get(self.server_id, 0.0)
+                    if step > 0:   # (the standing start goes out row by row: the rows count from the green, which is `go_at`)
+                        self._hold_id, self._hold_step, self._hold_armed, self._hold_go = self._hold_id + 1, step, now_m, f["go_at"]
+                        self.audit("start_hold_armed", id=self._hold_id, step_s=step, executed=True)
+                    self.audit("f1_formed", cars=len(present), executed=True)
+                    return []
+                if now_m - f["t"] > F1_REGROUP_MAX_S and not f["warned"]:
+                    f["warned"] = True
+                    self.audit("f1_regroup_late", waiting=[c for c in present if c not in f["still"]], pace_in_pits=self.pace_car_pitted, executed=True)
+                    return [("late",)]
+                return []
+            if f["phase"] == "count" and now_m >= f["go_at"]:
+                return [("green",)]
+            return []
+
+    @fieldrec.capture(_lock)
+    def formation_go(self) -> bool:
+        """The F1 start is formed and the count is over: the formation ends with the green (the hold of the rows, if on, keeps going after it). False when it is not that moment (the director's own green came first)."""
+        with _lock:
+            f = self._f1
+            if not (self.formation and f and f["phase"] == "count" and self.clock.monotonic() >= f["go_at"]):
+                return False
+            self._end_formation(keep_hold=True)
+            self.set_flag("green", source="formation")
+            return True
+
+    @fieldrec.capture(_lock)
+    def pace_adapt(self, samples: dict, metres: float | None) -> None:
+        """The adaptive pace (`PACE_ADAPT`): while the pace car leads, its speed follows the gap to the car right behind it (`adaptive_pace`); the hub already ramps to whatever `pacecar.kmh` says."""
+        with _lock:
+            pc = samples.get(self.pace_car) if self.pace_car is not None else None
+            if (self.server_id not in PACE_ADAPT or pc is None or not metres or self.pace_car_in or self.pace_park
+                    or not (self.pace_out or self.formation)):
+                if self.pace_live is not None:
+                    self.pace_live = None
+                    self._bump()
+                return
+            behind = [((pc.progress - s.progress) % 1.0) * metres for c, s in samples.items() if c != self.pace_car]
+            new = adaptive_pace(self.pace_car_kmh, min(behind, default=None), self.pace_live)
+            if new != self.pace_live:
+                self.pace_live = new
+                self._bump()
 
     @fieldrec.capture(_lock)
     def formation_green(self, car: int, alone: bool) -> bool:
@@ -864,6 +1017,9 @@ class RaceControl:
             mono = self.clock.monotonic()
             samples = field.samples()
             self.neutralization_clear_tick(samples, speeds, mono, now, connected)
+            if self._hold_armed is not None and self._hold_go is None and any(v > START_HOLD_MOVE_KMH for c, v in speeds.items() if c != self.pace_car):   # (the pace car leaves the pits during the countdown: it is not the lights)
+                self._hold_go = mono   # (the lights went out: the first row is free from the start, the rest follow every step)
+                self.audit("start_hold_go", id=self._hold_id, executed=True)
             if self.flag in CAUTION and mono - self._audit_last_status >= 5:
                 self.audit("neutralization_status", flag=self.flag, pacecar=self.pace_car_state(),
                            leader=max((c for c in samples if c != self.pace_car), key=lambda c: samples[c].progress, default=None),
@@ -1840,7 +1996,7 @@ class RaceControl:
             nascar = {**self.nascar.snapshot(), "next_delay_min": self.next_delay_s // 60, "formation_laps": self.lap_base} if self.nascar else None   # (formation_laps: the game counts them in its lap number, the race does not)
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "red_ref": self.red_ref, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
-                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
+                    "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"]} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 

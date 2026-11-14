@@ -450,6 +450,14 @@ def autoflags_tick(now: float) -> None:
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
         rc.oval = inst.acsp.oval
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
+        for act in rc.formation_tick(samples, speeds):   # (an F1 rolling start: regroup on the grid, then the green; a NASCAR one returns nothing)
+            if act[0] == "regroup":
+                _say(rc, "VUELTA DE FORMACIÓN COMPLETA: REAGRÚPATE EN LA PARRILLA", "flag")
+            elif act[0] == "late":
+                _say(rc, "El reagrupado no se completó: la bandera verde es manual", "flag")
+            elif act[0] == "green" and rc.formation_go():
+                _say(rc, SAY["green"], "flag")
+        rc.pace_adapt(samples, inst.acsp.length.metres())
         rc.yellow_tick(samples, speeds, mono, now)
         _flag_messages(inst, rc)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
@@ -500,7 +508,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -1236,6 +1244,56 @@ def set_pace_car(server_id: int, body: PaceCarIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+@control_router.post("/pace-car/pit")
+def pace_car_to_pits(server_id: int, sess: SessionDep) -> dict:
+    """The director sends the pace car to the pits (it spun, it drives oddly). In a rolling start the green follows when it is in and a competitor crosses; out leading a caution it only goes back (the 'to go' stays the director's)."""
+    _, rc = _control(server_id, sess)
+    if not rc.pace_to_pits():
+        raise HTTPException(409, "no hay pace car en pista")
+    return rc.snapshot()
+
+
+class StartHoldIn(BaseModel):
+    step_s: float = Field(ge=0, le=5)   # seconds between the rows of the orderly rolling start; 0 = off
+
+
+@control_router.put("/start-hold")
+def set_start_hold(server_id: int, body: StartHoldIn, sess: SessionDep) -> dict:
+    """The orderly start of the rolling start: every driver's hub keeps the car on the brake until its row (two cars of the grid) is called, one row every `step_s`; P1 and P2 are free. It applies to the NEXT rolling start
+    (it is armed when the formation begins) and stays until it is switched off (0). In memory: a manager restart forgets it."""
+    _, rc = _control(server_id, sess)
+    from app.live import racecontrol as live_rc
+    if body.step_s > 0:
+        live_rc.START_HOLD_STEP_S[server_id] = body.step_s
+    else:
+        live_rc.START_HOLD_STEP_S.pop(server_id, None)
+    rc.audit("start_hold_config", step_s=body.step_s, executed=True)
+    return {"step_s": body.step_s}
+
+
+class RollingStyleIn(BaseModel):
+    style: Literal["nascar", "f1"] = "nascar"
+    adaptive_pace: bool = False
+
+
+@control_router.put("/rolling-style")
+def set_rolling_style(server_id: int, body: RollingStyleIn, sess: SessionDep) -> dict:
+    """How the rolling start is run on this server, from the NEXT one: `nascar` (the pace car leads one lap and pits; the green comes on the restart line: the default) or `f1` (one formation lap, every car goes back
+    to its slot behind the line and stands, a standing start). `adaptive_pace`: the pace car's speed follows the gap of the field behind it. In memory: a manager restart forgets both."""
+    _, rc = _control(server_id, sess)
+    from app.live import racecontrol as live_rc
+    if body.style == "f1":
+        live_rc.FORMATION_MODE[server_id] = "f1"
+    else:
+        live_rc.FORMATION_MODE.pop(server_id, None)
+    if body.adaptive_pace:
+        live_rc.PACE_ADAPT.add(server_id)
+    else:
+        live_rc.PACE_ADAPT.discard(server_id)
+    rc.audit("rolling_style_config", style=body.style, adaptive_pace=body.adaptive_pace, executed=True)
+    return {"style": body.style, "adaptive_pace": body.adaptive_pace}
+
+
 class PitOkIn(BaseModel):
     car_id: int = Field(ge=0, le=255)
     allowed: bool = True
@@ -1268,6 +1326,12 @@ class RestartIn(BaseModel):
 
 
 def _restart(inst, rc, to_go: int) -> dict:
+    if rc.formation:   # (a rolling start: there is no caution to arm; the 'to go' brings the pace car in, which is what the first crossing does. The formation is one lap: 'two to go' is the same call)
+        rc.pace_to_pits()
+        log.info("restart called in the formation: %s to go", to_go)
+        rc.audit("manual_to_go", to_go=to_go, flag=rc.flag, nascar_caution=False, formation=True, executed=True)
+        _say(rc, "UNA PARA VERDE", "flag", hold="togo")
+        return rc.snapshot()
     plan = rc.restart_plan(inst.acsp.field.snapshot(), to_go)
     if plan is None:
         if rc.flag not in CAUTION:
