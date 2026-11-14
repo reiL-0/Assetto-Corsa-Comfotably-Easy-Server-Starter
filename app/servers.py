@@ -31,7 +31,7 @@ from app.live.acsp import ACSPClient
 from app.models import Activity, ChampionshipEvent, Incident, Penalty, Schedule, Server, Setting
 from app.services import ini_generator, server_service
 from app.services.server_service import ServerError, check_slots, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
-from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for, result_details
+from app.results import unsaved_race_finish, apply_penalties, non_racing_for, parse_result_file, penalties_for, result_details
 from app.schemas.servers import (  # noqa: F401 - re-exported: other modules import these names from here
     Scalar,
     ServerIn,
@@ -643,7 +643,9 @@ async def start_server(server_id: int, sess: SessionDep) -> dict:
 
 
 @router.post("/{server_id}/stop")
-async def stop_server(server_id: int, sess: SessionDep) -> dict:
+async def stop_server(server_id: int, sess: SessionDep, force: bool = False) -> dict:
     _get(sess, server_id)
+    if not force and unsaved_race_finish(Path(settings.data_dir) / "instances" / str(server_id) / "results", time.time()):
+        raise HTTPException(409, "the race result is not saved yet (acServer writes it when the session ends): wait for the next session, or stop with ?force=true to lose it")
     await server_service.stop(server_id)
     return {"running": False}

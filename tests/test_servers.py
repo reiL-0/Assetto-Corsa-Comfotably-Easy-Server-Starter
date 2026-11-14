@@ -80,3 +80,22 @@ def test_simultaneous_creates_get_distinct_port_blocks():
     assert all(r.status_code == 201 for r in rs)
     ports = [r.json()["ports"]["tcp"] for r in rs]
     assert len(set(ports)) == len(ports)
+
+
+def test_stop_refused_between_the_flag_and_the_saved_result(tmp_path):
+    import json, os, time
+    from app.results import unsaved_race_finish
+    now = time.time()
+    (tmp_path / "1.finish").write_text(json.dumps({"at": now - 60, "laps": 44}))
+    assert unsaved_race_finish(tmp_path, now)                       # flag fell, nothing saved: stopping loses the race
+    (tmp_path / "x_RACE.json").write_text("{}")
+    assert not unsaved_race_finish(tmp_path, now)                   # result written after the flag
+    os.utime(tmp_path / "x_RACE.json", (now - 600, now - 600))
+    assert unsaved_race_finish(tmp_path, now)                       # that result is older than the flag
+    assert not unsaved_race_finish(tmp_path, now + 600)             # stale marker never blocks for good
+    (tmp_path / "bad.finish").write_text("{")
+    (tmp_path / "future.finish").write_text(json.dumps({"at": now + 9999}))
+    (tmp_path / "inf.finish").write_text('{"at": Infinity}')
+    assert unsaved_race_finish(tmp_path, now)                       # a broken/future marker does not hide the real one...
+    (tmp_path / "1.finish").unlink()
+    assert not unsaved_race_finish(tmp_path, now)                   # ...nor blocks by itself
