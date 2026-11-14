@@ -1899,7 +1899,7 @@ class RaceControl:
             if car == self.pace_car:
                 return
             session = self.session_ref if isinstance(self.session_ref, dict) else {}
-            if session.get("session_type") not in (1, 2, RACE_TYPE):
+            if session.get("session_type") not in (1, 2, RACE_TYPE) or (self.server_id and cuts_off_peek(self.server_id, session.get("session_type"))):   # (a session that has the cuts off counts none)
                 return
             if driver_guid:
                 client, server = self.cuts_totals.get(driver_guid, (0, 0))
@@ -1998,7 +1998,7 @@ class RaceControl:
         Practice and qualifying are informational (`cuts_info`): the cut only invalidates the lap, so the hub says "TRACK LIMITS · LAP INVALID" and shows no rounds; the ladder is a race's."""
         with _lock:
             session = self.session_ref if isinstance(self.session_ref, dict) else {}   # (a test may hold a bare object as the session reference: the default rule is always there now)
-            if not (rule and session.get("session_type") in (1, 2, RACE_TYPE)):
+            if not (rule and session.get("session_type") in (1, 2, RACE_TYPE)) or (self.server_id and cuts_off_peek(self.server_id, session.get("session_type"))):
                 return {"cuts": {}, "cuts_rule": None}
             if session.get("session_type") in (1, 2):
                 return {"cuts": {str(c): n for c, n in sorted(self.cuts_client.items())},
@@ -2022,6 +2022,15 @@ class RaceControl:
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"]} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+
+
+def cuts_off_peek(server_id: int, session_type: object) -> bool:
+    """Whether the applied session switched the track-limit cuts off for this kind of session (1 practice, 2 qualifying, 3 race): the live Instance knows (`cuts_off`, loaded before the first UDP event and on every apply), no cache that could be missing."""
+    try:
+        from app import supervisor   # (late: supervisor imports this module)
+        return {1: "practice", 2: "qualify", RACE_TYPE: "race"}.get(session_type) in (getattr(supervisor.get(server_id), "cuts_off", None) or ())
+    except Exception:   # noqa: BLE001 - never break the state every hub reads
+        return False
 
 
 def cut_rule_peek(server_id: int) -> dict | None:

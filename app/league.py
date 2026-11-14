@@ -36,7 +36,7 @@ from app.config import settings
 from app.auth import CurrentUser
 from app.db import engine
 from app.leaguelock import lock as league_lock, serialized
-from app.stewards.auto import _event_rules, cut_notices, cut_penalties, drs_penalties, flag_penalties, give_back_penalties, neutral_penalties
+from app.stewards.auto import _event_rules, apply_off, cut_notices, cut_penalties, drs_penalties, flag_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
 from app.results import parse_result_file
@@ -187,6 +187,7 @@ def session_for(sess: Session, ev: Event, at: float, *, notify: bool = True) -> 
         snapshot.detectors.cuts = CutRule.model_validate(ev.data["cuts_rule"]) if ev.data["cuts_rule"] is not None else None
     if ev.data.get("drs_rule"):   # the event's own DRS rules win over the league's
         snapshot.detectors.drs = DrsRule.model_validate(ev.data["drs_rule"])
+    apply_off(snapshot, s.cuts_off, s.drs_off)   # (the result is counted under `_event_rules`, which says the same)
     revision = hashlib.sha256(snapshot.model_dump_json().encode()).hexdigest()
     return s.model_copy(update={"rulebook_revision": revision, "rulebook_league_id": c.id, "rulebook_event_id": ev.id, "rulebook_snapshot": snapshot, "entries": entries, "locked": True, "pickup": False, "cars": cars})
 
@@ -312,6 +313,9 @@ def effective_rules(server_id: int) -> dict:
             gb = det.give_back
             give_back = {"seconds": gb.seconds, "window_s": gb.window_s} if gb.enabled and (rb is not None or "give_back" in set_here) else None
             drs = (_ManualDrsRule(det.drs.model_dump()) if drs_from_server else det.drs.model_dump()) if det.drs else None
+            applied = (server.session or {}) if server else {}
+            if applied.get("drs_off"):
+                drs = None   # (this session says no DRS: the most specific wins over the server and the league)
             modes = det.flags.model_dump() if (rb is not None or "flags" in set_here) else {k: settings.flag_modes_default for k in FLAG_MODE_KINDS}
             if rb:
                 neutral = rb.neutralization.model_dump()

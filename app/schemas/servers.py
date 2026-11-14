@@ -174,6 +174,8 @@ class SessionIn(BaseModel):
     rulebook_event_id: int | None = None  # binds the snapshot to the scheduled event's results
     rulebook_snapshot: Rulebook | None = None  # versioned copy saved with the applied session
     nascar: NascarSessionIn | None = None  # armed only when ACSP announces a new race
+    cuts_off: list[Literal["practice", "qualify", "race"]] = Field(default_factory=list, max_length=3)   # the sessions in which the track-limit cuts are not counted or shown at all (an `inherit` is the empty list; a rule of its own is `cuts_rule`)
+    drs_off: bool = False   # no DRS in this session, whatever the server or the league say (DRS only exists in a race)
     rolling: Literal["off", "nascar", "f1"] | None = None   # how the RACE starts: off = standing start, nascar = a formation lap behind the pace car and the green on the line, f1 = formation lap, back to the grid, standing start. None = the old behaviour (NASCAR: rolling; the rest: standing). A NASCAR race is always rolling (see _nascar_is_rolling)
     race_wait_s: int = Field(default=60, ge=0, le=600)
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
@@ -188,6 +190,15 @@ class SessionIn(BaseModel):
                 raise ValueError("car_setups: a setup name is empty")
             _setup_name(name)
         return v
+
+    @model_validator(mode="after")
+    def _off_is_not_a_rule(self) -> SessionIn:
+        self.cuts_off = list(dict.fromkeys(self.cuts_off))
+        if self.cuts_rule is not None and "race" in self.cuts_off:
+            raise ValueError("cuts_off: la carrera no puede tener cortes apagados y regla propia a la vez")
+        if self.drs_rule is not None and self.drs_off:
+            raise ValueError("drs_off: el DRS no puede estar apagado y tener regla propia a la vez")
+        return self
 
     @model_validator(mode="after")
     def _nascar_is_rolling(self) -> SessionIn:

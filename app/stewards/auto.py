@@ -18,10 +18,21 @@ from app.results import non_racing_for
 from app.rulebook import CutRule, Rulebook, effective
 
 
+def apply_off(rb: Rulebook, cuts_off, drs_off: bool) -> Rulebook:
+    """The session switched the race's track-limit cuts and / or the DRS off (SessionIn.cuts_off / drs_off): the rulebook it is run and counted under has none of them, so no notice or penalty comes out of its result."""
+    if "race" in (cuts_off or ()):
+        rb.detectors.cuts = None
+    if drs_off:
+        rb.detectors.drs = None
+    return rb
+
+
 def _event_rules(c: Championship, event: Event | None) -> Rulebook:
     rb = effective(c).model_copy(deep=True)
     if event and "cuts_rule" in event.data:
         rb.detectors.cuts = CutRule.model_validate(event.data["cuts_rule"]) if event.data["cuts_rule"] is not None else None
+    if event:
+        apply_off(rb, event.data.get("cuts_off"), bool(event.data.get("drs_off")))
     return rb
 
 

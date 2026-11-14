@@ -76,7 +76,7 @@ def test_start_and_adopt_know_the_style_before_the_first_udp_event(session_event
     from app import supervisor, timeline
     from app.config import settings
     sid, client, _ = session_events
-    _apply(sid, rolling='f1')
+    _apply(sid, rolling='f1', cuts_off=['practice'])
     live_rc.FORMATION_MODE.clear()
     supervisor._instances.pop(sid)
     monkeypatch.setattr(settings, 'data_dir', str(tmp_path))
@@ -92,7 +92,7 @@ def test_start_and_adopt_know_the_style_before_the_first_udp_event(session_event
         return proc
 
     async def connect(inst, *args, **kwargs):   # (acServer's UDP opens here: the first new_session can come right now)
-        seen.append((inst.rolling, live_rc.FORMATION_MODE.get(sid)))
+        seen.append((inst.rolling, live_rc.FORMATION_MODE.get(sid), inst.cuts_off))
 
     monkeypatch.setattr(supervisor.asyncio, 'create_subprocess_exec', spawn)
     monkeypatch.setattr(supervisor.Instance, 'connect_acsp', connect)
@@ -113,5 +113,5 @@ def test_start_and_adopt_know_the_style_before_the_first_udp_event(session_event
             await supervisor.stop(sid)
 
     asyncio.run(scenario())
-    assert seen == [('f1', 'f1')], seen
+    assert seen == [('f1', 'f1', ('practice',))], seen   # (rolling and cuts_off: what the first new_session needs)
     live_rc.FORMATION_MODE.pop(sid, None)

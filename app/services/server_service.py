@@ -144,6 +144,7 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
             mem_mb=s.mem_limit_mb,
             nascar_config=(s.session or {}).get("nascar"),
             rolling=live_rc.formation_style(server_id, s.session),
+            cuts_off=tuple((s.session or {}).get("cuts_off") or ()),
         )
     except RuntimeError as e:
         raise ServerError(409, str(e)) from e
@@ -288,6 +289,7 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         inst.acsp.keep_off = True   # (a server still running the old practice must not save it again; a restart makes a new client)
     if inst:
         inst.nascar_config = (s.session or {}).get("nascar")
+        inst.cuts_off = tuple(body.cuts_off)
         if live_rc.rolling_mode(s.session) != old_rolling:   # (the same again must not undo the style the director chose since)
             live_rc.load_rolling(server_id, inst, s.session)
         if body.pace_steam_id != old_pace:   # the same one again must not undo what the director did since
@@ -327,6 +329,7 @@ async def adopt_running(sess: Session) -> int:
             s.id, Path(settings.data_dir) / "instances" / str(s.id),
             acsp_remote_port=p["plugin"], acsp_local_port=p["plugin_local"], car_slots=len(s.entry_list), http_port=p["http_internal"],
             nascar_config=(s.session or {}).get("nascar"), rolling=live_rc.formation_style(s.id, s.session),
+            cuts_off=tuple((s.session or {}).get("cuts_off") or ()),
         )
         if inst:
             inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
