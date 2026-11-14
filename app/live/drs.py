@@ -6,6 +6,7 @@ DRS is OFF (and a car that uses it is sanctioned) while any of these holds, the 
               for `dry_confirm_s` (a shower that stops and starts again does not flicker the banner);
   * "start"   the leader has not completed `start_laps_off` laps yet;
   * "restart" the leader has not completed `restart_laps_off` laps since the race went back to green.
+In practice and qualifying only "rain" applies (RaceControl.drs_tick gives this class the race rule with no start or restart laps, and no flag closes it); a car that uses DRS then gets no penalty: its lap is ruled invalid (RaceControl.drs_closed, LiveBoard.invalidate_lap).
 Each contiguous OFF period is a `window`: a driver is sanctioned at most once per window (the sanction is a drive-through or a warning, see `RaceControl.drs_use`).
 The hub reads the state; the manager is the one that decides (the hub's report of a car using DRS is client evidence, like the cut counter).
 """

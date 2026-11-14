@@ -51,6 +51,7 @@ EXCLUDED = {
     "show_black": "The director shows the black flag: a manual input, not field data",
     "drs_tick": "DRS window from laps, flag and weather; no field judge reads it (app/live/drs.py)",
     "drs_use": "Client evidence of DRS use, sanctioned from the window state; not field data",
+    "drs_closed": "Reads the DRS window state for a hub report in practice / qualifying (an invalid lap); not field data",
     "configure_nascar": "Arms NASCAR; armed NASCAR tapes are explicitly rejected",
 }
 

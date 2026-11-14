@@ -209,15 +209,15 @@ def save_flag_dues() -> None:
 
 
 def drs_stale_servers() -> list[int]:
-    """Servers in a race whose cached DRS rule has to be read again (the monitor does it in a worker thread: never on the event loop)."""
-    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") == RACE_TYPE and drs_rule_stale(i.server_id)]
+    """Servers in a driving session whose cached DRS rule has to be read again (the monitor does it in a worker thread: never on the event loop)."""
+    return [i.server_id for i in supervisor.live() if (i.acsp.session or {}).get("session_type") in (1, 2, RACE_TYPE) and drs_rule_stale(i.server_id)]
 
 
 def drs_tick(now: float) -> None:
-    """The DRS state of every race that has the rule on: the leader's laps and how wet the track is go in, the state the hubs read comes out (RaceControl.drs_tick). Event loop, no database."""
+    """The DRS state of every session that has the rule on (a race: all of it; practice and qualifying: only the rain): the leader's laps and how wet the track is go in, the state the hubs read comes out (RaceControl.drs_tick). Event loop, no database."""
     for inst in supervisor.live():
         session = inst.acsp.session
-        if (session or {}).get("session_type") != RACE_TYPE:
+        if (session or {}).get("session_type") not in (1, 2, RACE_TYPE):
             continue
         rule = drs_rule_peek(inst.server_id)
         rc = state_of(inst.server_id, True, session, create=bool(rule))
@@ -600,6 +600,10 @@ def report_drs_use(server_id: int, body: DrsUseIn, sess: SessionDep) -> None:
     if not car or (car.get("driver_name") or "").strip().lower() != body.name.strip().lower():
         raise HTTPException(409, "that car is not that driver")
     rc = state_of(server_id, True, inst.acsp.session)
+    if (inst.acsp.session or {}).get("session_type") in (1, 2):   # practice / qualifying: no penalty, the lap is invalid (once per lap: the hub keeps reporting while it is open)
+        if rc and rc.drs_closed(body.car_id, time.time()) and inst.acsp.board.invalidate_lap(body.car_id):
+            _say(rc, "DRS CERRADO POR LLUVIA · VUELTA NO VÁLIDA", "info", body.car_id)
+        return
     verdict = rc.drs_use(body.car_id, str(car.get("driver_guid") or ""), time.time()) if rc else None
     if verdict:
         laps = verdict["laps"]
