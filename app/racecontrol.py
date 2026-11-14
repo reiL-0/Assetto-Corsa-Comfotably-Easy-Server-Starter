@@ -450,6 +450,14 @@ def autoflags_tick(now: float) -> None:
         rc.flag_modes = modes   # (no fresh reading of the league: nothing live)
         rc.oval = inst.acsp.oval
         rc.autoflags_tick(samples, speeds, inst.acsp.length.metres(), mono, now)
+        for act in rc.formation_tick(samples, speeds):   # (an F1 rolling start: regroup on the grid, then the green; a NASCAR one returns nothing)
+            if act[0] == "regroup":
+                _say(rc, "VUELTA DE FORMACIÓN COMPLETA: REAGRÚPATE EN LA PARRILLA", "flag")
+            elif act[0] == "late":
+                _say(rc, "El reagrupado no se completó: la bandera verde es manual", "flag")
+            elif act[0] == "green" and rc.formation_go():
+                _say(rc, SAY["green"], "flag")
+        rc.pace_adapt(samples, inst.acsp.length.metres())
         rc.yellow_tick(samples, speeds, mono, now)
         _flag_messages(inst, rc)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
@@ -1261,6 +1269,29 @@ def set_start_hold(server_id: int, body: StartHoldIn, sess: SessionDep) -> dict:
         live_rc.START_HOLD_STEP_S.pop(server_id, None)
     rc.audit("start_hold_config", step_s=body.step_s, executed=True)
     return {"step_s": body.step_s}
+
+
+class RollingStyleIn(BaseModel):
+    style: Literal["nascar", "f1"] = "nascar"
+    adaptive_pace: bool = False
+
+
+@control_router.put("/rolling-style")
+def set_rolling_style(server_id: int, body: RollingStyleIn, sess: SessionDep) -> dict:
+    """How the rolling start is run on this server, from the NEXT one: `nascar` (the pace car leads one lap and pits; the green comes on the restart line: the default) or `f1` (one formation lap, every car goes back
+    to its slot behind the line and stands, a standing start). `adaptive_pace`: the pace car's speed follows the gap of the field behind it. In memory: a manager restart forgets both."""
+    _, rc = _control(server_id, sess)
+    from app.live import racecontrol as live_rc
+    if body.style == "f1":
+        live_rc.FORMATION_MODE[server_id] = "f1"
+    else:
+        live_rc.FORMATION_MODE.pop(server_id, None)
+    if body.adaptive_pace:
+        live_rc.PACE_ADAPT.add(server_id)
+    else:
+        live_rc.PACE_ADAPT.discard(server_id)
+    rc.audit("rolling_style_config", style=body.style, adaptive_pace=body.adaptive_pace, executed=True)
+    return {"style": body.style, "adaptive_pace": body.adaptive_pace}
 
 
 class PitOkIn(BaseModel):

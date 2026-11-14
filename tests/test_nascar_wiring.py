@@ -1091,6 +1091,131 @@ def test_the_orderly_start_holds_every_row_but_the_first_until_the_rows_are_call
         live_rc.START_HOLD_STEP_S.pop(sid, None)
 
 
+def _f1_start(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    live_rc.FORMATION_MODE[sid] = 'f1'
+    t = [100.0]
+    monkeypatch.setattr(rc.clock, 'monotonic', lambda: t[0])
+    adapter.rolling_start(rc, client.cars)
+    return sid, client, rc, t, (lambda p: SimpleNamespace(progress=p))
+
+
+def test_the_f1_rolling_start_follows_the_leader_regroups_behind_the_line_and_greens_when_formed(live, monkeypatch):
+    sid, client, rc, t, S = _f1_start(live, monkeypatch)
+    try:
+        assert rc.formation and rc._f1['phase'] == 'lap'
+        assert rc.formation_tick({3: S(0.5), 9: S(0.6)}, {3: 80.0, 9: 80.0}) == [] and not rc.pace_car_in, 'the leader is half way round'
+        assert not rc.formation_lap(3) and not rc.pace_car_in, 'the F1 start does not wait for a crossing: the cars stop behind the line'
+        acts = rc.formation_tick({3: S(0.8), 9: S(0.85)}, {3: 80.0, 9: 80.0})
+        assert acts == [('regroup',)] and rc.pace_car_in and rc._f1['phase'] == 'regroup'
+        t[0] += 10
+        assert rc.formation_tick({3: S(0.98), 9: S(0.97)}, {3: 0.0, 9: 0.0}) == [], 'the pace car is not in the pits yet'
+        rc.report_pit(9, True)
+        t[0] += 3
+        assert rc.formation_tick({3: S(0.98)}, {3: 0.0}) == [] and rc._f1['phase'] == 'count', 'formed: every car stood for two seconds just behind the line, the pace car in the pits'
+        assert not rc.formation_go(), 'the count is not over'
+        t[0] += 3.9
+        assert rc.formation_tick({3: S(0.98)}, {3: 0.0}) == []
+        t[0] += 0.2
+        assert rc.formation_tick({3: S(0.98)}, {3: 0.0}) == [('green',)]
+        assert rc.formation_go() and rc.flag == 'green' and not rc.formation and rc._f1 is None
+        assert not rc.formation_go(), 'once'
+    finally:
+        live_rc.FORMATION_MODE.pop(sid, None)
+
+
+def test_the_f1_start_does_not_form_on_a_car_still_moving_or_a_car_not_back_and_never_greens_by_itself(live, monkeypatch):
+    sid, client, rc, t, S = _f1_start(live, monkeypatch)
+    try:
+        rc.formation_tick({3: S(0.8), 9: S(0.85)}, {3: 80.0, 9: 80.0})
+        rc.report_pit(9, True)
+        client.cars[4] = {'driver_name': 'B'}
+        for _ in range(5):
+            t[0] += 3
+            assert rc.formation_tick({3: S(0.98), 4: S(0.5)}, {3: 0.0, 4: 0.0}) == [], 'car 4 stands in the middle of the lap: not on the grid'
+        assert rc._f1['phase'] == 'regroup'
+        t[0] += 80
+        assert rc.formation_tick({3: S(0.98), 4: S(0.5)}, {3: 0.0, 4: 0.0}) == [('late',)], 'told once'
+        t[0] += 60
+        assert rc.formation_tick({3: S(0.98), 4: S(0.5)}, {3: 0.0, 4: 0.0}) == [] and rc.formation and rc.flag == 'yellow', 'the green stays the director\'s'
+        rc.set_flag('green', source='director')
+        assert not rc.formation and rc._f1 is None, 'the director\'s green ends it'
+        assert rc.formation_tick({3: S(0.98)}, {3: 0.0}) == []
+    finally:
+        live_rc.FORMATION_MODE.pop(sid, None)
+
+
+def test_a_nascar_rolling_start_is_untouched_by_the_f1_machinery(live, monkeypatch):
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    assert rc._f1 is None and rc.formation_tick({3: SimpleNamespace(progress=0.9)}, {3: 0.0}) == [] and not rc.formation_go()
+
+
+def test_the_f1_start_holds_the_rows_after_the_green_when_the_orderly_start_is_on(live, monkeypatch):
+    sid, client, rc, t, S = _f1_start(live, monkeypatch)
+    live_rc.START_HOLD_STEP_S[sid] = 1.5
+    try:
+        rc.formation_tick({3: S(0.8), 9: S(0.85)}, {3: 80.0, 9: 80.0})
+        rc.report_pit(9, True)
+        t[0] += 3
+        rc.formation_tick({3: S(0.98)}, {3: 0.0})
+        t[0] += 3
+        rc.formation_tick({3: S(0.98)}, {3: 0.0})
+        assert rc.start_hold_view() == {'id': 1, 'row': 0, 'step_ms': 1500}, 'armed for the count: only the first row is free'
+        t[0] += 4.1
+        assert rc.formation_tick({3: S(0.98)}, {3: 0.0}) == [('green',)] and rc.formation_go()
+        assert rc.start_hold_view()['row'] == 0, 'the hold goes on after the green'
+        t[0] += 1.6
+        assert rc.start_hold_view()['row'] == 1
+        t[0] += 31
+        assert rc.start_hold_view() is None
+    finally:
+        live_rc.FORMATION_MODE.pop(sid, None); live_rc.START_HOLD_STEP_S.pop(sid, None)
+
+
+def test_the_adaptive_pace_follows_the_gap_to_the_car_behind(live, monkeypatch):
+    from app.live.racecontrol import adaptive_pace
+    assert adaptive_pace(100, None) == 100, 'no gap known: the base'
+    assert adaptive_pace(100, 30.0) == 100 and adaptive_pace(100, 5.0) == 115, 'crowded: a little faster'
+    assert adaptive_pace(100, 60.0) == 90 and adaptive_pace(100, 120.0) == 75, 'stretched: it waits for them'
+    assert adaptive_pace(100, 60.0, prev=89) == 89 and adaptive_pace(100, 60.0, prev=80) == 90, 'hysteresis'
+    assert adaptive_pace(20, 120.0) == 30 and adaptive_pace(300, 5.0) == 250, 'within the pace limits'
+    sid, client, rc, lap = _rolling(live, monkeypatch)
+    adapter.rolling_start(rc, client.cars)
+    S = lambda p: SimpleNamespace(progress=p)
+    rc.pace_adapt({9: S(0.50), 3: S(0.48)}, 5000.0)
+    assert rc.pace_live is None and rc.pace_car_state()['kmh'] == 120, 'off by default'
+    live_rc.PACE_ADAPT.add(sid)
+    try:
+        rc.pace_adapt({9: S(0.50), 3: S(0.48)}, 5000.0)   # 100 m behind
+        assert rc.pace_live == 90 and rc.pace_car_state()['kmh'] == 90
+        rc.pace_adapt({9: S(0.50), 3: S(0.495)}, 5000.0)   # 25 m: the base
+        assert rc.pace_live == 120
+        rc.pace_car_in = True
+        rc.pace_adapt({9: S(0.50), 3: S(0.48)}, 5000.0)
+        assert rc.pace_live is None and rc.pace_car_state()['kmh'] == 120, 'coming in: the configured pace'
+    finally:
+        live_rc.PACE_ADAPT.discard(sid)
+
+
+def test_the_rolling_style_and_the_orderly_start_are_the_stewards_to_set(live):
+    sid, client, _ = live
+    url, hold = f'{V}/servers/{sid}/race-control/rolling-style', f'{V}/servers/{sid}/race-control/start-hold'
+    assert _client('driver').put(url, json={'style': 'f1'}).status_code == 403 and _client('driver').put(hold, json={'step_s': 1.5}).status_code == 403
+    steward = _client('steward')
+    try:
+        assert steward.put(url, json={'style': 'f1', 'adaptive_pace': True}).json() == {'style': 'f1', 'adaptive_pace': True}
+        assert live_rc.FORMATION_MODE[sid] == 'f1' and sid in live_rc.PACE_ADAPT
+        assert steward.put(url, json={'style': 'rolling'}).status_code == 422
+        assert steward.put(url, json={'style': 'nascar'}).json() == {'style': 'nascar', 'adaptive_pace': False}
+        assert sid not in live_rc.FORMATION_MODE and sid not in live_rc.PACE_ADAPT
+        assert steward.put(hold, json={'step_s': 1.5}).json() == {'step_s': 1.5} and live_rc.START_HOLD_STEP_S[sid] == 1.5
+        assert steward.put(hold, json={'step_s': 9}).status_code == 422
+        assert steward.put(hold, json={'step_s': 0}).status_code == 200 and sid not in live_rc.START_HOLD_STEP_S
+    finally:
+        live_rc.FORMATION_MODE.pop(sid, None); live_rc.PACE_ADAPT.discard(sid); live_rc.START_HOLD_STEP_S.pop(sid, None)
+
+
 def test_a_rolling_start_needs_the_pace_car_and_alone_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):
     sid, client, rc, lap = _rolling(live, monkeypatch, with_pace_car=False)
     adapter.rolling_start(rc, client.cars)
