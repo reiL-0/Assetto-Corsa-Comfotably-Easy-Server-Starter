@@ -28,6 +28,7 @@ class Driver:
     best_valid_ms: int = 0
     kept_ms: int = 0  # best lap brought from the practice kept across an idle stop (app/practicekeep.py): the server's own table starts empty and must not lower it
     best_splits: list[int] = field(default_factory=list)  # [s1_ms, s2_ms, s3_ms] for best_ms
+    last_splits: list[int] | None = None  # the sectors of the lap just completed (None: none worked out for it): the track record keeps the ones of ITS lap, not of the session's best
     best_sectors: list[int] = field(default_factory=list)  # [s1, s2, s3]: the quickest of each sector over the valid laps (not all from one lap); their sum is the potential lap
     pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     spline: float = 0.0
@@ -49,7 +50,7 @@ class LiveBoard:
     @staticmethod
     def _reset(d: Driver) -> None:
         d.best_ms = d.last_ms = d.laps = d.total_ms = d.kept_ms = 0
-        d.best_splits, d.best_sectors = [], []
+        d.best_splits, d.best_sectors, d.last_splits = [], [], None
         d.top_kmh = 0.0
         d.valid_laps, d.best_valid_ms = None, 0
 
@@ -179,6 +180,7 @@ class LiveBoard:
 
             if d:
                 d.last_ms, d.laps = lap_ms, d.laps + 1
+                d.last_splits = lap_splits
                 d.total_ms += lap_ms
                 valid = e.get("cuts", 0) == 0 and 0 < lap_ms < NO_TIME
                 d.valid_laps = (d.valid_laps or 0) + valid

@@ -64,3 +64,16 @@ def test_backfill_reads_the_result_files_and_skips_laps_with_cuts(tmp_path):
     (tmp_path / "bad.json").write_text("{not json")
     backfill_records.main([str(tmp_path)])
     assert records.top("brno", "")[0]["laps"][0]["best_ms"] == 61_000
+
+
+def test_the_sectors_belong_to_the_lap_of_the_record():
+    G3 = "76561199000000013"
+    assert records.submit("sectors-track", "", "gt3", G3, "Eva", 100_000, 0, [30_000, 40_000, 30_000])
+    top = lambda: records.top("sectors-track", "")[0]["laps"][0]
+    assert top()["splits"] == [30_000, 40_000, 30_000] and top()["set_at"]
+    assert not records.submit("sectors-track", "", "gt3", G3, "Eva", 101_000, 0, [1, 2, 3])   # slower: nothing changes, sectors included
+    assert top()["splits"] == [30_000, 40_000, 30_000]
+    assert records.submit("sectors-track", "", "gt3", G3, "Eva", 99_000, 0, None)   # faster, but the board had no sectors for that lap
+    assert top()["best_ms"] == 99_000 and top()["splits"] is None   # NULL, never the sectors of the older lap
+    assert records.submit("sectors-track", "", "gt3", G3, "Eva", 98_000, 0, [0, 50_000, 48_000])   # a zero is not a sector: unknown, not stored
+    assert top()["splits"] is None

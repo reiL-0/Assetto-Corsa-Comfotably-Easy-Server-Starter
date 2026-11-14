@@ -309,6 +309,7 @@ def test_live_sector_splits_computed_and_serialized():
     assert s1_ns + s2_ns + s3_ns == official_ms * 1_000_000
     assert car["BestLap"] == official_ms * 1_000_000
     assert splits["0"]["Cuts"] == 0
+    assert b._by_car(0).last_splits == [s1_ns // 1_000_000, s2_ns // 1_000_000, s3_ns // 1_000_000]   # what the track record keeps with the lap
 
 
 
