@@ -31,7 +31,7 @@ def submit(track: str | None, config: str | None, car: str, guid: str, name: str
     if cuts or not (track and car and guid and 0 < ms < NO_TIME):
         return False
     key = (track, config, car, guid)
-    s = list(splits) if splits and len(splits) == 3 and all(isinstance(x, int) and x > 0 for x in splits) else [None] * 3
+    s = list(splits) if splits and len(splits) == 3 and all(type(x) is int and x > 0 for x in splits) else [None] * 3
     if (_best.get(key) or NO_TIME) <= ms:
         return False
     try:
