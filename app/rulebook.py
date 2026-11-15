@@ -213,6 +213,7 @@ class SpinRule(_Strict):
     resume_kmh: float = Field(default=30, ge=5, le=100)
     clear_s: float = Field(default=5, ge=1, le=60)
     stopped_s: float = Field(default=5, ge=1, le=120)
+    escalate_s: float = Field(default=8, ge=0, le=300)   # a car stopped this long on the track (not in the pits) brings the VSC / FCY the server selected (never before the stop is confirmed: `stopped_s`); 0 = never. Not the slow car: only a stopped one
 
 
 class PileupRule(_Strict):
@@ -224,6 +225,8 @@ class PileupRule(_Strict):
 class SevereRule(_Strict):
     cars: int = Field(default=5, ge=2, le=50)
     escalate_to: Literal["SC"] = "SC"  # stored only; no SC implementation
+    immobile_s: float = Field(default=60, ge=0, le=900)   # a car that stays stopped this long (it cannot move: stuck in the middle of the track) brings the safety car; 0 = never
+    damage_pct: int = Field(default=80, ge=0, le=100)   # a stopped car whose own game reports this much damage (a wreck) brings the safety car at once; 0 = never
 
 
 class Neutralization(_Strict):
@@ -242,6 +245,7 @@ class Neutralization(_Strict):
     pileup: PileupRule = Field(default_factory=PileupRule)
     severe: SevereRule = Field(default_factory=SevereRule)
     stale_telemetry_s: float = Field(default=1.5, gt=0, le=10)
+
 
 class Rulebook(_Strict):
     schema_version: Literal[1] = SCHEMA_VERSION

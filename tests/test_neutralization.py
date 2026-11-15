@@ -554,7 +554,7 @@ def test_manual_green_cancels_sc_and_cooldown_prevents_chain(monkeypatch):
     assert rc.caution is None and rc.caution_lap(4, {}, 1008) is None
     for t in range(8, 23):
         feed(t, 180 if t < 11 else 0)
-    assert rc.flag == "green"
+    assert rc.flag == "vsc" and rc.pace_car_state()["mode"] != "lead", "no second safety car (the cooldown): a car stopped again for 8 s brings the VSC"
 
 
 

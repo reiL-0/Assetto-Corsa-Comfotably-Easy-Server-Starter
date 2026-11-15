@@ -344,3 +344,31 @@ Las asignaciones externas de reglas/kill switches/pace/configuración y formaci�
 se capturan en `context` antes de cada entrada; incluye `flag_modes` del monitor.
 Nombres, GUIDs, propiedad de sanciones y persistencia HTTP no se reproducen: el
 monitor ya transforma cambios de propietario en give_back_forgive grabado.
+
+
+## Coche parado, destrozado o inmóvil: VSC / FCY / Safety Car (fase 7)
+
+Solo sin NASCAR armado, en carrera, con `mode` en `live` (en `shadow` solo se registra). Un coche cuenta como **parado** si se movió (≥ 30 km/h), está a ≤ 5 km/h y no está en boxes; cada
+etapa sale **una sola vez por parada** y se reinicia cuando el coche vuelve a moverse (dos lecturas frescas):
+
+| Etapa (`decision.kind`) | Condición | Resultado |
+|---|---|---|
+| `spin` | parado `spin.stopped_s` (5 s) | decisión local, sin bandera (como antes) |
+| `stopped` | parado `spin.escalate_s` (8 s; nunca antes de `stopped_s`; 0 = nunca) | **VSC o FCY**: `mode_by_category[category]`, si no `default_mode` |
+| `wreck` | parado ≥ `stopped_s` **y** daño fresco del hub ≥ `severe.damage_pct` (80; 0 = nunca) | **Safety Car** de inmediato |
+| `immobile` | parado `severe.immobile_s` (60 s; 0 = nunca) | **Safety Car** (la VSC/FCY ya activa se retira como en cualquier SC) |
+
+Reglas: el SC reutiliza la ruta de «accidente muy grave» (pace car con telemetría fresca, `_sc_cooldown_until`, sin pace car avisa «SC recomendado, sácalo a mano»); un `wreck` y un `immobile` del mismo
+coche no sacan dos SC. El daño es el que reporta el hub (el «disco naranja»); **no se usa la velocidad de contacto** (su unidad no está verificada). Se permite en la vuelta 1; no en formación, roja
+ni boxes (`racing`).
+
+**El coche lento (`slow_car`) nunca saca bandera y ya no cuenta para el choque múltiple ni para el «grave»**: en la auditoría de producción de 7–14 nov sus 50 decisiones tenían una velocidad
+mediana de 79 km/h (pilotos lentos, no averiados) y contaban como coches de un choque múltiple.
+
+**Calibración** (`ops/calibrate_neutralization.py events.jsonl [...] --escalate-s 8 --immobile-s 60`): con la auditoría de OPR del 7–14 nov (9 horas de sesión, casi todo pruebas de 1–7 coches), las 15
+paradas confirmadas duraron entre 9 s y 1025 s (mediana ≈ 20 s) → con los valores por defecto habrían salido 15 VSC/FCY y 4 SC (1 SC con `immobile_s = 90`). Los datos no distinguen entre 5 y 10 s
+de `escalate_s`. Faltan carreras reales con parrilla completa (y las de Grid Racing, cuyo manager no guarda auditoría): para el daño y el choque fuerte hace falta una cinta continua
+(`ACM_FIELD_RECORD_SERVERS`, `ops/replay_field.py`).
+
+Sin migraciones ni cambios de ruta HTTP: son campos nuevos con valor por defecto en `SpinRule` / `SevereRule`, así que un reglamento guardado antes valida y toma los valores por defecto. Con el
+`mode` por defecto (`live`) el comportamiento cambia en cuanto se despliega.
