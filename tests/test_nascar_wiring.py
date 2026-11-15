@@ -1339,8 +1339,8 @@ def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the
     lap(4, 5)
     assert winners() == [], 'ten minutes have not passed'
     client.session_t0 = time.time() - 601
-    lap(4, 6)
-    assert winners() == ['GANADOR: Beto'], 'a timed race: the first to cross after the time'
+    client._apply({'type': 'lap_completed', 'car_id': 4, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 6, 'laptime_ms': 1000}, {'car_id': 4, 'laps': 5, 'laptime_ms': 1000}]})
+    assert winners() == ['GANADOR: Ana'], 'a timed race: the leader, even when a lapped car is the first to cross after the time (tests/test_winner_leader.py replays real races)'
     client.session = {'session_type': 2, 'laps': 0, 'time_min': 10}; client.winner_done = False; live_rc._states.clear()
     lap(4, 7)
     assert winners() == [], 'only a race has a winner'
