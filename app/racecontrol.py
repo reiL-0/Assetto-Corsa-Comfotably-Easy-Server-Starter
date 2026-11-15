@@ -1077,6 +1077,16 @@ def _mark_finish(server_id: int, laps: int, inst) -> None:
         log.exception("could not write the finish marker of server %s", server_id)
 
 
+def race_leader(event: dict, pace: int | None = None) -> int:
+    """The car with the most laps in a lap event's leaderboard (the safety car does not race). A tie goes to the first row of those tied (acServer lists the cars in race order: the one that reached that lap first; the car that just crossed is the last to get there)."""
+    rows = [r for r in event["leaderboard"] if r["car_id"] != pace]
+    if not rows:
+        return event["car_id"]
+    top = max(r["laps"] for r in rows)
+    tied = [r["car_id"] for r in rows if r["laps"] == top]
+    return tied[0]
+
+
 def plain_winner(client, event: dict) -> None:
     """A race without NASCAR: the winner is the first car to cross the line after the end (the distance in laps, or the time of a timed race), as AC itself ranks it (laps, then time)."""
     s = client.session
@@ -1087,10 +1097,13 @@ def plain_winner(client, event: dict) -> None:
     over = (row is not None and row["laps"] >= goal) if goal else (bool(s.get("time_min")) and time.time() - client.session_t0 >= s["time_min"] * 60)
     if not over:
         return
-    client.winner_done = True
     rc = state_of(client.server_id, True, s, create=True)
-    name = client.cars.get(event["car_id"], {}).get("driver_name") or f"#{event['car_id']}"
-    log.info("winner: car %s (%s)", event["car_id"], name)
+    if event["car_id"] == rc.pace_car:
+        return   # (the safety car crossing the line ends nothing)
+    client.winner_done = True
+    win = race_leader(event, rc.pace_car)   # (not the car that crossed: in a timed race a lapped car can be the first over the line after the time)
+    name = client.cars.get(win, {}).get("driver_name") or f"#{win}"
+    log.info("winner: car %s (%s), crossing car %s", win, name, event["car_id"])
     rc.notify(f"GANADOR: {name}", "winner", hold="winner")
 
 
