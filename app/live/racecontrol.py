@@ -1063,17 +1063,23 @@ class RaceControl:
                                telemetry_age_s={c: mono - samples[c].stamp for c in stale}, executed=False)
                     self._audit_gate = gate
                 self._spin_clear_tick(samples, speeds, in_pit, connected, mono, now, mode)
-                decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode})
+                fresh_damage = {c: level for c, (level, at) in self.damage.items() if now - at <= DAMAGE_FRESH_S}   # (a wreck: the hub's own report of its damage, recent)
+                decision = self.neutralization_watch.step(mono, samples, speeds, in_pit, racing, {**rule, "mode": mode}, fresh_damage)
                 if decision:
-                    if decision["kind"] == "spin":
-                        for c in decision["cars"]:
+                    if decision["kind"] in ("spin", "stopped", "wreck", "immobile"):   # (a stopped car: its end is judged the same whichever step of the stop we are at)
+                        for c in [*decision["cars"], *decision.get("spin_cars", ())]:
                             sample = samples[c]
-                            self._spins[c] = {"generation": sample.generation, "since": None, "last": mono}
+                            if decision["kind"] == "spin" or c in decision.get("spin_cars", ()) or c not in self._spins:
+                                self._spins[c] = {"generation": sample.generation, "since": None, "last": mono}
                     category = rule.get("category", "")
                     target = "local"
                     if decision["kind"] == "pileup":
                         target = rule["mode_by_category"].get(category, rule.get("default_mode", rule["pileup"]["escalate_to"]))
-                    if len(decision["events"]) >= rule["severe"]["cars"]:
+                    elif decision["kind"] == "stopped":   # a car stopped on the track: the VSC / FCY this server selected (its category's, else the default)
+                        target = rule["mode_by_category"].get(category, rule.get("default_mode", "VSC"))
+                    elif decision["kind"] in ("wreck", "immobile"):   # a wreck, or a car that cannot move: the safety car
+                        target = "SC"
+                    if decision["kind"] in ("spin", "pileup") and len(decision["events"]) >= rule["severe"]["cars"]:
                         target = "SC"
                         decision["cars"] = sorted(decision["events"])
                     self.autoflags.log.append({**decision, "op": "open", "decision": target, "mode": mode,
@@ -1097,7 +1103,7 @@ class RaceControl:
                         actions = self.set_flag("yellow", now=now, source="incident", field=field)
                         self._neutralization_sc = True
                         self.audit("neutralization_applied", **evidence, executed=True)
-                        self.notify("SAFETY CAR AUTOMÁTICO: accidente muy grave", "flag")
+                        self.notify({"wreck": "SAFETY CAR AUTOMÁTICO: choque grave", "immobile": "SAFETY CAR AUTOMÁTICO: coche inmovilizado en pista"}.get(decision["kind"], "SAFETY CAR AUTOMÁTICO: accidente muy grave"), "flag")
                         return None, actions
                     if mode == "live" and target in ("VSC", "FCY") and self.flag in ("green", "white"):
                         v = rule.get("vsc")   # how this server runs a VSC / FCY (Reglas del servidor); an old rule without it keeps the pace car's speed and the defaults
@@ -1518,6 +1524,7 @@ class RaceControl:
         with _lock:
             self.red_laps.pop(car, None)
             self.red_near.discard(car)
+            self.damage.pop(car, None)   # (the slot may be somebody else's now: the next driver does not inherit the damage of the last one, not for the orange disc nor for a wreck)
             self._pitspeed_at.pop(car, None); self._pitspeed_lap.pop(car, None); self._laps_of.pop(car, None)   # (the slot may be somebody else's now: his first pit-lane offence is not forgiven by the one before)
             self._visit_start.pop(car, None); self._visit_stopped.discard(car)   # (nor does he inherit a pit-lane visit, or a stop in it)
 

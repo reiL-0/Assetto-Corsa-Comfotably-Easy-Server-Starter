@@ -133,11 +133,13 @@ class NeutralizationWatch:
         self.flagged = set()
         self.recovered = {}  # car -> consecutive fresh recovered samples
         self.last_pileup = None  # (time, involved cars), suppress overlapping incidents within the window
+        self.emitted = {}  # car -> the escalations already said for its CURRENT stop ("stopped" -> VSC / FCY, "wreck" / "immobile" -> safety car): each once per stop
 
-    def step(self, now, samples, speeds, in_pit, racing, rule):
+    def step(self, now, samples, speeds, in_pit, racing, rule, damage=None):
+        """`damage`: car -> the damage % its own game reported recently (fresh ones only). Returns the decision of this look or None: spin / slow_car / pileup as before, plus the escalations of a car that stays stopped."""
         if not racing or rule.get("mode", "off") == "off":
             self.state.clear(); self.events.clear(); self.flagged.clear()
-            self.recovered.clear(); self.last_pileup = None
+            self.recovered.clear(); self.last_pileup = None; self.emitted.clear()
             return None
         fresh = {c: s for c, s in samples.items() if c not in in_pit
                  and 0 <= now - s.stamp <= rule["stale_telemetry_s"]
@@ -145,8 +147,8 @@ class NeutralizationWatch:
         for c in list(self.state):
             if c not in fresh:
                 self.state.pop(c); self.events.pop(c, None); self.flagged.discard(c)
-                self.recovered.pop(c, None)
-        new = []
+                self.recovered.pop(c, None); self.emitted.pop(c, None)
+        new, slow_new, esc = [], [], {}
         for c, sample in fresh.items():
             v = speeds[c]
             identity = (sample.generation, sample.epoch)
@@ -154,7 +156,7 @@ class NeutralizationWatch:
             if st is None or st[0] != identity or sample.stamp - st[1] > rule["stale_telemetry_s"]:
                 st = [identity, sample.stamp, False, None, None]
                 self.events.pop(c, None); self.flagged.discard(c)
-                self.recovered.pop(c, None)
+                self.recovered.pop(c, None); self.emitted.pop(c, None)
                 self.state[c] = st
             elif sample.stamp <= st[1]:
                 continue
@@ -173,26 +175,57 @@ class NeutralizationWatch:
                 self.recovered[c] = min(RECOVERY_TICKS, self.recovered.get(c, 0) + 1)
                 if self.recovered[c] >= RECOVERY_TICKS:
                     self.flagged.discard(c)
+                    self.emitted.pop(c, None)   # (it moved again: a later stop is a new one)
             else:
                 self.recovered.pop(c, None)
-            if kind and c not in self.flagged:
+            if stopped and st[3] is not None:   # the escalations of a car that stays stopped: each once per stop (the highest wins when several are due at once)
+                held, done = sample.stamp - st[3], self.emitted.get(c, ())   # (marked only when its decision is returned below: one that loses this step to a higher one is still due at the next)
+                sc_after, sc_dmg = rule["severe"].get("immobile_s", 0), rule["severe"].get("damage_pct", 0)
+                if "sc" not in done and sc_dmg and (damage or {}).get(c, 0) >= sc_dmg and held >= rule["spin"]["stopped_s"]:
+                    esc[c] = ("wreck", st[3])
+                elif "sc" not in done and sc_after and held >= sc_after:
+                    esc[c] = ("immobile", st[3])
+                elif "stopped" not in done and rule["spin"].get("escalate_s", 0) and held >= max(rule["spin"]["escalate_s"], rule["spin"]["stopped_s"]):
+                    esc[c] = ("stopped", st[3])
+            if kind == "slow_car":   # a slow driver is no incident that brings a flag: it is reported (local) and never counts for a pile-up or a severe one
+                if c not in self.flagged:
+                    self.flagged.add(c); slow_new.append(c)
+            elif kind and c not in self.flagged:
                 self.flagged.add(c)
                 # Retain the original evidence: recovery cannot restart an incident's window.
                 if c not in self.events or now - self.events[c][0] > rule["pileup"]["window_s"]:
                     self.events[c] = (now, kind)
                     new.append(c)
         self.events = {c: e for c, e in self.events.items() if c in fresh and now - e[0] <= rule["pileup"]["window_s"]}
+        def spin_or_pileup():   # what the spins confirmed in this look are: a spin, or (enough cars within the window) a pile-up, severe or not
+            cars = sorted(self.events)
+            pileup = len(cars) >= rule["pileup"]["cars"]
+            if pileup:
+                if (self.last_pileup is not None
+                        and now - self.last_pileup[0] <= rule["pileup"]["window_s"]
+                        and self.last_pileup[1].intersection(cars)
+                        and not (len(self.last_pileup[1]) < rule["severe"]["cars"] <= len(cars))):
+                    return None
+                self.last_pileup = (now, set(cars))
+            return {"kind": "pileup" if pileup else self.events[new[0]][1], "cars": cars if pileup else new,
+                    "speeds": {c: speeds[c] for c in cars}, "window_s": rule["pileup"]["window_s"], "t": now,
+                    "events": {c: {"t": self.events[c][0], "kind": self.events[c][1]} for c in cars}}
+
+        if esc:   # a car that stays stopped: the safety car outranks the VSC / FCY, which outranks the local decisions
+            kind = next((k for k in ("wreck", "immobile", "stopped") if any(v[0] == k for v in esc.values())))
+            if kind == "stopped" and new:   # a pile-up confirmed in this same look outranks the VSC step (which stays due: its car is still stopped, and it only acts under green)
+                pile = spin_or_pileup()
+                if pile and pile["kind"] == "pileup":
+                    return pile
+            cars = sorted(c for c, v in esc.items() if v[0] == kind)
+            for c in cars:   # an SC also settles the VSC / FCY of that stop
+                self.emitted.setdefault(c, set()).update(("sc", "stopped") if kind in ("wreck", "immobile") else ("stopped",))
+            return {"kind": kind, "cars": cars, "speeds": {c: speeds[c] for c in cars}, "window_s": rule["pileup"]["window_s"], "t": now,
+                    "events": {c: {"t": esc[c][1], "kind": kind} for c in cars},
+                    "spin_cars": [c for c in new if c not in cars]}   # (spins confirmed in the same look: they are still judged to their end)
+        if not new and slow_new:
+            return {"kind": "slow_car", "cars": slow_new, "speeds": {c: speeds[c] for c in slow_new}, "window_s": rule["pileup"]["window_s"], "t": now,
+                    "events": {c: {"t": now, "kind": "slow_car"} for c in slow_new}}
         if not new:
             return None
-        cars = sorted(self.events)
-        pileup = len(cars) >= rule["pileup"]["cars"]
-        if pileup:
-            if (self.last_pileup is not None
-                    and now - self.last_pileup[0] <= rule["pileup"]["window_s"]
-                    and self.last_pileup[1].intersection(cars)
-                    and not (len(self.last_pileup[1]) < rule["severe"]["cars"] <= len(cars))):
-                return None
-            self.last_pileup = (now, set(cars))
-        return {"kind": "pileup" if pileup else self.events[new[0]][1], "cars": cars if pileup else new,
-                "speeds": {c: speeds[c] for c in cars}, "window_s": rule["pileup"]["window_s"], "t": now,
-                "events": {c: {"t": self.events[c][0], "kind": self.events[c][1]} for c in cars}}
+        return spin_or_pileup()
