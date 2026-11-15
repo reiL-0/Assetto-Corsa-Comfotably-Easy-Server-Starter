@@ -90,7 +90,8 @@ def test_an_uploaded_track_keeps_its_pit_entry_though_its_ai_folder_is_cut(tmp_p
     assert r.status_code == 201, r.text
     installed = content._tracks_dir() / "pe_track"
     assert not (installed / "gp" / "ai").exists(), "the AI lines are not part of the server pack"
-    assert 0.60 <= pitentry.read(installed, "gp") <= 0.64, "but the pit entry worked out from them stays, for the hub's warning before the pit lane"
+    assert 0.60 <= pitentry.read("pe_track", "gp") <= 0.64, "but the pit entry worked out from them stays, for the hub's warning before the pit lane"
+    assert list(installed.rglob("pit_entry*")) == [], "kept in the manager's data folder, not in the track (its folders are hashed and offered to the drivers)"
 
 
 def test_detect_kind_says_nothing_when_it_is_not_clear(tmp_path):

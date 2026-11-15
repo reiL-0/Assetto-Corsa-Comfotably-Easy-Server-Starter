@@ -2,7 +2,15 @@
 import json
 import struct
 
+import pytest
+
 from app import pitentry
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
 
 
 def _ai(path, pts):
@@ -30,18 +38,20 @@ def test_the_entry_is_where_the_pit_axis_leaves_the_racing_line_and_it_is_saved_
     assert entry is not None and 0.60 <= entry <= 0.64, entry
     (tmp_path / "glen" / "skins").mkdir()   # (a folder that is not a layout is left alone)
     assert pitentry.write_all(tmp_path / "glen") == 1
-    assert json.loads((lay / "data" / "pit_entry.json").read_text()) == {"entry": entry}
-    assert pitentry.read(tmp_path / "glen", "gp") == entry and pitentry.read(tmp_path / "glen", "other") is None
+    assert json.loads(pitentry.store_path("glen", "gp").read_text()) == {"entry": entry}
+    assert list((tmp_path / "glen").rglob("pit_entry*")) == [], "nothing is written inside the track: its folders are hashed, sealed and offered to the drivers"
+    assert pitentry.read("glen", "gp") == entry and pitentry.read("glen", "other") is None
 
 
 def test_files_that_are_not_ai_lines_give_no_entry_and_a_saved_value_out_of_range_is_not_read(tmp_path):
     lay = _track(tmp_path / "t")
     (lay / "ai" / "pit_lane.ai").write_bytes(b"not an ai file at all")
     assert pitentry.entry_of(lay) is None and pitentry.write_all(tmp_path / "t") == 0
-    (lay / "data" / "pit_entry.json").write_text('{"entry": 7}')
-    assert pitentry.read(tmp_path / "t", "gp") is None
-    (lay / "data" / "pit_entry.json").write_text('{"entry": "x"}')
-    assert pitentry.read(tmp_path / "t", "gp") is None
+    dest = pitentry.store_path("t", "gp")
+    dest.parent.mkdir(parents=True)
+    for bad in ('{"entry": 7}', '{"entry": "x"}', '{"entry": true}', '{"entry": -0.1}', "[1]", "not json", "[" * 5000, '{"entry": 0.5, "pad": "' + "x" * 400 + '"}'):
+        dest.write_text(bad)
+        assert pitentry.read("t", "gp") is None, bad[:30]
 
 
 def test_the_race_state_hands_the_entry_to_the_hub_with_the_limit():
@@ -51,3 +61,37 @@ def test_the_race_state_hands_the_entry_to_the_hub_with_the_limit():
     assert rc.snapshot()["pit_limit"] == {"limit_kmh": 80, "tolerance_kmh": 5}, "not known: the hub learns it"
     rc.pit_entry = 0.6123
     assert rc.snapshot()["pit_limit"] == {"limit_kmh": 80, "tolerance_kmh": 5, "entry": 0.6123}
+
+
+def test_a_layout_with_spaces_in_its_name_works_and_a_small_entry_is_rounded_to_plain_decimals(tmp_path):
+    _track(tmp_path / "vir", "full course")   # (VIR: «full course»: the hub's session says track=vir, config=full course)
+    assert pitentry.write_all(tmp_path / "vir") == 1
+    assert pitentry.read("vir", "full course") is not None
+    dest = pitentry.store_path("vir", "full course")
+    dest.write_text('{"entry": 0.00001}')   # (json writes small numbers as 1e-05: the hub's Lua pattern would read it as 1)
+    assert pitentry.read("vir", "full course") == 0.0
+    dest.write_text('{"entry": 0.90214}')
+    assert pitentry.read("vir", "full course") == 0.9021
+
+
+@pytest.mark.parametrize("track, config", [("..", "gp"), ("a/b", ""), ("t", "../x"), ("t", "a/b"), ("", "gp"), (".hidden", ""), ("t\\u0000", "")])
+def test_a_name_that_could_be_a_path_has_no_place_to_be_saved_or_read(track, config):
+    assert pitentry.store_path(track, config) is None and pitentry.read(track, config) is None
+
+
+def test_ai_files_are_limited_in_size_and_in_points(tmp_path):
+    lay = _track(tmp_path / "big")
+    (lay / "ai" / "fast_lane.ai").write_bytes(struct.pack("<4i", 7, 2_000_000, 0, 0) + b"\0" * 40_000_040)   # (the header lies: millions of points)
+    assert pitentry.entry_of(lay) is None
+    (lay / "ai" / "fast_lane.ai").write_bytes(struct.pack("<4i", 7, 10, 0, 0) + b"\0" * (pitentry.MAX_BYTES + 1))   # (and a file over the size limit)
+    assert pitentry.entry_of(lay) is None
+
+
+def test_two_different_pairs_never_share_a_file_and_the_entry_never_rounds_up_to_one(tmp_path):
+    assert pitentry.store_path("a__b", "c") != pitentry.store_path("a", "b__c")
+    _track(tmp_path / "vir", "gp")
+    pitentry.write_all(tmp_path / "vir")
+    dest = pitentry.store_path("vir", "gp")
+    assert not list(dest.parent.glob("*.tmp")), "the temporary file of the atomic write is gone"
+    dest.write_text('{"entry": 0.99999}')
+    assert pitentry.read("vir", "gp") == 0.9999

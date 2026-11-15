@@ -711,9 +711,9 @@ def refresh_pit_limit(rc, server_id: int) -> None:
     entry = None
     session = rc.session_ref if isinstance(rc.session_ref, dict) else {}
     track, config = str(session.get("track") or ""), str(session.get("track_config") or "")
-    if limit and re.fullmatch(r"[\w.\-]+", track) and re.fullmatch(r"[\w.\-]*", config) and ".." not in track + config:   # (names from the server's own session, still never a path)
-        from app import content, pitentry
-        entry = pitentry.read(content._tracks_dir() / track, config)
+    if limit:
+        from app import pitentry
+        entry = pitentry.read(track, config)   # (it checks the names: from the server's own session, still never a path)
     with _lock:
         if gen == rc.pit_limit_gen:   # (not when the director saved a new limit while this was reading)
             rc.pit_limit = limit

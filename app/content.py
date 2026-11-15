@@ -290,7 +290,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
             if dest_parent == _tracks_dir():
                 try:
                     from app import pitentry
-                    pitentry.write_all(top)   # (before the cut: `ai/` does not stay on the server, the pit entry worked out from it does, in each layout's data/)
+                    pitentry.write_all(top)   # (before the cut: `ai/` does not stay on the server, the pit entry worked out from it does: in the manager's data folder, never in the track)
                 except Exception:
                     import logging
                     logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
