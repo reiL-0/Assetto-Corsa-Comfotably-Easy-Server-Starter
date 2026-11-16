@@ -45,8 +45,8 @@ class PaceDeltaJudge:
         judging started. Empty when the judge has not looked at that flag yet (a flag that ended before the first look must not inherit what the one before left)."""
         return {} if flag_id != self._flag else {car: (c["generation"], c["real"]) for car, c in self._car.items()}
 
-    def step(self, now: float, flag_id: int, active: bool, pace: float, band: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int]) -> list[dict]:
-        """`active`: a VSC/FCY whose grace is over. `pace` and `band`: the pace and the tolerance, km/h. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""
+    def step(self, now: float, flag_id: int, active: bool, pace: float, band: float, samples: dict[int, Sample], speeds: dict[int, float], in_pit: set[int], punish_from: float = float("-inf")) -> list[dict]:
+        """`active`: a VSC/FCY being run (the delta runs from the deployment, so a screen can show it). `punish_from`: the instant (clock of the samples' stamp) the grace ends: nothing is judged, and `real` does not count, before it; a car is only in breach while it is still GAINING on the virtual car (above pace + band), a debt carried at the legal speed is not an offence. `pace` and `band`: the pace and the tolerance, km/h. -> the NEW breaches [{car, generation, speed_kmh, delta_s}]."""
         if not active or not pace or pace <= 0:
             self._car.clear()
             return []
@@ -69,11 +69,13 @@ class PaceDeltaJudge:
                 continue   # the same packet again
             eff = v if v <= pace else pace if v <= pace + band else v - band   # (the dead band: pace .. pace + band counts as the pace)
             step_s = (s.stamp - st["t"]) * (1.0 - eff / pace)
+            after = (s.stamp - max(st["t"], punish_from)) / (s.stamp - st["t"])   # the share of this interval that lies after the grace's end: 0 = all inside it, 1 = all after
             st["delta"] = min(self.credit_s, st["delta"] + step_s)
-            st["real"] += step_s   # (no credit limit: what the car has gained or lost over the whole flag)
+            if after > 0:
+                st["real"] += step_s * after   # (no credit limit: what the car has gained or lost since the grace ended)
             st["t"] = s.stamp
             key = (flag_id, car, s.generation)
-            if st["delta"] < -self.tol_s and key not in self._judged:
+            if st["delta"] < -self.tol_s and step_s < 0 and after >= 1.0 and key not in self._judged:   # (step_s < 0: still gaining time on the virtual car)
                 self._judged.add(key)
                 d = {"car": car, "generation": s.generation, "speed_kmh": round(v), "delta_s": round(st["delta"], 2)}
                 out.append(d)

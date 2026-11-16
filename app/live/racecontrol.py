@@ -1747,10 +1747,10 @@ class RaceControl:
                 if prof is not None:
                     for d in self.deltajudge.feed(mono, self.vsc_id, delta_on, since, car, s.generation, prof, events, car in in_pit, self.vsc_penalty.get("warnings"), punish_from):
                         found.append({**d, "kind": "delta", "speed_kmh": round(speeds.get(car) or 0)})
-            active = self.flag in SLOWING and bool(self.pace_kmh) and now >= self.grace_end
+            active = self.flag in SLOWING and bool(self.pace_kmh)   # (the speed delta runs from the deployment too: only the punishment waits for the grace, `punish_from`)
             # every car is judged by a delta: by sectors when its model has a reference lap, else by its own speed against a virtual car at the limit
             nolap = {c: s for c, s in samples.items() if c != pc and self.vsc_profiles.get(models.get(c)) is None and self.flag != "vsc"}   # (a VSC is judged by delta only: a car with no reference lap is not sanctioned for its speed; the FCY has no reference laps, its speed is the delta)
-            found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, self.pace_kmh or 0, self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit)]
+            found += [{**d, "kind": "delta"} for d in self.pacedelta.step(mono, self.vsc_id, active, self.pace_kmh or 0, self.tolerance_kmh, nolap, {c: v for c, v in speeds.items() if c in nolap}, in_pit, punish_from)]
             for t in self.deltajudge.take_trail():
                 self.audit("delta_sector", flag=self.flag, vsc=self.vsc_id, executed=False, **t)   # (one flat event per sector a car finished, with the delta the judge held: a list would be cut by raceaudit's 32 items / 256 nodes)
             if not found:
