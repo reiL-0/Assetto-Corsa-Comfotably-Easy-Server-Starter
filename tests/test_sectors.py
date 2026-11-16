@@ -452,3 +452,39 @@ def test_a_sector_that_ended_inside_the_grace_is_not_judged_even_if_its_packet_i
     first = next(n for n, k in enumerate(strikes) if k)
     assert first >= 2 and not any(strikes[:first]) and strikes[-1] > 0, "sectors that ended before the grace's end carry no strike; the first one after it does: " + str(strikes)
     assert [d["level"] for d in _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, seconds=40.0, punish_from=1e9)] == [], "a grace that never ends holds every breach back"
+
+
+def test_an_fcy_runs_its_delta_from_the_deployment_and_only_punishes_who_is_still_gaining_after_the_grace():
+    from app.live.field import Sample
+    from app.live.pacejudge import PaceDeltaJudge
+
+    def drive(j, v, t0, secs, punish_from):
+        out, t = [], t0
+        for _ in range(round(secs * 5)):
+            t += 0.2
+            out += j.step(t, 1, True, 65.0, 5.0, {1: Sample(0.5, 1, 0, t, 0.0)}, {1: v}, set(), punish_from)
+        return t, out
+
+    j = PaceDeltaJudge()
+    t, out = drive(j, 160.0, 0.0, 10.0, punish_from=20.0)   # braking late inside the grace: far under -tol, and nobody is judged
+    assert out == [] and j.state(1)["delta"] < -0.2 and j.totals(1)[1][1] == 0.0, "the delta runs and shows, the total that proposes the severe penalty does not count the grace"
+    t, out = drive(j, 65.0, t, 20.0, punish_from=20.0)   # the grace ends and he is at the pace, still in debt: no offence
+    assert out == [] and j.state(1)["delta"] < -0.2, "a debt held at the legal speed is not punished"
+    t, out = drive(j, 160.0, t, 3.0, punish_from=20.0)   # ... but going quick again after the grace is
+    assert len(out) == 1 and out[0]["car"] == 1, out
+
+
+def test_an_fcy_interval_that_crosses_the_end_of_the_grace_counts_only_its_part_after_it():
+    from app.live.field import Sample
+    from app.live.pacejudge import PaceDeltaJudge
+
+    j = PaceDeltaJudge()
+    s = lambda t: {1: Sample(0.5, 1, 0, t, 0.0)}
+    assert j.step(9.8, 1, True, 65.0, 0.0, s(9.8), {1: 200.0}, set(), 10.0) == []   # (the first sample only anchors the car)
+    out = j.step(10.0, 1, True, 65.0, 0.0, s(10.0), {1: 200.0}, set(), 10.0)   # 0.2 s, all of it inside the grace (it ends at 10.0)
+    assert out == [] and j.totals(1)[1][1] == 0.0, "the grace's last interval is not judged and does not count"
+    j2 = PaceDeltaJudge()
+    j2.step(9.9, 1, True, 65.0, 0.0, s(9.9), {1: 200.0}, set(), 10.0)
+    assert j2.step(10.1, 1, True, 65.0, 0.0, s(10.1), {1: 200.0}, set(), 10.0) == [], "an interval that straddles the end is not a breach yet"
+    assert j2.totals(1)[1][1] < 0 and j2.totals(1)[1][1] > -0.2 * 2.1, "only the half after the grace counts"
+    assert len(j2.step(10.3, 1, True, 65.0, 0.0, s(10.3), {1: 200.0}, set(), 10.0)) == 1, "the next full interval is"
