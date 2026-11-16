@@ -69,12 +69,12 @@ def test_the_best_clean_lap_per_model_becomes_the_profile_and_dirty_laps_do_not_
     assert hole_r.best == {}, "a lap with a hole is not a reference"
 
 
-def _vsc(judge, clock, car, prof, speed_at, flag=1, seconds=120.0, gen=0, active=True, in_pit=False, t0=0.0, p0=0.3, since=0.0, skip=(), need=None):
+def _vsc(judge, clock, car, prof, speed_at, flag=1, seconds=120.0, gen=0, active=True, in_pit=False, t0=0.0, p0=0.3, since=0.0, skip=(), need=None, punish_from=float("-inf")):
     out = []
     t, p, i = t0, p0, 0
     while t - t0 < seconds:
         if i not in skip:
-            out += judge.feed(t, flag, active, since, car, gen, prof, clock.observe(car, p, t, 1, gen), in_pit, need)
+            out += judge.feed(t, flag, active, since, car, gen, prof, clock.observe(car, p, t, 1, gen), in_pit, need, punish_from)
         p += speed_at(p) / 5.0 / L
         t += 0.2
         i += 1
@@ -230,9 +230,9 @@ def test_the_start_of_the_judging_is_latched_once_and_a_green_drops_partial_laps
     models = {1: "gt3"}
     _field(rc, {1: speed}, 0.0, 300.0, models)
     rc.set_flag("vsc", 80, grace_s=5, now=1000.0)
-    rc.pace_tick({1: Sample(0.5, 1, 0, 500.0, 0.0)}, {1: 100.0}, 500.0, 1006.0, models)   # the grace ended 1 s ago
+    rc.pace_tick({1: Sample(0.5, 1, 0, 500.0, 0.0)}, {1: 100.0}, 500.0, 1006.0, models)   # deployed 6 s ago: the delta runs from the deployment, the grace (5 s) only holds the punishment back
     first = rc._since
-    assert first is not None and abs(first - 499.0) < 1e-6
+    assert first is not None and abs(first - 494.0) < 1e-6
     rc.pace_tick({1: Sample(0.51, 1, 0, 500.2, 0.0)}, {1: 100.0}, 500.2, 5000.0, models)   # the wall clock jumps forward
     assert rc._since == first, "latched: a jump of the wall clock does not move it"
     rc.set_flag("green")
@@ -411,3 +411,44 @@ def test_every_sector_the_judge_held_reaches_the_audit_as_its_own_flat_event(mon
     rc.pace_tick({}, {}, 0.0, 1000.0)
     assert [k for k, _ in seen] == ["delta_sector"] * 60 and seen[59][1]["sector"] == 59 % 20 and seen[0][1]["delta_s"] == -0.5, seen[:1]
     assert rc.deltajudge.take_trail() == []
+
+
+def test_a_debt_carried_at_the_legal_pace_is_not_punished_again_and_the_grace_only_holds_the_punishment_back():
+    ref_clock, ref = SectorClock(), RefLaps()
+    ev, _ = drive(ref_clock, 1, speed, seconds=400.0)
+    ref.feed(1, "gt3", ev, False)
+    prof = ref.profiles(1.35)["gt3"]
+    # 2026-11-14 race: two sectors too quick (the first breach), then the driver goes at the minimum pace but stays in debt for minutes: nothing more
+    out = _vsc(DeltaJudge(), SectorClock(), 3, prof, lambda p: speed(p) / 1.10 if p < 0.5 else speed(p) / 1.35, seconds=200.0)
+    assert [d["level"] for d in out] == [1], out
+    # ... while one who keeps gaining time does reach the severe level
+    assert [d["level"] for d in _vsc(DeltaJudge(), SectorClock(), 3, prof, lambda p: speed(p) / 1.10, seconds=120.0)] == [1, 2]
+    # the grace: the delta runs from the deployment (a screen can show it) but nobody is judged
+    j = DeltaJudge()
+    assert _vsc(j, SectorClock(), 3, prof, lambda p: speed(p) / 1.10, seconds=60.0, punish_from=float("inf")) == []
+    assert j.state(3)["delta"] < -1.0 and j.state(3)["strikes"] == 0, j.state(3)
+
+
+def test_the_delta_block_hints_the_average_speed_of_the_minimum_lap_when_the_track_length_is_known():
+    from app.live.racecontrol import RACE_TYPE, RaceControl
+
+    rc = RaceControl({"session_type": RACE_TYPE})
+    rc.set_flag("vsc", 60, grace_s=5, now=1000.0)
+    rc.vsc_profiles = {"gt3": [5000] * 20}   # a 100 s minimum lap
+    assert "avg_kmh" not in rc.delta_block("gt3"), "no length of the track, no hint"
+    rc.reflaps.track_m = 3000.0
+    assert rc.delta_block("gt3")["avg_kmh"] == 108 and len(rc.delta_block("gt3")["min_ms"]) == 20
+
+
+def test_a_sector_that_ended_inside_the_grace_is_not_judged_even_if_its_packet_is_processed_after_it():
+    ref_clock, ref = SectorClock(), RefLaps()
+    ev, _ = drive(ref_clock, 1, speed, seconds=400.0)
+    ref.feed(1, "gt3", ev, False)
+    prof = ref.profiles(1.35)["gt3"]
+    fast = lambda p: speed(p) / 1.10
+    j = DeltaJudge()
+    _vsc(j, SectorClock(), 3, prof, fast, seconds=40.0, punish_from=12.0)   # the grace ends at t = 12 s on the clock of the crossings
+    strikes = [x["strikes"] for x in j.take_trail()]
+    first = next(n for n, k in enumerate(strikes) if k)
+    assert first >= 2 and not any(strikes[:first]) and strikes[-1] > 0, "sectors that ended before the grace's end carry no strike; the first one after it does: " + str(strikes)
+    assert [d["level"] for d in _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, seconds=40.0, punish_from=1e9)] == [], "a grace that never ends holds every breach back"

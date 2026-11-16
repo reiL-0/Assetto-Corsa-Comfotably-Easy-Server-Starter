@@ -6,7 +6,7 @@ Three small pieces of plain state, no I/O, fed by `RaceControl.sector_tick` from
   * `RefLaps`      watches the green racing and keeps, per car model, the sector times of the fastest CLEAN lap (every boundary seen, no pit lane, no hole). When a VSC starts, `profiles(factor)` freezes
     the minimum time per sector (factor x the best: 1.35 as in F1, a little over a third slower) for every model that has a lap; a model without one is judged by the fixed pace instead.
   * `DeltaJudge`   during a VSC, for a complete sector driven after the judging started: delta = min(credit, delta + time - minimum). Positive is slower than needed (right). A sector that ends with delta
-    under -tol is a strike, one that ends above it clears them; `strikes` in a row are a breach, once per (flag, car, slot generation).
+    under -tol AND driven quicker than its minimum (still gaining) is a strike, any other clears them (a debt held at the legal pace is not punished again); `strikes` in a row are a breach, once per (flag, car, slot generation).
 Resolution: packets arrive at ~5 Hz, so a crossing is known to a few hundredths of a second after interpolation; the delta is cumulative, so that error does not grow (what one sector over-reads the next
 one under-reads), and `tol_s` absorbs the rest. The numbers (20 sectors, 1.35, 0.2 s, 2 strikes) are first guesses to calibrate with real races.
 """
@@ -20,6 +20,7 @@ N = 20                 # sectors per lap
 GAP_S = 0.8            # a hole between two packets of a car breaks its continuity
 MIN_LAP_S = 15.0       # a "lap" shorter than this is not a lap (a re-anchoring that looked clean)
 LOG_MAX = 100
+GAIN_MARGIN_S = 0.1    # a sector must be driven this much QUICKER than its minimum to be gaining time (packet jitter is ~0.05 s per crossing): a first guess, the delta_sector audit will say
 
 
 class SectorClock:
@@ -154,8 +155,8 @@ class DeltaJudge:
         c = self._car.get(car)
         return None if c is None else {"delta": round(c["delta"], 2), "strikes": c["strikes"]}
 
-    def feed(self, now: float, flag_id: int, active: bool, since: float, car: int, generation: int, profile: list[int] | None, events: list[tuple], in_pit: bool, need: int | None = None) -> list[dict]:
-        """`active`: a VSC whose grace is over. `since`: the instant (same clock as the crossings) from which sectors count. `profile`: the minimum ms per sector of this car's model, None = not judged here.
+    def feed(self, now: float, flag_id: int, active: bool, since: float, car: int, generation: int, profile: list[int] | None, events: list[tuple], in_pit: bool, need: int | None = None, punish_from: float = float("-inf")) -> list[dict]:
+        """`active`: a delta VSC (the delta runs from the instant it is deployed). `punish_from`: the instant (same clock as the crossings) its grace ends: a sector that ENDED before it is shown, never judged. `since`: the instant (same clock as the crossings) from which sectors count. `profile`: the minimum ms per sector of this car's model, None = not judged here.
         `need`: the warnings (sectors under the limit in a row) that make a breach (the director sets it; default 2). A breach has two levels: the first one at `need` warnings; the warnings are then spent
         (the count starts again) and `need` more in a row make the second, severe one (`level` 2). Each level once per (flag, car, slot generation).
         -> the NEW breaches [{car, generation, delta_s, strikes, level}]."""
@@ -183,7 +184,8 @@ class DeltaJudge:
                 continue   # not a complete sector driven since the judging started
             dt = t - prev[1]
             c["delta"] = min(self.credit_s, c["delta"] + dt - profile[(b - 1) % N] / 1000.0)
-            c["strikes"] = c["strikes"] + 1 if c["delta"] < -self.tol_s else 0
+            gain = dt < profile[(b - 1) % N] / 1000.0 - GAIN_MARGIN_S   # (still taking time off the virtual car: a debt carried at the legal pace is not a new offence, as a steward would not give one)
+            c["strikes"] = c["strikes"] + 1 if t >= punish_from and gain and c["delta"] < -self.tol_s else 0   # (a sector that ended inside the grace: the delta runs and is shown but nobody is judged; by the instant it ended, not by when the packet was processed)
             self.trail.append({"car": car, "sector": (b - 1) % N, "dt": round(dt, 2), "delta_s": round(c["delta"], 2), "strikes": c["strikes"]})
             key = (flag_id, car, generation)
             if c["strikes"] >= need and c["level"] < 2 and (*key, c["level"] + 1) not in self._judged:
