@@ -401,11 +401,20 @@ class RulesIn(BaseModel):
     neutralization: dict = Field(default_factory=dict)   # the automatic VSC/FCY/SC over the preset: {mode: "off", default_mode: "FCY", mode_by_category: {...}, pileup: {...}} (app/rulebook.py Neutralization; live by default)
 
 
+def _server_neutralization(s: Server) -> dict:
+    """The automatic neutralization of THIS server alone: the preset under its own settings, WITHOUT the rulebook of a league event running on it (what a server screen shows and edits: a league's value is never copied into the server)."""
+    from app import league
+    from app.rulebook import PRESETS, Neutralization
+    srules = s.rules or {}
+    preset = PRESETS.get(srules.get("preset") or "")
+    return Neutralization.model_validate(league._deep_merge(preset.neutralization.model_dump() if preset else {}, srules.get("neutralization") or {})).model_dump()
+
+
 def _rules_view(s: Server) -> dict:
     from app import league
     from app.rulebook import PRESETS
     det, _ = league.server_detectors(s)
-    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "neutralization": (s.rules or {}).get("neutralization") or {}, "effective": det.model_dump(), "effective_neutralization": league.effective_rules(s.id)["neutralization"], "presets": sorted(PRESETS)}
+    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "neutralization": (s.rules or {}).get("neutralization") or {}, "effective": det.model_dump(), "effective_neutralization": league.effective_rules(s.id)["neutralization"], "server_neutralization": _server_neutralization(s), "presets": sorted(PRESETS)}
 
 
 @router.get("/{server_id}/rules")
@@ -415,31 +424,81 @@ def get_rules(server_id: int, sess: SessionDep) -> dict:
     return _rules_view(_get(sess, server_id))
 
 
-@router.put("/{server_id}/rules")
-def set_rules(server_id: int, body: RulesIn, sess: SessionDep) -> dict:
-    """Replace this server's rules. Refused while a race is running on it (a rule must not change under the drivers); the live race control reads the new ones within 30 s."""
+def _check_rules(preset: str | None, detectors: dict, neutralization: dict) -> None:
+    """422 for what the rulebook models would not accept (the same checks for the whole-document PUT and the per-section PATCH)."""
     from pydantic import ValidationError
     from app import league
     from app.rulebook import PRESETS, Detectors, Neutralization
-    s = _get(sess, server_id)
-    if len(json.dumps(body.detectors)) > 20000 or len(json.dumps(body.neutralization)) > 5000:
+    if len(json.dumps(detectors)) > 20000 or len(json.dumps(neutralization)) > 5000:
         raise HTTPException(422, "rules too large")
-    if body.preset is not None and body.preset not in PRESETS:
-        raise HTTPException(422, f"unknown preset {body.preset!r}")
+    if preset is not None and preset not in PRESETS:
+        raise HTTPException(422, f"unknown preset {preset!r}")
     try:
-        Detectors.model_validate(league._deep_merge(PRESETS[body.preset].detectors.model_dump() if body.preset else {}, body.detectors))
-        Neutralization.model_validate(league._deep_merge(PRESETS[body.preset].neutralization.model_dump() if body.preset else {}, body.neutralization))
+        Detectors.model_validate(league._deep_merge(PRESETS[preset].detectors.model_dump() if preset else {}, detectors))
+        Neutralization.model_validate(league._deep_merge(PRESETS[preset].neutralization.model_dump() if preset else {}, neutralization))
     except ValidationError as e:
         raise HTTPException(422, str(e.errors(include_url=False, include_context=False)[:3])) from e
+
+
+def _store_rules(sess, s: Server, server_id: int, preset: str | None, detectors: dict, neutralization: dict) -> dict:
+    """Refuse during a race (a rule must not change under the drivers), save, drop the live cache."""
+    from app import league
     inst = supervisor.get(server_id)
     if inst and inst.running and inst.acsp and (inst.acsp.session or {}).get("session_type") == 3:
         raise HTTPException(409, "race in progress: the rules are frozen")
-    s.rules = {"preset": body.preset, "detectors": body.detectors, "neutralization": body.neutralization} if (body.preset or body.detectors or body.neutralization) else None
+    s.rules = {"preset": preset, "detectors": detectors, "neutralization": neutralization} if (preset or detectors or neutralization) else None
     sess.add(s)
     sess.commit()
     sess.refresh(s)
     league.invalidate_rule_cache(server_id)
     return _rules_view(s)
+
+
+@router.put("/{server_id}/rules")
+def set_rules(server_id: int, body: RulesIn, sess: SessionDep) -> dict:
+    """Replace this server's rules (the WHOLE document: what is not sent is gone; the admin screen uses PATCH). Refused while a race is running on it; the live race control reads the new ones within 30 s."""
+    s = _get(sess, server_id)
+    _check_rules(body.preset, body.detectors, body.neutralization)
+    return _store_rules(sess, s, server_id, body.preset, body.detectors, body.neutralization)
+
+
+class RulesPatch(BaseModel):
+    """What to change, by section; a key that is not sent is left as it is. `preset` (only when the key is sent; None = the defaults); `detectors` / `neutralization`: {section: its WHOLE new value} - a `null` is a value
+    too (cuts / drs: switched off on purpose, over what the preset says); `reset`: ["detectors.drs", "neutralization.pileup"] = those sections go back to the preset's / the default."""
+    preset: str | None = None
+    detectors: dict = Field(default_factory=dict)
+    neutralization: dict = Field(default_factory=dict)
+    reset: list[str] = Field(default_factory=list, max_length=40)
+
+
+def _merge_sections(old: dict, changes: dict, dropped: set[str]) -> dict:
+    out = {**(old or {}), **changes}
+    for k in dropped:
+        out.pop(k, None)
+    return out
+
+
+_rules_lock = threading.Lock()   # ponytail: one process, one lock: two PATCHes of different sections at the same moment must not lose one (read, merge, write inside it)
+
+
+@router.patch("/{server_id}/rules")
+def patch_rules(server_id: int, body: RulesPatch, sess: SessionDep) -> dict:
+    """Change SOME sections of this server's rules and keep the rest (a screen that shows one section cannot erase another's: the neutralization, the flags...). Same validation and the same freeze during a race."""
+    from app.rulebook import Detectors, Neutralization
+    s = _get(sess, server_id)
+    fields = {"detectors": Detectors.model_fields, "neutralization": Neutralization.model_fields}
+    bad = [r for r in body.reset if r.partition(".")[2] not in fields.get(r.partition(".")[0], ())]
+    if bad:
+        raise HTTPException(422, f"reset takes 'detectors.<section>' or 'neutralization.<key>' of the rulebook: {bad[:3]}")
+    drop = lambda scope: {r.partition(".")[2] for r in body.reset if r.partition(".")[0] == scope}
+    with _rules_lock:
+        sess.refresh(s)   # (what another request saved a moment ago)
+        cur = s.rules or {}
+        preset = body.preset if "preset" in body.model_fields_set else cur.get("preset")
+        detectors = _merge_sections(cur.get("detectors"), body.detectors, drop("detectors"))
+        neutralization = _merge_sections(cur.get("neutralization"), body.neutralization, drop("neutralization"))
+        _check_rules(preset, detectors, neutralization)
+        return _store_rules(sess, s, server_id, preset, detectors, neutralization)
 
 
 @router.put("/{server_id}/limits", response_model=ServerOut)

@@ -6,7 +6,7 @@ from sqlmodel import Session
 from app import league
 from app.db import engine
 from app.models import Championship, Event, Schedule, Server
-from app.rulebook import Detectors, DrsRule, Rulebook
+from app.rulebook import Detectors, DrsRule, Neutralization, Rulebook
 
 
 def _server(port, **kw):
@@ -94,3 +94,72 @@ def test_a_league_with_default_flags_leaves_the_servers_flags_and_a_presets_give
         s.add(c); s.commit()
         league.invalidate_rule_cache(sid)
         assert league.flag_modes(sid)["blue"] == "off", "what the league sets, wins"
+
+
+def test_patch_changes_sections_and_keeps_the_rest_the_screens_save_must_not_erase_the_neutralization():
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "patch"}).json()["id"]
+    url = f"/api/v1/servers/{sid}/rules"
+    assert api.put(url, json={"preset": "vrl-base", "detectors": {"drs": {"start_laps_off": 3}}, "neutralization": {"default_mode": "FCY", "pileup": {"cars": 4}}}).status_code == 200
+    # 2026-11-15: the screen's save sent the document without the neutralization and the PUT erased it; a PATCH of one section leaves the others alone
+    got = api.patch(url, json={"detectors": {"flags": {"yellow": "off"}}}).json()
+    assert got["neutralization"] == {"default_mode": "FCY", "pileup": {"cars": 4}} and got["preset"] == "vrl-base" and got["detectors"]["drs"] == {"start_laps_off": 3} and got["detectors"]["flags"] == {"yellow": "off"}, got
+    got = api.patch(url, json={"neutralization": {"slow_car": {"sustained_s": 12}}}).json()
+    assert got["neutralization"]["slow_car"] == {"sustained_s": 12} and got["neutralization"]["pileup"] == {"cars": 4} and got["detectors"]["flags"] == {"yellow": "off"}
+    got = api.patch(url, json={"reset": ["detectors.drs", "neutralization.pileup"]}).json()
+    assert "drs" not in got["detectors"] and "pileup" not in got["neutralization"] and got["neutralization"]["default_mode"] == "FCY", "reset = back to the preset's / the default"
+    got = api.patch(url, json={"detectors": {"cuts": None}}).json()
+    assert got["detectors"]["cuts"] is None and "cuts" in got["detectors"], "a null is a value: cuts switched off on purpose, over what the preset says"
+    assert api.patch(url, json={"reset": ["detectors.cuts"]}).json()["detectors"].get("cuts", "gone") == "gone"
+    for bad in (["flags"], ["detectors."], ["detectors.nonsense"], ["neutralization.spin.escalate_s"], ["other.drs"]):
+        assert api.patch(url, json={"reset": bad}).status_code == 422, bad
+    assert api.patch(url, json={"detectors": {"drs": {"start_laps_off": 99}}}).status_code == 422
+    assert api.patch(url, json={"neutralization": {"mode": "bogus"}}).status_code == 422
+    assert api.get(url).json()["detectors"]["flags"] == {"yellow": "off"}, "a refused patch changes nothing"
+    assert api.patch(url, json={"preset": None}).json()["preset"] is None, "a preset sent as null is the defaults"
+    assert api.patch(url, json={}).json()["neutralization"]["default_mode"] == "FCY", "nothing sent, nothing changed"
+
+
+def test_the_rules_are_frozen_during_a_race_for_put_and_patch_alike(monkeypatch):
+    from types import SimpleNamespace
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "frozen"}).json()["id"]
+    url = f"/api/v1/servers/{sid}/rules"
+    monkeypatch.setattr("app.servers.supervisor.get", lambda _sid: SimpleNamespace(running=True, acsp=SimpleNamespace(session={"session_type": 3})))
+    assert api.put(url, json={"detectors": {"drs": {"start_laps_off": 3}}}).status_code == 409
+    assert api.patch(url, json={"detectors": {"drs": {"start_laps_off": 3}}}).status_code == 409
+    monkeypatch.undo()
+    assert api.get(url).json()["detectors"] == {}, "nothing was saved"
+
+
+def test_a_server_screen_shows_the_servers_own_neutralization_never_a_leagues_and_two_patches_at_once_lose_nothing():
+    import threading
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "layers"}).json()["id"]
+    url = f"/api/v1/servers/{sid}/rules"
+    api.patch(url, json={"neutralization": {"slow_car": {"pace_ratio": 0.5, "sustained_s": 8}}})
+    with Session(engine) as s:
+        c = Championship(name="loud", rulebook=Rulebook(neutralization=Neutralization(slow_car={"pace_ratio": 0.9, "sustained_s": 30})).model_dump())
+        s.add(c); s.commit()
+        ev = Event(title="e", league_id=c.id, data={}); s.add(ev); s.commit()
+        s.add(Schedule(server_id=sid, event_id=ev.id, start_at=time.time(), state="running")); s.commit()
+    league.invalidate_rule_cache(sid)
+    got = api.get(url).json()
+    assert got["effective_neutralization"]["slow_car"]["pace_ratio"] == 0.9, "what is applied right now: the league's"
+    assert got["server_neutralization"]["slow_car"] == {"pace_ratio": 0.5, "sustained_s": 8}, "what the server screen shows and edits: its own, so a save never copies a league's value into the server"
+    # two PATCHes of different sections at the same moment: both stay
+    outs = []
+    def go(body): outs.append(TestClient(app, headers=ADMIN).patch(url, json=body).status_code)
+    ts = [threading.Thread(target=go, args=(b,)) for b in ({"detectors": {"flags": {"yellow": "off"}}}, {"neutralization": {"pileup": {"cars": 4, "window_s": 10, "escalate_to": "FCY"}}}, {"detectors": {"pit": {"limit_kmh": 60, "tolerance_kmh": 5, "penalty_s": 0}}})]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    got = api.get(url).json()
+    assert outs == [200] * 3 and got["detectors"]["flags"] == {"yellow": "off"} and got["detectors"]["pit"]["limit_kmh"] == 60 and got["neutralization"]["pileup"]["cars"] == 4 and got["neutralization"]["slow_car"]["pace_ratio"] == 0.5, (outs, got)
