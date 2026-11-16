@@ -140,9 +140,14 @@ class DeltaJudge:
         self._judged: set[tuple[int, int, int]] = set()
         self._flag = 0
         self.log: deque[dict] = deque(maxlen=LOG_MAX)
+        self.trail: list[dict] = []   # every sector judged since the last `take_trail`: {car, sector, delta_s, strikes} (the audit of a VSC: what the judge saw, not only the breaches)
+
+    def take_trail(self) -> list[dict]:
+        out, self.trail = self.trail, []
+        return out
 
     def reset(self) -> None:
-        self._car.clear(); self._judged.clear(); self.log.clear(); self._flag = 0
+        self._car.clear(); self._judged.clear(); self.log.clear(); self.trail.clear(); self._flag = 0
 
     def state(self, car: int) -> dict | None:
         """{delta, strikes, sector} of a car being judged (what a screen would show); None if it is not."""
@@ -179,6 +184,7 @@ class DeltaJudge:
             dt = t - prev[1]
             c["delta"] = min(self.credit_s, c["delta"] + dt - profile[(b - 1) % N] / 1000.0)
             c["strikes"] = c["strikes"] + 1 if c["delta"] < -self.tol_s else 0
+            self.trail.append({"car": car, "sector": (b - 1) % N, "dt": round(dt, 2), "delta_s": round(c["delta"], 2), "strikes": c["strikes"]})
             key = (flag_id, car, generation)
             if c["strikes"] >= need and c["level"] < 2 and (*key, c["level"] + 1) not in self._judged:
                 level = c["level"] + 1

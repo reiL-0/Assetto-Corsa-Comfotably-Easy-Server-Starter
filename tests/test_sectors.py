@@ -89,6 +89,10 @@ def test_the_delta_judge_punishes_two_negative_sectors_in_a_row_and_then_again_a
     slow = lambda p: speed(p) / 1.50   # 50 % slower than the best lap: slower than the 1.35 allowance, as asked
     assert _vsc(DeltaJudge(), SectorClock(), 3, prof, slow) == [], "slower than needed: delta positive, nothing"
     fast = lambda p: speed(p) / 1.10   # only 10 % slower than the lap: faster than the VSC allows
+    jt = DeltaJudge()
+    _vsc(jt, SectorClock(), 3, prof, fast, seconds=16.0)
+    tr = jt.take_trail()
+    assert tr and all(k in tr[0] for k in ("car", "sector", "dt", "delta_s", "strikes")) and tr[-1]["delta_s"] < -0.2 and jt.take_trail() == [], "the audit trail: every sector judged, drained once"
     out = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast, seconds=16.0)
     assert len(out) == 1 and out[0]["car"] == 3 and out[0]["delta_s"] < -0.2 and out[0]["strikes"] == 2 and out[0]["level"] == 1, out
     both = _vsc(DeltaJudge(), SectorClock(), 3, prof, fast)   # 120 s of it: the two warnings are spent at the first breach, two more in a row make the severe one
@@ -396,3 +400,14 @@ def test_the_reference_laps_of_the_vsc_survive_the_session_change_on_the_same_tr
         assert other.reflaps.best == {}, "another track: nothing carries over"
     finally:
         control._states.pop(sid, None)
+
+
+def test_every_sector_the_judge_held_reaches_the_audit_as_its_own_flat_event(monkeypatch):
+    from app.live.racecontrol import RaceControl
+    rc = RaceControl()
+    seen = []
+    monkeypatch.setattr(rc, "audit", lambda kind, **f: seen.append((kind, f)))
+    rc.deltajudge.trail += [{"car": i % 3, "sector": i % 20, "dt": 4.0, "delta_s": -0.5, "strikes": 1} for i in range(60)]   # more than raceaudit keeps in one list (32 items)
+    rc.pace_tick({}, {}, 0.0, 1000.0)
+    assert [k for k, _ in seen] == ["delta_sector"] * 60 and seen[59][1]["sector"] == 59 % 20 and seen[0][1]["delta_s"] == -0.5, seen[:1]
+    assert rc.deltajudge.take_trail() == []
