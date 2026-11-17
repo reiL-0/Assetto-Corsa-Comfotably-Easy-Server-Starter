@@ -14,7 +14,7 @@ from app import content, requirements
 from app.db import SessionDep
 from app.leaguelock import serialized
 from app.models import DEFAULT_POINTS_SYSTEM, Championship, ChampionshipArchive, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Schedule, Server
-from app.results import apply_penalties, non_racing_for, parse_result_file, penalties_for
+from app.results import apply_penalties, join_guids_for, non_racing_for, parse_result_file, penalties_for
 from app.rulebook import PRESETS, Rulebook, effective
 from app.schemas.servers import _folder_name, _setup_name
 from app.stewards.auto import _event_rules, cut_drafts, ladder_drafts
@@ -292,7 +292,7 @@ def score(sess, c: Championship) -> tuple[list[dict], list[dict]]:
             continue
         nonrun = non_racing_for(sess, e.server_id, e.filename)
         pens = penalties_for(sess, e.server_id, e.filename)
-        raw = parse_result_file(p)
+        raw = parse_result_file(p, lambda: join_guids_for(sess, p))
         raw["classification"] = [entry for entry in raw["classification"] if entry["driver_guid"] not in nonrun]
         parsed = apply_penalties(raw, pens, nonrun)
         scoring = parsed["type"] == "Race" and e.scores   # a practice counted without points is only listed. ponytail: only Race sessions score; add a per-event flag if a league wants qualy points
@@ -396,7 +396,7 @@ def dry_run(championship_id: int, body: DryRunIn, sess: SessionDep) -> dict:
     if not path.is_file():
         raise HTTPException(404, "result not found")
     rb = body.rulebook or effective(c)
-    parsed = parse_result_file(path)
+    parsed = parse_result_file(path, lambda: join_guids_for(sess, path))
     racing = {e["driver_guid"] for e in parsed["classification"]} - non_racing_for(sess, body.server_id, body.filename)
     cut = rb.detectors.cuts
     if cut:

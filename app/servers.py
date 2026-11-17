@@ -31,7 +31,7 @@ from app.live.acsp import ACSPClient
 from app.models import Activity, ChampionshipEvent, Incident, Penalty, Schedule, Server, Setting
 from app.services import ini_generator, server_service
 from app.services.server_service import ServerError, check_slots, adopt_running, server_lock, stop_instance, write_instance as _write_instance  # noqa: F401 - re-exported
-from app.results import unsaved_race_finish, apply_penalties, non_racing_for, parse_result_file, penalties_for, result_details
+from app.results import unsaved_race_finish, apply_penalties, join_guids_for, non_racing_for, parse_result_file, penalties_for, result_details
 from app.schemas.servers import (  # noqa: F401 - re-exported: other modules import these names from here
     Scalar,
     ServerIn,
@@ -575,12 +575,12 @@ def download_result(server_id: int, filename: str, sess: SessionDep) -> FileResp
 
 @router.get("/{server_id}/results/{filename}/parsed")
 def parsed_result(server_id: int, filename: str, sess: SessionDep, raw: bool = False) -> dict:
-    """The classification with the stewards' penalties applied (`raw=true`: exactly what acServer wrote)."""
+    """The classification with the stewards' penalties applied (`raw=true`: what acServer wrote, except that a placeholder GUID is replaced by the driver's real Steam ID when it is certain)."""
     _get(sess, server_id)
     p = result_path(server_id, filename)
     if not p.is_file():
         raise HTTPException(404, "result not found")
-    parsed = parse_result_file(p)
+    parsed = parse_result_file(p, lambda: join_guids_for(sess, p))
     return parsed if raw else apply_penalties(parsed, penalties_for(sess, server_id, filename), non_racing_for(sess, server_id, filename))
 
 
