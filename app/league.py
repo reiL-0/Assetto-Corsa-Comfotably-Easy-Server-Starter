@@ -223,6 +223,39 @@ def _applied_rulebook(sess: Session, server_id: int, c: Championship | None, ev:
     return None
 
 
+def rulebook_overrides(rb) -> list[str]:
+    """The sections of a rulebook that decide over the SERVER's (what `effective_rules` lets the league decide): a detector section that is not the default, and the whole neutralization (it is taken from any rulebook that applies,
+    even with every value at its default: the server's own neutralization settings are not used while a league's event runs)."""
+    from app.rulebook import Detectors
+    plain = Detectors()
+    return [n for n in Detectors.model_fields if getattr(rb.detectors, n) != getattr(plain, n)] + ["neutralization"]
+
+
+def running_league_overrides(sess: Session, server_id: int) -> dict | None:
+    """{league, sections}: the league whose event runs on this server now and the sections of its rulebook that override the server's; None when no league event runs here."""
+    sc = sess.exec(select(Schedule).where(Schedule.server_id == server_id, Schedule.state == "running")).first()
+    ev = sess.get(Event, sc.event_id) if sc else None
+    c = sess.get(Championship, ev.league_id) if ev and ev.league_id else None
+    rb = _applied_rulebook(sess, server_id, c, ev) if c else None
+    return {"league": c.name, "league_id": c.id, "sections": rulebook_overrides(rb)} if rb else None
+
+
+def counted_rules(sess: Session, server_id: int, c: Championship, ev: Event | None, sc: Schedule | None = None):
+    """The rules a result is counted under: the ones FROZEN when the session started, so a rulebook edited between the start of the race and the counting cannot change a result already run. In order: what the server applied
+    for this very event of THIS league (the latest apply of it, from the scheduler, the panel or a wake); else the snapshot kept on the schedule of that run (the next event applied on the server does not touch it); else
+    today's league/event settings (an old row, a result attached by hand to another league, a practice). Never a snapshot of another league's event: its rulebook is not this league's."""
+    from app.rulebook import Rulebook
+    if ev is None or ev.league_id != c.id:
+        return _event_rules(c, ev)
+    server = sess.get(Server, server_id)
+    applied = (server.session or {}) if server else {}
+    if applied.get("rulebook_snapshot") and applied.get("rulebook_event_id") == ev.id and applied.get("rulebook_league_id") == c.id:
+        return Rulebook.model_validate(applied["rulebook_snapshot"])
+    if sc is not None and sc.event_id == ev.id and sc.rulebook_snapshot:
+        return Rulebook.model_validate(sc.rulebook_snapshot)
+    return _event_rules(c, ev)
+
+
 class _ManualCutRule(dict):
     """Server-only rule snapshot: metadata stays outside the hub JSON keys."""
 
@@ -428,7 +461,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             continue
         scores = ev.league_id is not None   # a practice (count_only_league_id) is listed but adds nothing: no points, no suspension served, no grid, no cut warnings
         sess.add(ChampionshipEvent(championship_id=c.id, server_id=sc.server_id, filename=f.name, event_id=ev.id, session_type=parsed["type"], scores=scores,
-                                   rulebook_snapshot=_event_rules(c, ev).model_dump(mode="json")))
+                                   rulebook_snapshot=counted_rules(sess, sc.server_id, c, ev, sc).model_dump(mode="json")))
         sess.flush()  # sanctions read this row in the same transaction
         if not scores:
             continue

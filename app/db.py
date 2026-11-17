@@ -249,6 +249,12 @@ def _m017_pit_rule_per_server(con: sqlite3.Connection) -> None:
         con.execute("UPDATE servers SET rules = ? WHERE id = ?", (json.dumps(r), sid))
 
 
+def _m019_schedule_rulebook_snapshot(con: sqlite3.Connection) -> None:
+    """The rules frozen when a schedule's event was applied to its server (schedules.rulebook_snapshot, nullable): the results of THAT run are counted under them. Old rows have none: the older fallbacks stay."""
+    if "rulebook_snapshot" not in {row[1] for row in con.execute('PRAGMA table_info("schedules")')}:
+        con.execute('ALTER TABLE "schedules" ADD COLUMN "rulebook_snapshot" JSON')
+
+
 def _m018_record_sectors(con: sqlite3.Connection) -> None:
     """The sectors of a track record's lap (track_records.s1_ms..s3_ms, nullable): old records have none and the panel shows them as unknown."""
     have = {row[1] for row in con.execute('PRAGMA table_info("track_records")')}
@@ -277,6 +283,7 @@ MIGRATIONS = [   # (version, function): append only, never edit or reorder one t
     (16, _m016_vsc_refs_window),
     (17, _m017_pit_rule_per_server),
     (18, _m018_record_sectors),
+    (19, _m019_schedule_rulebook_snapshot),
 ]
 
 

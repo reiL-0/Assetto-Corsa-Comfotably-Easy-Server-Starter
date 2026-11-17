@@ -169,9 +169,11 @@ async def _load_once(sess: Session, sc: Schedule, ev: Event, srv: Server) -> boo
         sess.refresh(sc, ["loaded"])
         if sc.loaded:
             return False
-        result = await server_service.apply(sess, srv, session_for(sess, ev, sc.start_at).model_copy(update={"restart": True}), held=True)
+        applied = session_for(sess, ev, sc.start_at).model_copy(update={"restart": True})
+        result = await server_service.apply(sess, srv, applied, held=True)
         if result.start_error:   # the config is on the server but it did not start: not "loaded" (a wake / the next tick tries again), the reason is kept
             raise result.start_error
+        sc.rulebook_snapshot = applied.rulebook_snapshot.model_dump(mode="json") if applied.rulebook_snapshot else None   # (frozen for THIS run: the next event applied on the server must not change how this one is counted)
         sc.loaded = True
         sess.add(sc)
         sess.commit()

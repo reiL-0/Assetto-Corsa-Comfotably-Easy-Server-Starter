@@ -212,9 +212,10 @@ def add_event(championship_id: int, body: EventIn, sess: SessionDep) -> Champion
     made = result_path(body.server_id, body.filename).stat().st_mtime
     ran = sess.exec(select(Schedule).where(Schedule.server_id == body.server_id, Schedule.start_at <= made, Schedule.start_at >= made - 12 * 3600).order_by(Schedule.start_at.desc())).first()   # the event that ran it (its title names the race); None = not from a schedule
     event = sess.get(Event, ran.event_id) if ran else None
+    from app.league import counted_rules   # (here, not on top: app.league imports this module's neighbours)
     e = ChampionshipEvent(
         championship_id=championship_id, server_id=body.server_id, filename=body.filename, scores=body.scores, event_id=ran.event_id if ran else None,
-        rulebook_snapshot=_event_rules(league, event).model_dump(mode="json")
+        rulebook_snapshot=(counted_rules(sess, body.server_id, league, event, ran) if event else _event_rules(league, event)).model_dump(mode="json")   # (frozen at the start of the session when the server still holds it)
     )
     sess.add(e)
     sess.commit()
@@ -361,7 +362,9 @@ def standings(championship_id: int, sess: SessionDep) -> list[dict]:
 @router.get("/{championship_id}/rulebook")
 def get_rulebook(championship_id: int, sess: SessionDep) -> dict:
     c = _get(sess, championship_id)
-    return {"source": "rulebook" if c.rulebook else "legacy", "rulebook": effective(c)}
+    from app.league import rulebook_overrides
+    rb = effective(c)
+    return {"source": "rulebook" if c.rulebook else "legacy", "rulebook": rb, "overrides_server": rulebook_overrides(rb) if c.rulebook else []}   # (the sections that decide over the server's while an event of this league runs)
 
 
 @router.put("/{championship_id}/rulebook", response_model=Rulebook)

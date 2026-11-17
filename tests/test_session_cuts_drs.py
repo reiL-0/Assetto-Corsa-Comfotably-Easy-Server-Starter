@@ -111,3 +111,65 @@ def test_a_leagues_frozen_rulebook_carries_the_off_so_results_make_no_notices_or
         assert counted.cuts is None and counted.drs is None
         ev_practice = Event(title='p', league_id=c.id, data={**BASE, 'cuts_off': ['practice']}); s.add(ev_practice); s.commit()
         assert _event_rules(c, ev_practice).detectors.cuts is not None and _event_rules(c, ev_practice).detectors.drs is not None
+
+
+def test_a_result_is_counted_under_the_rules_frozen_when_the_session_started_not_the_leagues_of_today():
+    import time
+    from app.league import counted_rules, session_for
+    from app.models import Championship, Event, LeagueMember
+    from app.rulebook import CutRule, Detectors, Rulebook
+    rule = lambda ladder: Rulebook(detectors=Detectors(cuts=CutRule(cuts_per_step=1, step_seconds=5, max_seconds=60, tolerance=2, ladder=ladder))).model_dump()
+    with Session(engine) as s:
+        c = Championship(name='frozen', rulebook=rule([0, 5]))
+        s.add(c); s.commit()
+        s.add(LeagueMember(championship_id=c.id, guid='76561198000000031', name='A', car='ks_gt3')); s.commit()
+        ev = Event(title='r', league_id=c.id, data=dict(BASE)); s.add(ev); s.commit()
+        sv = Server(name='frz', base_port=22011); s.add(sv); s.commit()
+        sv.session = session_for(s, ev, time.time(), notify=False).model_dump(mode='json')   # the session applied: its snapshot is the rules of that moment
+        s.add(sv); s.commit()
+        c.rulebook = rule([0, 5, 5, 10])   # the league edits its ladder AFTER the race started
+        s.add(c); s.commit()
+        assert counted_rules(s, sv.id, c, ev).detectors.cuts.ladder == [0, 5], 'the result is counted under what was frozen at the start'
+        other = Event(title='o', league_id=c.id, data=dict(BASE)); s.add(other); s.commit()
+        assert counted_rules(s, sv.id, c, other).detectors.cuts.ladder == [0, 5, 5, 10], 'an event the server holds no snapshot of: the settings of today'
+
+
+def test_the_snapshot_of_a_run_lives_on_its_schedule_so_the_next_event_applied_cannot_change_how_it_is_counted():
+    import time
+    from app.league import counted_rules, session_for
+    from app.models import Championship, Event, LeagueMember, Schedule
+    from app.rulebook import CutRule, Detectors, Rulebook
+    rule = lambda ladder: Rulebook(detectors=Detectors(cuts=CutRule(cuts_per_step=1, step_seconds=5, max_seconds=60, tolerance=2, ladder=ladder))).model_dump()
+    with Session(engine) as s:
+        c = Championship(name='runs', rulebook=rule([0, 5]))
+        s.add(c); s.commit()
+        s.add(LeagueMember(championship_id=c.id, guid='76561198000000032', name='A', car='ks_gt3')); s.commit()
+        first, second = (Event(title=t, league_id=c.id, data=dict(BASE)) for t in ('first', 'second')); s.add(first); s.add(second); s.commit()
+        sv = Server(name='runs', base_port=22021); s.add(sv); s.commit()
+        sc = Schedule(event_id=first.id, server_id=sv.id, start_at=time.time()); s.add(sc); s.commit()
+        applied = session_for(s, first, time.time(), notify=False)
+        sc.rulebook_snapshot = applied.rulebook_snapshot.model_dump(mode='json'); s.add(sc); s.commit()   # (what schedule._load_once keeps)
+        c.rulebook = rule([0, 5, 5, 10]); s.add(c); s.commit()   # the league edits its ladder, and the NEXT event is applied on the server before the first one's result is counted
+        sv.session = session_for(s, second, time.time(), notify=False).model_dump(mode='json'); s.add(sv); s.commit()
+        assert counted_rules(s, sv.id, c, first, sc).detectors.cuts.ladder == [0, 5], 'the run is counted under what its own schedule froze'
+        assert counted_rules(s, sv.id, c, first).detectors.cuts.ladder == [0, 5, 5, 10], '(without a schedule snapshot: the older fallbacks)'
+
+
+def test_a_frozen_snapshot_never_crosses_leagues_and_the_latest_apply_of_the_same_event_wins_over_the_schedules():
+    import time
+    from app.league import counted_rules, session_for
+    from app.models import Championship, Event, LeagueMember, Schedule
+    from app.rulebook import CutRule, Detectors, Rulebook
+    rule = lambda ladder: Rulebook(detectors=Detectors(cuts=CutRule(cuts_per_step=1, step_seconds=5, max_seconds=60, tolerance=2, ladder=ladder))).model_dump()
+    with Session(engine) as s:
+        c = Championship(name='a', rulebook=rule([0, 5])); other = Championship(name='b', rulebook=rule([0, 9]))
+        s.add(c); s.add(other); s.commit()
+        s.add(LeagueMember(championship_id=c.id, guid='76561198000000033', name='A', car='ks_gt3')); s.commit()
+        ev = Event(title='r', league_id=c.id, data=dict(BASE)); s.add(ev); s.commit()
+        sv = Server(name='cross', base_port=22031); s.add(sv); s.commit()
+        sc = Schedule(event_id=ev.id, server_id=sv.id, start_at=time.time()); s.add(sc); s.commit()
+        sc.rulebook_snapshot = session_for(s, ev, time.time(), notify=False).rulebook_snapshot.model_dump(mode='json'); s.add(sc); s.commit()   # the scheduler's apply: ladder [0, 5]
+        c.rulebook = rule([0, 5, 5, 10]); s.add(c); s.commit()
+        sv.session = session_for(s, ev, time.time(), notify=False).model_dump(mode='json'); s.add(sv); s.commit()   # the panel applies the SAME event again, with the new ladder
+        assert counted_rules(s, sv.id, c, ev, sc).detectors.cuts.ladder == [0, 5, 5, 10], 'the latest apply of this event is what the race ran under'
+        assert counted_rules(s, sv.id, other, ev, sc).detectors.cuts.ladder == [0, 9], 'a result attached to ANOTHER league is counted under that league: the original league\'s rulebook is not its'
