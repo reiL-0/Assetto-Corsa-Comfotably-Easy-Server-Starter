@@ -142,6 +142,13 @@ def announce(text: str) -> None:
         threading.Thread(target=_send, args=(text, settings.discord_webhook), daemon=True).start()
 
 
+def notify_votes(text: str) -> None:
+    """Who started a vote (app/votes.py): ONLY to the client's own bot and its votes channel, never to the announcements or the server-status channel; nothing if none is set."""
+    cfg = bot()
+    if cfg and cfg["votes_channel_id"]:
+        threading.Thread(target=_post_as_bot, args=(cfg, cfg["votes_channel_id"], text), daemon=True).start()
+
+
 def alert(text: str) -> None:
     """A warning for the stewards on the server-status channel; nothing if it is not set."""
     cfg = bot()

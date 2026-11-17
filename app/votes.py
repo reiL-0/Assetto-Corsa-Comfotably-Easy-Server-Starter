@@ -54,18 +54,22 @@ def _what(v: dict) -> str:
             "kick": f"expulsar a {v['target']}"}.get(v["kind"], "una votación que no se pudo leer")
 
 
-def _identity(inst, name: str | None) -> str:
-    """` (slot n, Steam id)` of the connected driver with that name, only when exactly one has it: two with the same name are not told apart by a name."""
+def _steam(inst, name: str | None) -> str:
+    """What Discord says about a driver: his Steam ID and NOTHING else. Found by name among the connected drivers, and only when exactly one has it:
+    two with the same name are not told apart by a name."""
     same = [d for d in inst.logboard.board.drivers if d.connected and _clean(d.name) == name] if name else []
-    return f" (slot {same[0].car_id}{', Steam ' + same[0].guid if same[0].guid else ''})" if len(same) == 1 else ""
+    if len(same) == 1 and re.fullmatch(r"\d{5,20}", same[0].guid or ""):
+        return f"Steam {same[0].guid}"
+    return "Steam ID no identificado"
 
 
 def _tell_stewards(server_id: int, text: str) -> None:
-    """In its own thread: the server's name is a database read and the post is network, and none of it may hold the event loop that reads every server's log."""
+    """In its own thread: the server's name is a database read and the post is network, and none of it may hold the event loop that reads every server's log.
+    To the votes channel only (discord.notify_votes)."""
     try:
         with Session(engine) as sess:
             srv = sess.get(Server, server_id)
-        discord.alert(f"🗳️ **{_md(_clean(srv.name) if srv else f'Servidor #{server_id}')}**: {text}")
+        discord.notify_votes(f"🗳️ **{_md(_clean(srv.name) if srv else f'Servidor #{server_id}')}**: {text}")
     except Exception:
         log.exception("vote notice to the stewards failed for server %s", server_id)
 
@@ -88,7 +92,8 @@ def on_log_line(inst, line: str) -> None:
         metrics.enqueue(inst.server_id, f"vote_{v['kind']}", name=(v["voter"] if known else v["raw"])[:300], car=v["target"])   # ponytail: one Activity row per vote (voter in `name`, kick target in `car`); a table of votes when something reads them
 
     def stewards():
-        text = f"{_md(who)}{_identity(inst, v['voter'])} inició una votación para {_md(_what(v))}." if known else f"votación con formato desconocido: {_md(v['raw'])}"
+        what = {"next": "pasar a la siguiente sesión", "restart": "reiniciar la sesión", "kick": f"expulsar a {_steam(inst, v['target'])}"}.get(v["kind"])
+        text = f"{_steam(inst, v['voter'])} inició una votación para {what}." if known else "votación con un formato que no se reconoce: revisa el log del servidor."   # no name, no raw text: only what the manager knows is a Steam ID
         threading.Thread(target=_tell_stewards, args=(inst.server_id, text), daemon=True).start()
 
     key, now = (inst.server_id, v["voter"] if known else v["raw"]), time.monotonic()

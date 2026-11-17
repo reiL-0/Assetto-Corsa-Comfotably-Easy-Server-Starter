@@ -36,10 +36,11 @@ class _Now:
 
 
 def _capture(monkeypatch):
-    out = {"alerts": [], "events": []}
+    out = {"alerts": [], "votes": [], "events": []}
     monkeypatch.setattr(votes.threading, "Thread", _Now)
     monkeypatch.setattr(votes, "_told", {})
-    monkeypatch.setattr(discord, "alert", out["alerts"].append)
+    monkeypatch.setattr(discord, "alert", out["alerts"].append)   # the server-status channel: a vote must never go there
+    monkeypatch.setattr(discord, "notify_votes", out["votes"].append)
     monkeypatch.setattr(metrics, "enqueue", lambda sid, kind, **kw: out["events"].append((sid, kind, kw)))
     return out
 
@@ -47,16 +48,18 @@ def _capture(monkeypatch):
 def test_the_notice_names_the_voter_the_target_and_the_slot_only_when_it_is_unambiguous(monkeypatch):
     out = _capture(monkeypatch)
     alan = Driver(car_id=3, name="Alan Montes", guid="76561198000000001")
-    inst = _Inst([alan, Driver(car_id=4, name="Bob", guid="2")])
+    inst = _Inst([alan, Driver(car_id=4, name="Bob", guid="76561198000000002")])
     votes.on_log_line(inst, "Creating vote to KICK USER Bob [] from Alan Montes []")
     assert inst.sent == [acsp.encode_broadcast_chat("Alan Montes ha iniciado una votación para expulsar a Bob.")]
-    assert "Alan Montes (slot 3, Steam 76561198000000001)" in out["alerts"][0] and "expulsar a Bob" in out["alerts"][0]
+    msg = out["votes"][0]
+    assert "Steam 76561198000000001 inició" in msg and "expulsar a Steam 76561198000000002." in msg and "slot" not in msg
+    assert "Alan" not in msg and "Bob" not in msg and not out["alerts"]   # Discord gets IDs, never a name a driver typed, and never the status channel
     assert out["events"] == [(7, "vote_kick", {"name": "Alan Montes", "car": "Bob"})]
-    out["alerts"].clear()
+    out["votes"].clear()
     votes._told.clear()   # (the same voter a second time would be spaced out)
     twin = _Inst([alan, Driver(car_id=5, name="Alan Montes", guid="9")])   # two drivers with that name: no identity is guessed
     votes.on_log_line(twin, "Creating vote to NEXT SESSION from Alan Montes []")
-    assert "slot" not in out["alerts"][0] and "siguiente sesión" in out["alerts"][0]
+    assert "Steam ID no identificado" in out["votes"][0] and "siguiente sesión" in out["votes"][0]
 
 
 def test_names_typed_by_a_driver_cannot_ping_or_format_the_stewards_channel(monkeypatch):
@@ -67,7 +70,7 @@ def test_names_typed_by_a_driver_cannot_ping_or_format_the_stewards_channel(monk
     u = lambda t: t.encode("utf-32-le")   # ACSP strings are UTF-32
     assert u("expulsar a @everyone") in chat and u("**Mala [31mIdea** ha") in chat   # in the game's chat an @ is harmless; control characters are gone
     assert u("\x1b") not in chat and u("\x00") not in chat
-    assert "@everyone" not in out["alerts"][0] and "@\u200beveryone" in out["alerts"][0] and "\\*\\*Mala" in out["alerts"][0]   # the ping broken, the markdown escaped
+    assert "everyone" not in out["votes"][0] and "Mala" not in out["votes"][0]   # nothing a driver typed reaches Discord: no ping, no markdown, no link
     votes.on_log_line(inst, "Creating vote to NEXT SESSION from " + "N" * 500 + " []")
     assert len(inst.sent[1]) < 600   # a long name does not flood the chat (40 characters, 4 bytes each)
 
@@ -77,7 +80,7 @@ def test_a_failing_channel_does_not_silence_the_others_nor_stop_the_log(monkeypa
     inst = _Inst()
     inst.acsp = SimpleNamespace(send=lambda b: 1 / 0)   # the chat raises: the record and the stewards' notice still happen
     votes.on_log_line(inst, "Creating vote to RESTART SESSION from Ana []")
-    assert len(out["events"]) == 1 and len(out["alerts"]) == 1
+    assert len(out["events"]) == 1 and len(out["votes"]) == 1
     inst = _Inst(with_acsp=False)
     inst.logboard = None   # the identity lookup raises inside the stewards' notice: logged and swallowed
     votes.on_log_line(inst, "Creating vote to RESTART SESSION from Ana []")
@@ -121,8 +124,8 @@ def test_a_chunk_with_history_and_news_tells_only_the_news(tmp_path, monkeypatch
 def test_an_unreadable_vote_line_cannot_break_out_of_its_quotes_to_ping(monkeypatch):
     out = _capture(monkeypatch)
     votes.on_log_line(_Inst(), "Creating vote for UNKNOWN from `@everyone` []")
-    msg = out["alerts"][0]
-    assert "@everyone" not in msg and "\\`@\u200beveryone\\`" in msg   # the backticks are escaped (no code span to break out of) and the ping is broken
+    msg = out["votes"][0]
+    assert "everyone" not in msg and "`" not in msg and "formato" in msg   # no raw text at all: nothing to break out of
 
 
 def test_a_voter_who_opens_a_vote_every_second_is_told_once_but_recorded_every_time(monkeypatch):
@@ -132,7 +135,7 @@ def test_a_voter_who_opens_a_vote_every_second_is_told_once_but_recorded_every_t
     for _ in range(3):
         votes.on_log_line(inst, "Creating vote to NEXT SESSION from Troll []")
         clock[0] += 1
-    assert len(inst.sent) == 1 and len(out["alerts"]) == 1 and len(out["events"]) == 3
+    assert len(inst.sent) == 1 and len(out["votes"]) == 1 and len(out["events"]) == 3
     votes.on_log_line(inst, "Creating vote to NEXT SESSION from Otro []")   # somebody else: told at once
     clock[0] += votes.SPACING
     votes.on_log_line(inst, "Creating vote to NEXT SESSION from Troll []")   # and the troll again once the spacing has passed
@@ -143,4 +146,4 @@ def test_a_name_of_only_unprintable_characters_does_not_break_the_notice(monkeyp
     out = _capture(monkeypatch)
     inst = _Inst()
     votes.on_log_line(inst, "Creating vote to NEXT SESSION from \x01\x02 []")
-    assert inst.sent and "alguien" in out["alerts"][0] and len(out["events"]) == 1
+    assert inst.sent and "Steam ID no identificado" in out["votes"][0] and len(out["events"]) == 1
