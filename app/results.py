@@ -11,6 +11,7 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,7 +19,7 @@ from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
 
 from app import csp
-from app.models import Championship, ChampionshipEvent, Event, LeagueMember, Penalty
+from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, Penalty
 
 
 NO_LAP_MS = 999_999_999   # the BestLap acServer writes for a car that set no lap
@@ -169,8 +170,54 @@ def _cut_after_finish(data: dict, classification: list[dict], cut: int, present:
         del e["_sum_lap_ms"]
 
 
-def parse_result_file(path: Path) -> dict:
+PLACEHOLDER_GUID = "$#@@!$kicked"   # what acServer writes instead of the Steam ID of a driver who left without a clean close (not only a kick)
+PLACEHOLDER_WINDOW_S = 6 * 3600   # how far before the end of a session a `join` may be to name the placeholder's driver
+
+
+def join_guids_for(sess: Session, path: Path) -> dict[str, str]:
+    """name -> Steam ID of the drivers who joined this result's server in the hours before it was written, only for names with ONE Steam ID
+    (two IDs under a name: nobody can tell which one it was, so it is left out). The server comes from the path (instances/<id>/results/<file>)."""
+    try:
+        server_id, end = int(path.parent.parent.name), path.stat().st_mtime
+    except (ValueError, OSError):
+        return {}
+    rows = sess.exec(select(Activity.name, Activity.guid).where(
+        Activity.kind == "join", Activity.server_id == server_id, Activity.ts >= end - PLACEHOLDER_WINDOW_S, Activity.ts <= end + 60).distinct()).all()
+    by_name: dict[str, set[str]] = defaultdict(set)
+    for name, guid in rows:
+        if name and guid and re.fullmatch(r"\d{17}", guid):
+            by_name[name].add(guid)
+    return {n: next(iter(g)) for n, g in by_name.items() if len(g) == 1}
+
+
+def _resolve_placeholders(data: dict, guid_fallback: Callable[[], dict[str, str]] | None) -> None:
+    """Gives a driver the Steam ID acServer replaced with PLACEHOLDER_GUID: the one his own laps carry in this file, else the one he joined with
+    (`guid_fallback()`, asked only if the file has a placeholder). Only for a name with exactly ONE placeholder row and ONE Steam ID, and when no
+    other row of the result already has that ID (the reconnect case keeps the older rule in parse_result_file)."""
+    rows = [r for r in data.get("Result", []) if r.get("DriverGuid") == PLACEHOLDER_GUID]
+    if not rows:
+        return
+    names = Counter(r.get("DriverName") for r in rows)
+    ids: dict[str, set[str]] = defaultdict(set)
+    for lap in data.get("Laps", []):
+        if re.fullmatch(r"\d{17}", str(lap.get("DriverGuid", ""))):
+            ids[lap.get("DriverName")].add(lap["DriverGuid"])
+    joined = guid_fallback() if guid_fallback and any(n not in ids for n in names) else {}
+    taken = {r.get("DriverGuid") for r in data.get("Result", [])}
+    chosen = {}
+    for name, n in names.items():
+        found = ids.get(name) or ({joined.get(name)} - {None})
+        if n == 1 and len(found) == 1 and (g := next(iter(found))) not in taken:
+            chosen[name] = g
+            taken.add(g)   # (a second name cannot take the same ID)
+    for r in data.get("Result", []) + data.get("Laps", []):
+        if r.get("DriverGuid") == PLACEHOLDER_GUID and r.get("DriverName") in chosen:
+            r["DriverGuid"] = chosen[r["DriverName"]]
+
+
+def parse_result_file(path: Path, guid_fallback: Callable[[], dict[str, str]] | None = None) -> dict:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
+    _resolve_placeholders(data, guid_fallback)
     session_type = data.get("Type", "").capitalize()   # (acServer writes RACE / QUALIFY / PRACTICE)
     is_race = session_type == "Race"
 
@@ -181,7 +228,7 @@ def parse_result_file(path: Path) -> dict:
     rejoined = {(r.get("DriverName"), r.get("CarModel")) for r in rows if r.get("DriverGuid") in driven and str(r.get("DriverGuid", "")).isdigit()}
     classification = []
     for r in rows:
-        if r.get("DriverGuid") == "$#@@!$kicked" and (r.get("DriverName"), r.get("CarModel")) in rejoined and not any(
+        if r.get("DriverGuid") == PLACEHOLDER_GUID and (r.get("DriverName"), r.get("CarModel")) in rejoined and not any(
             lap.get("DriverGuid") == "$#@@!$kicked" and lap.get("DriverName") == r.get("DriverName") for lap in data.get("Laps", [])
         ):
             continue

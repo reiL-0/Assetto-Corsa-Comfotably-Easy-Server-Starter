@@ -15,7 +15,7 @@ from app.live.raceaudit import record
 from app.auth import CurrentUser, require
 from app.db import SessionDep
 from app.models import Championship, ChampionshipEvent, Notice, Penalty, ResultClose, _now
-from app.results import TIMED, parse_result_file, penalties_for
+from app.results import TIMED, join_guids_for, parse_result_file, penalties_for
 from app.rulebook import effective, legacy_catalogue
 from app.servers import _get, result_path
 
@@ -58,7 +58,7 @@ def _existing_result(sess: SessionDep, server_id: int, filename: str) -> dict:
     path = result_path(server_id, filename)
     if not path.is_file():
         raise HTTPException(404, "result not found")
-    return parse_result_file(path)
+    return parse_result_file(path, lambda: join_guids_for(sess, path))
 
 
 def _driver_name(parsed: dict, guid: str) -> str:

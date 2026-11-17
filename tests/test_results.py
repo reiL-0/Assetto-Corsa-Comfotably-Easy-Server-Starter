@@ -241,3 +241,28 @@ def test_a_driver_who_retired_before_the_flag_stays_in_the_race(tmp_path):   # (
     parsed = parse_result_file(_late_joiner_race(tmp_path, ["A", "B"]))   # C (2 laps before the flag) is not connected any more
     assert [e["driver_name"] for e in parsed["classification"]] == ["Ann", "Bob", "Cat"]
     assert sum(1 for l in parsed["laps"] if l["driver_name"] == "Cat") == 2
+
+
+def test_placeholder_guid_is_resolved_by_own_laps_then_by_join_and_never_guessed(tmp_path):
+    P = "$#@@!$kicked"
+    base = {**RACE_JSON, "Result": [
+        {"DriverName": "Gluner", "DriverGuid": P, "CarModel": "car_a", "TotalTime": 500000, "BestLap": 120000},
+        {"DriverName": "Ann", "DriverGuid": "76561198000000001", "CarModel": "car_a", "TotalTime": 400000}], "Laps": []}
+    p = tmp_path / "race.json"
+
+    def guids(data, fb=None):
+        p.write_text(json.dumps(data))
+        return [r["driver_guid"] for r in parse_result_file(p, (lambda: fb) if fb is not None else None)["classification"]]
+    assert guids(base) == [P, "76561198000000001"]                                   # nothing to go by: left as acServer wrote it
+    assert guids(base, {"Gluner": "76561199000000009"})[0] == "76561199000000009"   # joined with ONE Steam ID
+    assert guids(base, {"Ann": "76561199000000009"})[0] == P                        # another name: not his
+    assert guids(base, {"Gluner": "76561198000000001"})[0] == P                     # that ID is already another row of the result
+    own = {**base, "Laps": [{"DriverName": "Gluner", "DriverGuid": "76561199000000008", "LapTime": 90000},
+                            {"DriverName": "Gluner", "DriverGuid": P, "LapTime": 95000}]}
+    assert guids(own, {"Gluner": "76561199000000009"})[0] == "76561199000000008"    # his own laps win over the join
+    two = {**base, "Laps": [{"DriverName": "Gluner", "DriverGuid": g, "LapTime": 90000} for g in ("76561199000000007", "76561199000000008")]}
+    assert guids(two)[0] == P                                                       # two IDs under one name: not guessed
+    twin = {**base, "Result": [dict(base["Result"][0]), {**base["Result"][0], "CarModel": "car_b"}]}
+    assert guids(twin, {"Gluner": "76561199000000009"}) == [P]   # two placeholder rows under one name: not resolved (the old merge by GUID still folds them)
+    rename = {**base, "Result": [dict(base["Result"][0]), {**base["Result"][0], "DriverName": "Gluner2"}]}
+    assert guids(rename, {"Gluner": "76561199000000009", "Gluner2": "76561199000000009"}).count("76561199000000009") == 1   # one ID, one row

@@ -39,7 +39,7 @@ from app.leaguelock import lock as league_lock, serialized
 from app.stewards.auto import _event_rules, apply_off, cut_notices, cut_penalties, drs_penalties, flag_penalties, give_back_penalties, neutral_penalties
 from app.live.raceaudit import record
 from app.models import Activity, Championship, ChampionshipEvent, Event, LeagueMember, LeagueSuspension, Penalty, Schedule, Server
-from app.results import parse_result_file
+from app.results import join_guids_for, parse_result_file
 from app.schemas.servers import EntryIn, SessionIn, _folder_name, _setup_name
 
 log = logging.getLogger("acmanager.league")
@@ -456,7 +456,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
                                                       ChampionshipEvent.filename == f.name)).first():
             last_end = max(last_end, f.stat().st_mtime)
             continue
-        parsed = parse_result_file(f)
+        parsed = parse_result_file(f, lambda: join_guids_for(sess, f))
         if parsed["type"] not in ("Race", "Qualify"):
             continue
         scores = ev.league_id is not None   # a practice (count_only_league_id) is listed but adds nothing: no points, no suspension served, no grid, no cut warnings
