@@ -163,3 +163,26 @@ def test_a_server_screen_shows_the_servers_own_neutralization_never_a_leagues_an
     [t.start() for t in ts]; [t.join() for t in ts]
     got = api.get(url).json()
     assert outs == [200] * 3 and got["detectors"]["flags"] == {"yellow": "off"} and got["detectors"]["pit"]["limit_kmh"] == 60 and got["neutralization"]["pileup"]["cars"] == 4 and got["neutralization"]["slow_car"]["pace_ratio"] == 0.5, (outs, got)
+
+
+def test_the_server_screen_and_the_league_say_which_sections_the_leagues_rulebook_decides():
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.rulebook import CutRule
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": "prov"}).json()["id"]
+    assert api.get(f"/api/v1/servers/{sid}/rules").json()["league_overrides"] is None, "no league event runs here"
+    with Session(engine) as s:
+        rb = Rulebook(detectors=Detectors(cuts=CutRule(cuts_per_step=1, step_seconds=5, max_seconds=60, tolerance=2, ladder=[0, 5])))
+        c = Championship(name="Copa", rulebook=rb.model_dump())
+        s.add(c); s.commit()
+        ev = Event(title="e", league_id=c.id, data={}); s.add(ev); s.commit()
+        s.add(Schedule(server_id=sid, event_id=ev.id, start_at=time.time(), state="running")); s.commit()
+        cid = c.id
+    league.invalidate_rule_cache(sid)
+    got = api.get(f"/api/v1/servers/{sid}/rules").json()["league_overrides"]
+    assert got["league"] == "Copa" and "cuts" in got["sections"] and "neutralization" in got["sections"] and "drs" not in got["sections"] and "give_back" not in got["sections"], got
+    mine = api.get(f"/api/v1/championships/{cid}/rulebook").json()
+    assert "cuts" in mine["overrides_server"] and "neutralization" in mine["overrides_server"], mine["overrides_server"]
+    assert api.get(f"/api/v1/championships/{api.post('/api/v1/championships', json={'name': 'legacy'}).json()['id']}/rulebook").json()["overrides_server"] == [], "a league with no rulebook sets nothing over the server"

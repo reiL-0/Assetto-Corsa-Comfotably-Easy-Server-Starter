@@ -164,6 +164,7 @@ class Schedule(SQLModel, table=True):
     rsvp_text: str = ""  # the text that message shows now; it is edited only when this changes
     state: str = "pending"  # pending | running (started, waiting for its end) | done | failed | missed
     result: str = ""  # why it failed / was missed
+    rulebook_snapshot: dict | None = Field(default=None, sa_type=JSON)  # the rules frozen when this run's event was applied to the server: its results are counted under them (NULL = an older row)
     created_at: datetime = Field(default_factory=_now)
 
 

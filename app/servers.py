@@ -410,11 +410,20 @@ def _server_neutralization(s: Server) -> dict:
     return Neutralization.model_validate(league._deep_merge(preset.neutralization.model_dump() if preset else {}, srules.get("neutralization") or {})).model_dump()
 
 
+def _league_overrides(s: Server) -> dict | None:
+    """The league whose event is running on this server and which sections of its rulebook decide over what this screen edits (None = none runs here)."""
+    from sqlmodel import Session as _S
+    from app import league
+    from app.db import engine
+    with _S(engine) as other:   # (its own session: `s` belongs to the request's)
+        return league.running_league_overrides(other, s.id)
+
+
 def _rules_view(s: Server) -> dict:
     from app import league
     from app.rulebook import PRESETS
     det, _ = league.server_detectors(s)
-    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "neutralization": (s.rules or {}).get("neutralization") or {}, "effective": det.model_dump(), "effective_neutralization": league.effective_rules(s.id)["neutralization"], "server_neutralization": _server_neutralization(s), "presets": sorted(PRESETS)}
+    return {"preset": (s.rules or {}).get("preset"), "detectors": (s.rules or {}).get("detectors") or {}, "neutralization": (s.rules or {}).get("neutralization") or {}, "effective": det.model_dump(), "effective_neutralization": league.effective_rules(s.id)["neutralization"], "server_neutralization": _server_neutralization(s), "league_overrides": _league_overrides(s), "presets": sorted(PRESETS)}
 
 
 @router.get("/{server_id}/rules")
