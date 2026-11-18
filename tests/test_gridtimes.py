@@ -93,7 +93,7 @@ def test_the_order_lives_in_the_database_without_repeats():
 
 
 def _client(sid, types=None, cars=None):
-    c = SimpleNamespace(server_id=sid, grid_task=None, grid_key=None, session_types=dict(types or {}), cars=cars or {})
+    c = SimpleNamespace(server_id=sid, grid_task=None, grid_key=None, grid_last=None, session_types=dict(types or {}), cars=cars or {})
     c.sent = []
     c.send = lambda data: (c.sent.append(data), c.session_types.__setitem__(1, c.answer) if hasattr(c, "answer") else None)
     return c
@@ -204,7 +204,7 @@ def test_no_order_no_write(monkeypatch):
     monkeypatch.setattr(gridtimes, "_write", lambda *a: written.append(a))
     import app.supervisor as supervisor
     monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=1, started_at=1.0))
-    asyncio.run(gridtimes._tick(SimpleNamespace(server_id=9304, cars={0: {"driver_guid": "A"}}), 0))
+    asyncio.run(gridtimes._tick(SimpleNamespace(server_id=9304, grid_last=None, cars={0: {"driver_guid": "A"}}), 0))
     assert written == []
 
 

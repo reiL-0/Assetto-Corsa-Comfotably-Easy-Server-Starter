@@ -144,6 +144,7 @@ def on_session(client, event: dict, is_new: bool) -> None:
     if not is_new and client.grid_key == key:
         return   # the same session, nothing changed
     client.grid_key = key
+    client.grid_last = None
     if client.grid_task:
         client.grid_task.cancel()
     client.grid_task = None
@@ -213,7 +214,11 @@ async def _tick(client, idx: int) -> str | None:
     ranks = plan(order, cars)
     if not ranks:
         return None
-    return await asyncio.to_thread(_write, inst.pid, inst.started_at, ranks, client.server_id, idx)
+    err = await asyncio.to_thread(_write, inst.pid, inst.started_at, ranks, client.server_id, idx)
+    if err is None and client.grid_last != ranks:   # said once per change, not every second
+        client.grid_last = ranks
+        log.info("server %s: grid times written for session %s: %s", client.server_id, idx, ranks)
+    return err
 
 
 def _write(pid: int, started_at: float | None, ranks: dict[int, int], server_id: int, idx: int) -> str | None:
@@ -227,5 +232,4 @@ def _write(pid: int, started_at: float | None, ranks: dict[int, int], server_id:
             mem.close()
     except (GridError, OSError) as e:
         return str(e)
-    log.debug("server %s: grid times %s", server_id, ranks)
     return None

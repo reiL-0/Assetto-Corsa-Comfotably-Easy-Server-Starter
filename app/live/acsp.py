@@ -350,6 +350,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
         self.grid_task: asyncio.Task | None = None   # the guard that writes the director's grid into the times before a race (app/gridtimes.py)
+        self.grid_last: dict | None = None           # the last plan written (so the log says it once)
         self.grid_key: tuple | None = None           # (session index, time_min, type) the guard was armed for
         self.session_types: dict[int, int] = {}      # session index -> its type, from every description acServer gave (the guard asks what comes next)
         self.keep_off = False  # a new set-up was applied to this running server: its practice is no longer the one to keep (app/services/server_service.apply)
