@@ -147,7 +147,9 @@ class SequenceStep(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     time_min: int = Field(default=0, ge=0, le=1440)   # minutes; a race by laps has 0
     laps: int = Field(default=0, ge=0, le=999)        # a race by laps; practice and qualify have 0
-    wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the start (a race's grid wait)
+    wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the session starts (any kind: acServer counts it from the moment the session begins)
+    over_s: int | None = Field(default=None, ge=0, le=3600)   # RACE ONLY: seconds the race stays open after the winner finishes, for the rest to get in; None = the server's own RACE_OVER_TIME
+    result_s: int | None = Field(default=None, ge=0, le=600)  # seconds the results are shown when this session ends, before the next one is set up (every kind); None = the server's own RESULT_SCREEN_TIME
 
     @model_validator(mode="after")
     def _has_a_length(self) -> SequenceStep:
@@ -155,6 +157,8 @@ class SequenceStep(BaseModel):
             raise ValueError("a practice or a qualify is timed: time_min > 0 and no laps")
         if self.kind == "race" and bool(self.laps) == bool(self.time_min):
             raise ValueError("a race is by laps or by time, one of them")
+        if self.kind != "race" and self.over_s is not None:
+            raise ValueError("over_s: only a race waits for the others to finish after the winner")
         return self
 
 

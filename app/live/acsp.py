@@ -350,6 +350,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
         self.grid_task: asyncio.Task | None = None   # the guard that writes the director's grid into the times before a race (app/gridtimes.py)
+        self.waits_lock = asyncio.Lock()             # the waits of two sessions are written one after the other
+        self.waits_idx: int | None = None            # the session index whose end-of-session waits were written (app/sessionpatch.py)
         self.grid_last: dict | None = None           # the last plan written (so the log says it once)
         self.grid_key: tuple | None = None           # (session index, time_min, type) the guard was armed for
         self.session_types: dict[int, int] = {}      # session index -> its type, from every description acServer gave (the guard asks what comes next)
@@ -445,6 +447,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             timeline.on_session_event(self.server_id, event)
             from app import gridtimes   # (late, like timeline: the director's grid order is written into the last seconds of the session before a race)
             gridtimes.on_session(self, event, t == "new_session")
+            from app import sessionpatch   # (and the waits of this session's step)
+            sessionpatch.on_session(self, event, t == "new_session")
             if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None

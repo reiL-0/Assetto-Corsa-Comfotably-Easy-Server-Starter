@@ -53,9 +53,10 @@ def test_the_clock_of_a_stopped_server_walks_the_whole_sequence():
     segs = timeline.segments({}, 20, SEQ)
     assert [(s.index, s.type, s.name) for s in segs] == [(0, 1, "Practice"), (1, 2, "Qualify"), (2, 3, "Race 1"), (3, 1, "Intermedia"), (4, 3, "Race 2")]
     start = 1_000_000.0
-    after_race_1 = start + 5 * 60 + 3 * 60 + (20 * 60 + 30) + 60   # one minute into the intermediate
-    pos = timeline.position({"SERVER": {"LOOP_MODE": 1}}, 0, start, after_race_1, 20, SEQ)
-    assert pos["index"] == 3 and round(pos["elapsed_s"]) == 60 and round(pos["remaining_s"]) == 120
+    # every session also counts acServer's default 10 s of results, and a race 30 s more for the others after the winner
+    one_minute_into_the_intermediate = start + (5 * 60 + 10) + (3 * 60 + 10) + (20 * 60 + 30 + 30 + 10) + 60
+    pos = timeline.position({"SERVER": {"LOOP_MODE": 1}}, 0, start, one_minute_into_the_intermediate, 20, SEQ)
+    assert pos["index"] == 3 and round(pos["elapsed_s"]) == 60 and round(pos["remaining_s"]) == 3 * 60 + 10 - 60
 
 
 SIM = Path(os.environ.get("ACM_TEST_ACSERVER_SIM", Path.home() / "Documents/acserver-re/sim"))
@@ -253,3 +254,128 @@ def test_the_helper_process_grows_the_real_acserver(tmp_path):
     finally:
         srv.terminate()
         srv.wait(5)
+
+
+# --- the waits at the end of a session (over_s, result_s) ------------------------------------------------------------------------------------------------------------
+
+def test_the_waits_of_a_step_are_validated():
+    ok = {**SEQ[2], "over_s": 90, "result_s": 20}
+    assert len(SessionIn(**BASE, sequence=[*SEQ[:2], ok, *SEQ[3:]]).sequence) == 5
+    assert SessionIn(**BASE, sequence=[{**SEQ[0], "result_s": 45}, *SEQ[1:]]).sequence[0].result_s == 45   # the results screen exists after every kind
+    with pytest.raises(ValidationError):
+        SessionIn(**BASE, sequence=[{**SEQ[0], "over_s": 30}, *SEQ[1:]])   # only a race waits for the others after the winner
+    with pytest.raises(ValidationError):
+        SessionIn(**BASE, sequence=[*SEQ[:2], {**SEQ[2], "over_s": 99999}, *SEQ[3:]])
+    with pytest.raises(ValidationError):
+        SessionIn(**BASE, sequence=[*SEQ[:2], {**SEQ[2], "result_s": 601}, *SEQ[3:]])
+
+
+def test_a_step_that_says_nothing_gets_what_the_server_started_with():
+    assert sessionpatch.effective_waits(None, (60_000, 30_000)) == (60_000, 30_000)
+    assert sessionpatch.effective_waits({"over_s": None, "result_s": None}, (60_000, 30_000)) == (60_000, 30_000)
+    assert sessionpatch.effective_waits({"over_s": 90, "result_s": None}, (60_000, 30_000)) == (90_000, 30_000)
+    assert sessionpatch.effective_waits({"over_s": 0, "result_s": 5}, (60_000, 30_000)) == (0, 5_000)   # 0 is a value, not «nothing»
+
+
+def test_the_clock_counts_the_waits_a_step_asks_for():
+    steps = [*SEQ[:2], {**SEQ[2], "over_s": 60, "result_s": 30}, *SEQ[3:]]
+    segs = timeline.segments({}, 20, steps)
+    assert segs[2].secs == 20 * 60 + 30 + 60 + 30                      # race: est + wait + its own over_s + its own result_s
+    assert segs[0].secs == 5 * 60 + 10                                  # no word from the step: acServer's default 10 s of results
+    assert timeline.segments({"SERVER": {"RESULT_SCREEN_TIME": 25}}, 20, steps)[0].secs == 5 * 60 + 25   # ... or the server's own
+    assert timeline.segments({"SERVER": {"RESULT_SCREEN_TIME": "junk"}}, 20, steps)[0].secs == 5 * 60   # a config that is not a number counts for nothing, it does not break the clock
+
+
+def test_each_new_session_writes_its_own_waits_and_a_step_without_them_gives_the_original_back(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import gridtimes, supervisor
+    written, steps = [], {0: {"kind": "practice"}, 2: {"kind": "race", "over_s": 90, "result_s": 20}, 3: {"kind": "practice", "result_s": 5}}
+    monkeypatch.setattr(sessionpatch, "step_and_original", lambda sid, idx: (steps.get(idx), (60_000, 30_000)))
+    monkeypatch.setattr(sessionpatch, "write_waits", lambda pid, o, r: written.append((o, r)))
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=4242, started_at=1.0))
+    monkeypatch.setattr(gridtimes, "known_binary", lambda pid, started: True)
+    import asyncio as _a
+    client = SimpleNamespace(server_id=9501, waits_idx=None, waits_lock=_a.Lock())
+
+    async def go():
+        for idx in (0, 2, 3, 4):
+            sessionpatch.on_session(client, {"session_index": idx, "current_session_index": idx}, True)
+            await asyncio.sleep(0.05)
+        sessionpatch.on_session(client, {"session_index": 4, "current_session_index": 4}, False)   # the same session described again: nothing
+        sessionpatch.on_session(client, {"session_index": 1, "current_session_index": 4}, False)   # another session described: nothing
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    # 0: the step says nothing -> what the server's config gives; 2: its own; 3: only the results; 4: no such step -> nothing written (it keeps what 3 left)
+    assert written == [(60_000, 30_000), (90_000, 20_000), (60_000, 5_000)]
+
+
+def test_the_original_waits_come_from_the_config_with_acservers_own_defaults():
+    from sqlmodel import Session as DbSession
+
+    from app.db import engine
+    from app.models import Server
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from conftest import ADMIN
+    sid = TestClient(app, headers=ADMIN).post("/api/v1/servers", json={"name": "Waits"}).json()["id"]
+    with DbSession(engine) as db:
+        srv = db.get(Server, sid)
+        srv.config = {"SERVER": {"RACE_OVER_TIME": 600}}   # RESULT_SCREEN_TIME missing: acServer's 10 s
+        srv.session = {"sequence": [{"kind": "race", "name": "R", "laps": 2, "over_s": 90}]}
+        db.add(srv)
+        db.commit()
+    step, original = sessionpatch.step_and_original(sid, 0)
+    assert step["over_s"] == 90 and original == (600_000, 10_000)
+    assert sessionpatch.step_and_original(sid, 5)[0] is None
+
+
+@pytest.mark.skipif(not (SIM / "acServer").exists(), reason="needs the local acServer simulator (ACM_TEST_ACSERVER_SIM)")
+def test_the_real_acserver_takes_the_waits_and_refuses_what_is_not_plausible():
+    srv = subprocess.Popen(["./acServer"], cwd=SIM, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(3)
+        assert sessionpatch.read_waits(srv.pid) == (60_000, 30_000)   # RACE_OVER_TIME=60 and RESULT_SCREEN_TIME=30 of the sim's config, in ms
+        sessionpatch.write_waits(srv.pid, 90_000, 5_000)
+        assert sessionpatch.read_waits(srv.pid) == (90_000, 5_000)
+        with pytest.raises(RuntimeError, match="plausible"):
+            sessionpatch.write_waits(srv.pid, 10**9, 1)
+        assert sessionpatch.read_waits(srv.pid) == (90_000, 5_000)   # untouched by the refusal
+        sessionpatch.write_waits(srv.pid, 60_000, 30_000)
+        assert srv.poll() is None
+    finally:
+        srv.terminate()
+        srv.wait(5)
+
+
+def test_config_waits_that_are_not_numbers_fall_back_to_acservers_defaults():
+    assert sessionpatch.config_ms(None, 30) == 30_000 and sessionpatch.config_ms("junk", 10) == 10_000 and sessionpatch.config_ms(float("inf"), 10) == 10_000
+    assert sessionpatch.config_ms("180", 30) == 180_000 and sessionpatch.config_ms(0, 30) == 0 and sessionpatch.config_ms(-5, 30) == 30_000
+
+
+def test_a_failed_step_is_tried_again_by_the_next_description_of_the_session(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import gridtimes, supervisor
+    calls = []
+    monkeypatch.setattr(sessionpatch, "step_and_original", lambda sid, idx: ({"kind": "practice", "result_s": 5}, (60_000, 30_000)))
+    monkeypatch.setattr(supervisor, "get", lambda sid: None if not calls else SimpleNamespace(pid=1, started_at=1.0))   # the server is not there on the first try
+    monkeypatch.setattr(gridtimes, "known_binary", lambda pid, started: True)
+    monkeypatch.setattr(sessionpatch, "write_waits", lambda pid, o, r: calls.append((o, r)))
+    client = SimpleNamespace(server_id=9502, waits_idx=None, waits_lock=asyncio.Lock())
+    info = {"session_index": 1, "current_session_index": 1}
+
+    async def go():
+        sessionpatch.on_session(client, info, False)
+        await asyncio.sleep(0.05)
+        assert client.waits_idx is None and calls == []   # it failed and said so: nothing remembered as done
+        calls.append("tried")
+        sessionpatch.on_session(client, info, False)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    assert calls == ["tried", (60_000, 5_000)]

@@ -31,6 +31,9 @@ SESSIONS, CURRENT, MAKESLICE, SESSION_TYPE, BROADCAST = 0x83E2EB8, 0x83E2734, 0x
 CURIDX = 0x83F45E0   # main.CurrentSessionIndex (the same as app/gridtimes.py CURRENT_INDEX; not imported: this module must stay light, it is also run as a program)
 WORDS, STRIDE = 15, 60
 MAX_SESSIONS = 12   # also the ceiling of SetSessionIn.index (app/schemas/servers.py)
+SERVER_OPTIONS = 0x83E3600   # main.ServerOptions: the server's global options. raceOverTime (+8) and resultScreenTime (+132) are int32 MILLISECONDS (RACE_OVER_TIME=60 reads 60000)
+RACE_OVER_AT, RESULT_SCREEN_AT = SERVER_OPTIONS + 8, SERVER_OPTIONS + 132
+MAX_WAIT_MS = 7_200_000   # a value read beyond this is not what we think it is: nothing is written
 STATIC = (0, 1, 2, 3, 4, 5, 10, 11, 12)   # the words copied from the original slot: name, type, time, laps, wait, is_open. 6-9 are runtime (start / end time), 13 is the slot's own index
 TYPES = {"practice": 1, "qualify": 2, "race": 3}
 PT_ATTACH, PT_DETACH, PT_CONT, PT_GETREGS, PT_SETREGS = 16, 17, 7, 12, 13
@@ -317,6 +320,101 @@ async def install(server_id: int, sequence: list[dict], kinds: list[int], inst) 
 def _fail(server_id: int, why: str) -> str:
     log.warning("server %s: the session sequence was NOT installed (the server runs its own three sessions): %s", server_id, why)
     return why
+
+
+# --- the waits at the end of a session (per step of the sequence) ------------------------------------------------------------------------------------------------
+
+def effective_waits(step: dict | None, original: tuple[int, int]) -> tuple[int, int]:
+    """(raceOverTime, resultScreenTime) in ms for a session: the step's own `over_s` / `result_s`, else what the server was started with (`original`)."""
+    over = original[0] if step is None or step.get("over_s") is None else int(step["over_s"]) * 1000
+    result = original[1] if step is None or step.get("result_s") is None else int(step["result_s"]) * 1000
+    return over, result
+
+
+def read_waits(pid: int) -> tuple[int, int]:
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY)
+    try:
+        return struct.unpack("<i", os.pread(fd, 4, RACE_OVER_AT))[0], struct.unpack("<i", os.pread(fd, 4, RESULT_SCREEN_AT))[0]
+    finally:
+        os.close(fd)
+
+
+def write_waits(pid: int, over_ms: int, result_ms: int) -> None:
+    """Set the two global waits of the server NOW (acServer reads them when a session ends). Refuses when the values there are not plausible, and reads them back."""
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDWR)
+    try:
+        now = struct.unpack("<ii", os.pread(fd, 4, RACE_OVER_AT) + os.pread(fd, 4, RESULT_SCREEN_AT))
+        if not all(0 <= v <= MAX_WAIT_MS for v in now) or not all(0 <= v <= MAX_WAIT_MS for v in (over_ms, result_ms)):
+            raise RuntimeError(f"wait times {now} / {(over_ms, result_ms)} are not plausible: not written")
+        try:
+            os.pwrite(fd, struct.pack("<i", over_ms), RACE_OVER_AT)
+            os.pwrite(fd, struct.pack("<i", result_ms), RESULT_SCREEN_AT)
+        except OSError:
+            os.pwrite(fd, struct.pack("<i", now[0]), RACE_OVER_AT)   # the two go together: if the second failed, the first goes back
+            raise
+        back = struct.unpack("<ii", os.pread(fd, 4, RACE_OVER_AT) + os.pread(fd, 4, RESULT_SCREEN_AT))
+        if back != (over_ms, result_ms):
+            raise RuntimeError(f"the wait times read back {back}, not {(over_ms, result_ms)}")
+    finally:
+        os.close(fd)
+
+
+def config_ms(value, default_s: int) -> int:
+    """A wait of the server's config in ms; acServer's own default (`default_s`, seconds) when the key is missing or is not a number."""
+    try:
+        seconds = float(value)
+        if not 0 <= seconds <= MAX_WAIT_MS / 1000:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        seconds = default_s
+    return int(seconds * 1000)
+
+
+def step_and_original(server_id: int, idx: int) -> tuple[dict | None, tuple[int, int]]:
+    """(the sequence step the server plays at session index `idx` or None, the waits in ms the server's CONFIG gives: RACE_OVER_TIME and RESULT_SCREEN_TIME, whose defaults when the key is missing are 30 s and 10 s,
+    measured on the real acServer). From the config and not from the memory of the process: after a manager restart the memory may hold the waits of an earlier step. Reads the database: call it off the event loop."""
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.models import Server
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+        seq = ((srv.session if srv else None) or {}).get("sequence")
+        cfg = ((srv.config if srv else None) or {}).get("SERVER") or {}
+    original = (config_ms(cfg.get("RACE_OVER_TIME"), 30), config_ms(cfg.get("RESULT_SCREEN_TIME"), 10))
+    return (seq[idx] if seq and 0 <= idx < len(seq) else None), original
+
+
+def on_session(client, event: dict, is_new: bool) -> None:
+    """ACSPClient calls it for `new_session` and for the description of the CURRENT session: the waits of the step that just began are written into the running server (the ones of the session before are not
+    the ones of this one). Only servers with a sequence; a step that says nothing gets the waits of the server's config back."""
+    idx = event.get("session_index")
+    if not is_new and (idx != event.get("current_session_index") or client.waits_idx == idx):
+        return
+    client.waits_idx = idx
+    try:
+        asyncio.get_running_loop().create_task(_set_waits(client, idx))
+    except RuntimeError:   # no loop (a test calling _apply directly)
+        pass
+
+
+async def _set_waits(client, idx: int) -> None:
+    from app import gridtimes, supervisor   # late: heavy
+    async with client.waits_lock:   # one at a time, in the order the sessions began: an old one that is slow cannot land on top of the new one
+        try:
+            step, original = await asyncio.to_thread(step_and_original, client.server_id, idx)
+            inst = supervisor.get(client.server_id)
+            if step is None:
+                return
+            if not inst or not inst.pid or not await asyncio.to_thread(gridtimes.known_binary, inst.pid, inst.started_at):
+                raise RuntimeError("the server is not there yet, or it is not the known build")
+            over, result = effective_waits(step, original)
+            await asyncio.to_thread(write_waits, inst.pid, over, result)
+            log.info("server %s: session %s waits %s s after the winner, %s s of results", client.server_id, idx, over // 1000, result // 1000)
+        except (RuntimeError, OSError, ValueError, TypeError, OverflowError) as e:
+            if client.waits_idx == idx:
+                client.waits_idx = None   # not done: the next description of this session tries again
+            log.warning("server %s: the waits of session %s were not set: %s", client.server_id, idx, e)
 
 
 def main(argv: list[str]) -> int:

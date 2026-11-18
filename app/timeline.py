@@ -54,7 +54,14 @@ def segments(config: dict, est_min: int = 0, sequence: list[dict] | None = None)
         for i, st in enumerate(sequence):
             minutes, laps, wait = int(st.get("time_min") or 0), int(st.get("laps") or 0), int(st.get("wait_s") or 0)
             length = minutes * 60 if minutes and not laps else (est_min or RACE_LAPS_EST_MIN) * 60
-            out.append(Seg(i, kinds[st["kind"]], str(st["name"]), length + wait, minutes, laps, wait))
+            cfg = config.get("SERVER") or {}
+            result = st.get("result_s") if st.get("result_s") is not None else cfg.get("RESULT_SCREEN_TIME", 10)   # the step's own wait at its end, else the server's (acServer's default: 10 s)
+            over = (st.get("over_s") if st.get("over_s") is not None else cfg.get("RACE_OVER_TIME", 30)) if st["kind"] == "race" else 0   # (a race also waits for the others after the winner; default 30 s)
+            try:
+                after = int(float(result)) + int(float(over))
+            except (TypeError, ValueError, OverflowError):
+                after = 0
+            out.append(Seg(i, kinds[st["kind"]], str(st["name"]), length + wait + after, minutes, laps, wait))
         return out
     for section, typ in TYPES:
         sec = config.get(section)
