@@ -20,11 +20,14 @@ import os
 import struct
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlmodel import Session
 
+from app import results
+from app.config import settings
 from app.db import engine
-from app.models import GridOrder
+from app.models import GridOrder, Server
 
 log = logging.getLogger("acm.gridtimes")
 
@@ -132,6 +135,40 @@ def clear_order(server_id: int, before: float | None = None) -> bool:
         return True
 
 
+# --- the order from the race before (the intermediate session of a sequence) -----------------------------------------------------------------------------------
+
+def shape(grid: list[str], n: int) -> list[str]:
+    """acServer's own meaning of REVERSED_GRID_RACE_POSITIONS: 0 as it is, N = the first N inverted, -1 = all."""
+    if n == -1:
+        return grid[::-1]
+    return grid[:n][::-1] + grid[n:] if n > 0 else list(grid)
+
+
+def last_race_file(server_id: int, since: float) -> Path | None:
+    """The newest race result of this server written at or after `since` (unix time): the race that just ended, whose file acServer writes when its session ends."""
+    folder = Path(settings.data_dir) / "instances" / str(server_id) / "results"
+    files = [p for p in folder.glob("*_RACE.json") if p.stat().st_mtime >= since] if folder.exists() else []
+    return max(files, key=lambda p: (results.result_start(p.name) or datetime.min.astimezone(), p.name), default=None)
+
+
+def order_now(server_id: int, since: float) -> list[str]:
+    """The order to deliver now: the director's own (GridOrder) if there is one, else the race before it by the server's `grid_from_race` (0 as finished with the stewards' grid penalties, N = first N inverted,
+    -1 = all inverted); [] when neither. Reads the database and a result file: call it off the event loop."""
+    if order := get_order(server_id):
+        return order
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+        policy = ((srv.session if srv else None) or {}).get("grid_from_race")
+        if policy is None:
+            return []
+        path = last_race_file(server_id, since)
+        if path is None:
+            return []
+        parsed = results.parse_result_file(path)
+        grid = results.apply_penalties(parsed, results.penalties_for(s, server_id, path.name), results.non_racing_for(s, server_id, path.name))["grid"]
+    return shape(grid, int(policy))
+
+
 # --- the guard (one task per non-race session that comes right before a race) ----------------------------------------------------------------------------------
 
 def on_session(client, event: dict, is_new: bool) -> None:
@@ -170,12 +207,13 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
     try:
         await asyncio.sleep(max(0.0, left - LEAD_S))
         nxt = (idx + 1) % count if count else idx + 1
-        if not await _race_next(client, nxt):
+        if not await _race_at(client, nxt):
             log.debug("server %s: the session after %s is not a race: no grid times", client.server_id, idx)
             return
+        prev_race = await _race_at(client, (idx - 1) % count) if count else False   # an order from the race before only makes sense right after a race
         end = time.monotonic() + LEAD_S + LATE_S
         while True:
-            err = await _tick(client, idx)
+            err = await _tick(client, idx, prev_race)
             if err and err != warned:
                 log.warning("server %s: grid times not written: %s", client.server_id, err)
             warned = err
@@ -188,7 +226,7 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
         log.exception("server %s: the grid guard failed", client.server_id)
 
 
-async def _race_next(client, nxt: int) -> bool:
+async def _race_at(client, nxt: int) -> bool:
     """Is session `nxt` a race, as acServer says NOW (the director may have redefined it)? Asked twice and the second answer trusted: one still in flight from an earlier question would be old."""
     from app.live import acsp   # late: acsp imports this module
     for _ in range(2):
@@ -202,11 +240,14 @@ async def _race_next(client, nxt: int) -> bool:
     return client.session_types.get(nxt) == 3
 
 
-async def _tick(client, idx: int) -> str | None:
+async def _tick(client, idx: int, prev_race: bool = False) -> str | None:
     """One write. Returns why nothing was written (or None); the database and the memory are read off the event loop.
     ponytail: the cars are read here and written a moment later in the thread: a slot that changes hands in between gets the old driver's place for one second (the next tick corrects it)."""
     from app import supervisor   # late, like acsp.py does: supervisor owns the client
-    order = await asyncio.to_thread(get_order, client.server_id)
+    if prev_race:
+        order = await asyncio.to_thread(order_now, client.server_id, client.session_t0 - 120)
+    else:
+        order = await asyncio.to_thread(get_order, client.server_id)
     inst = supervisor.get(client.server_id)
     if not order or not inst or not inst.pid:
         return None

@@ -46,8 +46,16 @@ class Seg:
     wait: int    # seconds
 
 
-def segments(config: dict, est_min: int = 0) -> list[Seg]:
+def segments(config: dict, est_min: int = 0, sequence: list[dict] | None = None) -> list[Seg]:
+    """The sessions of the cycle: the server's own three sections, or its session sequence (app/sessionpatch.py) when it has one."""
     out = []
+    if sequence:
+        kinds = {"practice": 1, "qualify": 2, "race": 3}
+        for i, st in enumerate(sequence):
+            minutes, laps, wait = int(st.get("time_min") or 0), int(st.get("laps") or 0), int(st.get("wait_s") or 0)
+            length = minutes * 60 if minutes and not laps else (est_min or RACE_LAPS_EST_MIN) * 60
+            out.append(Seg(i, kinds[st["kind"]], str(st["name"]), length + wait, minutes, laps, wait))
+        return out
     for section, typ in TYPES:
         sec = config.get(section)
         if not sec:
@@ -59,9 +67,9 @@ def segments(config: dict, est_min: int = 0) -> list[Seg]:
     return out
 
 
-def position(config: dict, anchor_index: int | None, anchor_at: float | None, now: float | None = None, est_min: int = 0) -> dict | None:
+def position(config: dict, anchor_index: int | None, anchor_at: float | None, now: float | None = None, est_min: int = 0, sequence: list[dict] | None = None) -> dict | None:
     """{index, remaining_s, elapsed_s} of the clock now, or None when it has no position (never ran, or ended)."""
-    segs = segments(config, est_min)
+    segs = segments(config, est_min, sequence)
     if not segs or anchor_index is None or anchor_at is None:
         return None
     now = time.time() if now is None else now
@@ -85,8 +93,13 @@ def race_est(s: Server | None) -> int:
         return 0
 
 
+def sequence_of(s: Server | None) -> list[dict] | None:
+    """The session sequence the server was set up with (None: the usual practice, qualify, race)."""
+    return ((s.session if s else None) or {}).get("sequence") or None
+
+
 def server_position(s: Server, now: float | None = None) -> dict | None:
-    return position(s.config, s.anchor_index, s.anchor_at, now, race_est(s))
+    return position(s.config, s.anchor_index, s.anchor_at, now, race_est(s), sequence_of(s))
 
 
 def set_anchor(server_id: int, index: int, at: float) -> None:
@@ -109,7 +122,7 @@ def on_session_event(server_id: int, event: dict) -> None:
             shorter = 0
             with Session(engine) as sess:
                 s = sess.get(Server, server_id)
-                segs = segments(s.config, race_est(s)) if s else []
+                segs = segments(s.config, race_est(s), sequence_of(s)) if s else []
             if int(cur) < len(segs) and segs[int(cur)].minutes and event.get("time_min"):
                 shorter = max(0, segs[int(cur)].minutes * 60 - int(event["time_min"]) * 60)
             set_anchor(server_id, int(cur), time.time() - event.get("elapsed_ms", 0) / 1000 - shorter)
@@ -142,7 +155,7 @@ async def resume(server_id: int, planned: dict | None, planned_at: float, settle
         return None
     with Session(engine) as sess:
         s = sess.get(Server, server_id)
-        segs = segments(s.config, race_est(s)) if s else []
+        segs = segments(s.config, race_est(s), sequence_of(s)) if s else []
     if not segs:
         return None
     cur = int(inst.acsp.session.get("current_session_index", 0))

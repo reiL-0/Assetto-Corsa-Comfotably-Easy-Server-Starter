@@ -140,6 +140,24 @@ class NascarSessionIn(BaseModel):
 UNLIMITED_MIN = 30000   # «unlimited» session time (20 days): acServer has no such switch. Measured on a real acServer: 65535 min overflows its 32-bit millisecond clock (timeleft comes out NEGATIVE and the session would end at once); the largest safe value is 35791 min, 30000 leaves room
 
 
+class SequenceStep(BaseModel):
+    """One session of a session sequence (app/sessionpatch.py): what acServer will play at this position of the cycle."""
+
+    kind: Literal["practice", "qualify", "race"]
+    name: str = Field(min_length=1, max_length=40)
+    time_min: int = Field(default=0, ge=0, le=1440)   # minutes; a race by laps has 0
+    laps: int = Field(default=0, ge=0, le=999)        # a race by laps; practice and qualify have 0
+    wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the start (a race's grid wait)
+
+    @model_validator(mode="after")
+    def _has_a_length(self) -> SequenceStep:
+        if self.kind != "race" and (self.laps or not self.time_min):
+            raise ValueError("a practice or a qualify is timed: time_min > 0 and no laps")
+        if self.kind == "race" and bool(self.laps) == bool(self.time_min):
+            raise ValueError("a race is by laps or by time, one of them")
+        return self
+
+
 class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
@@ -181,6 +199,8 @@ class SessionIn(BaseModel):
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
+    sequence: list[SequenceStep] | None = Field(default=None, min_length=4, max_length=12)   # the sessions of the cycle when they are not just practice, qualify, race (e.g. P, Q, R1, intermediate practice, R2): installed in the running acServer at every start (app/sessionpatch.py)
+    grid_from_race: int | None = Field(default=None, ge=-1, le=50)   # the grid of the race that follows an intermediate session comes from the race before it: 0 = as it finished (stewards' grid penalties applied), N = invert the first N, -1 = all; None = the director sets it by hand (app/gridtimes.py)
 
     @field_validator("car_setups")
     @classmethod
@@ -190,6 +210,20 @@ class SessionIn(BaseModel):
                 raise ValueError("car_setups: a setup name is empty")
             _setup_name(name)
         return v
+
+    @model_validator(mode="after")
+    def _sequence_fits_the_sections(self) -> SessionIn:
+        if self.sequence is None:
+            return self
+        have = {"practice": bool(self.practice_min), "qualify": bool(self.qualify_min), "race": bool(self.race_laps or self.race_min)}
+        for st in self.sequence:
+            if not have[st.kind]:
+                raise ValueError(f"sequence: there is a {st.kind} step but the session has no {st.kind} section (practice_min / qualify_min / race_laps / race_min)")
+        if not any(st.kind == "race" for st in self.sequence):
+            raise ValueError("sequence: it needs at least one race")
+        if self.reversed_grid:
+            raise ValueError("sequence: acServer's own reversed grid does not work with a sequence (use grid_from_race)")
+        return self
 
     @model_validator(mode="after")
     def _off_is_not_a_rule(self) -> SessionIn:
@@ -318,7 +352,7 @@ class GridIn(BaseModel):
 
 
 class SetSessionIn(BaseModel):
-    index: int = Field(ge=0, le=7)
+    index: int = Field(ge=0, le=11)   # the 12 slots of the grown acServer (app/sessionpatch.py MAX_SESSIONS); the server itself answers «out of bounds» past its real length
     name: str = Field(min_length=1, max_length=40)
     session_type: int = Field(ge=1, le=3)
     laps: int = Field(default=0, ge=0, le=999)

@@ -150,8 +150,24 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
         raise ServerError(409, str(e)) from e
     inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
     inst.set_weather_plan(s.weather_plan, s.config)
-    timeline.start_resume(server_id, planned, planned_at)   # if the session clock ran while the server was off, move it to where the clock is
+    if old := _boots.pop(server_id, None):
+        old.cancel()   # a start of a start that has not finished: the new instance is the one that counts
+    if sequence := timeline.sequence_of(s):   # more than three sessions: grow acServer's list first, then move the clock (both before anybody can join)
+        kinds = [t for name, t in timeline.TYPES if s.config.get(name)]
+        _boots[server_id] = asyncio.create_task(_boot(server_id, inst, sequence, kinds, planned, planned_at))
+    else:
+        timeline.start_resume(server_id, planned, planned_at)   # if the session clock ran while the server was off, move it to where the clock is
     return {"running": inst.running, "pid": inst.pid}
+
+
+_boots: dict[int, asyncio.Task] = {}   # server id -> its start-up task (a reference, so it is not collected; the next start cancels it)
+
+
+async def _boot(server_id: int, inst, sequence: list[dict], kinds: list[int], planned: dict | None, planned_at: float) -> None:
+    from app import sessionpatch   # late: it needs ptrace and ctypes only where a sequence is used
+    if await sessionpatch.install(server_id, sequence, kinds, inst) is not None or supervisor.get(server_id) is not inst:
+        return   # not installed (it said why): the server plays its own three sessions, and the clock must not move it by the indexes of a sequence it does not have
+    await timeline.resume(server_id, planned, planned_at)
 
 
 async def stop_instance(server_id: int, inst: supervisor.Instance, reason: str) -> None:
@@ -253,7 +269,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)
     old_est = timeline.race_est(s)
     est = old_est if body.race_est_min is None else body.race_est_min   # a client that does not know the field (a preset, an old event) must not wipe it
-    if body.restart or _clock_key(cfg) != _clock_key(s.config) or est != old_est:
+    new_sequence = [st.model_dump() for st in body.sequence] if body.sequence else None
+    if body.restart or _clock_key(cfg) != _clock_key(s.config) or est != old_est or (s.session or {}).get("sequence") != new_sequence:
         s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart, or a race that lasts otherwise): the clock starts over with the next start
     s.config = cfg
     s.welcome = body.welcome.strip()

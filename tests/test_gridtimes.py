@@ -93,7 +93,7 @@ def test_the_order_lives_in_the_database_without_repeats():
 
 
 def _client(sid, types=None, cars=None):
-    c = SimpleNamespace(server_id=sid, grid_task=None, grid_key=None, grid_last=None, session_types=dict(types or {}), cars=cars or {})
+    c = SimpleNamespace(server_id=sid, grid_task=None, grid_key=None, grid_last=None, session_t0=0.0, session_types=dict(types or {}), cars=cars or {})
     c.sent = []
     c.send = lambda data: (c.sent.append(data), c.session_types.__setitem__(1, c.answer) if hasattr(c, "answer") else None)
     return c
@@ -166,7 +166,7 @@ def test_an_old_answer_in_flight_does_not_make_the_next_session_a_race(monkeypat
     answers = iter([3, 2])   # the first answer is the stale one (a race), the second is the truth (a qualify)
     client = _client(9308)
     client.send = lambda data: client.session_types.__setitem__(1, next(answers))
-    assert asyncio.run(gridtimes._race_next(client, 1)) is False
+    assert asyncio.run(gridtimes._race_at(client, 1)) is False
 
 
 def test_apply_does_not_write_into_another_session():
@@ -234,3 +234,62 @@ def test_the_grid_endpoints_keep_and_delete_the_order():
     assert api.delete(f"/api/v1/servers/{sid}/grid").json() == {"deleted": True}
     assert api.get(f"/api/v1/servers/{sid}/grid").json() == {"guids": []}
     assert api.get("/api/v1/servers/999999/grid").status_code == 404
+
+
+# --- the order from the race before (grid_from_race) ----------------------------------------------------------------------------------------------------------
+
+def _race_server(policy, tmp_path):
+    """A server whose results folder holds a race (Alice, Bob, Cat in that order) and whose session says `grid_from_race=policy`."""
+    from sqlmodel import Session as DbSession
+
+    from app.config import settings
+    from app.db import engine
+    from app.models import Server
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": f"Auto{policy}"}).json()["id"]
+    with DbSession(engine) as db:
+        srv = db.get(Server, sid)
+        srv.session = {"grid_from_race": policy}
+        db.add(srv)
+        db.commit()
+    folder = __import__("pathlib").Path(settings.data_dir) / "instances" / str(sid) / "results"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = "2026_11_18_10_0_RACE.json"
+    (folder / name).write_text(json.dumps({"Type": "RACE", "TrackName": "spa", "TrackConfig": "", "Name": "Race", "Result": [
+        {"DriverName": n, "DriverGuid": g, "CarModel": "c", "BestLap": 90000, "TotalTime": 600000 + i} for i, (n, g) in enumerate([("Alice", "1"), ("Bob", "2"), ("Cat", "3")])],
+        "Laps": [{"DriverGuid": g, "LapTime": 90000, "Cuts": 0} for g in "123"]}))
+    return sid, name
+
+
+@pytest.mark.parametrize("policy, expected", [(0, ["1", "2", "3"]), (2, ["2", "1", "3"]), (-1, ["3", "2", "1"])])
+def test_the_grid_comes_from_the_race_before_by_the_policy(tmp_path, policy, expected):
+    sid, _ = _race_server(policy, tmp_path)
+    assert gridtimes.order_now(sid, since=0) == expected
+
+
+def test_the_grid_penalties_of_the_stewards_move_the_driver_back_and_a_manual_order_wins(tmp_path):
+    from sqlmodel import Session as DbSession
+
+    from app.db import engine
+    from app.models import Penalty
+    sid, name = _race_server(0, tmp_path)
+    with DbSession(engine) as db:
+        db.add(Penalty(server_id=sid, filename=name, driver_guid="1", kind="grid", value=1, reason="test", created_by="root"))
+        db.commit()
+    assert gridtimes.order_now(sid, since=0) == ["2", "1", "3"]   # Alice won and loses a place on the grid
+    gridtimes.set_order(sid, ["3", "1"], "root")
+    assert gridtimes.order_now(sid, since=0) == ["3", "1"]         # the director's own order is not touched by the policy
+    gridtimes.clear_order(sid)
+
+
+def test_no_policy_or_a_result_from_before_this_session_gives_no_order(tmp_path):
+    sid, _ = _race_server(None, tmp_path)
+    assert gridtimes.order_now(sid, since=0) == []   # the server did not ask for it
+    sid2, _ = _race_server(0, tmp_path)
+    import time
+    assert gridtimes.order_now(sid2, since=time.time() + 3600) == []   # the race file is older than the session that is ending
+
+
+def test_shape_is_acservers_reversed_grid():
+    g = ["a", "b", "c", "d"]
+    assert gridtimes.shape(g, 0) == g and gridtimes.shape(g, 2) == ["b", "a", "c", "d"] and gridtimes.shape(g, -1) == ["d", "c", "b", "a"]
