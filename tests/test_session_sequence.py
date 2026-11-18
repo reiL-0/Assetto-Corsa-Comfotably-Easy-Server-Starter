@@ -109,8 +109,11 @@ def test_install_restarts_the_session_to_trip_the_patch_then_defines_every_slot(
     monkeypatch.setattr(supervisor, "get", lambda sid: inst)
     monkeypatch.setattr(gridtimes, "known_binary", lambda pid, started: True)
 
-    def fake_grow(pid, layout, timeout=30.0, cancel=None):
-        time.sleep(0.6)   # the manager asks for a session change 0.3 s after it starts waiting
+    def fake_grow(pid, layout, timeout=30.0, cancel=None, armed=None):
+        time.sleep(0.4)   # getting every thread under ptrace takes a while: nothing may be asked before it says «armed»
+        assert sent == [], "the session change was asked for before the breakpoint was in"
+        armed.set()
+        time.sleep(0.3)
         grown.append((pid, layout))
         return "grown"
 
@@ -190,3 +193,36 @@ def test_a_cancelled_patch_puts_everything_back(tmp_path):
     finally:
         srv.terminate()
         srv.wait(5)
+
+
+@pytest.mark.skipif(not (SIM / "acServer").exists(), reason="needs the local acServer simulator (ACM_TEST_ACSERVER_SIM)")
+def test_a_patch_that_fails_halfway_gives_the_thread_back_unharmed(tmp_path, monkeypatch):
+    """What crashed the staging server: the thread that hit the breakpoint was let go one byte into an instruction. Here the call to makeslice is aimed at an address that faults: the patch must abort, the thread
+    must go back to the start of broadcastSession (the restart then completes) and the server must still be the three-session server it was."""
+    import struct
+    srv = subprocess.Popen(["./acServer"], cwd=SIM, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 19602))
+    armed = threading.Event()
+    def length():
+        with open(f"/proc/{srv.pid}/mem", "rb", 0) as f:
+            f.seek(sessionpatch.SESSIONS)
+            return struct.unpack("<III", f.read(12))[1]
+    try:
+        time.sleep(3)
+        monkeypatch.setattr(sessionpatch, "MAKESLICE", 0x1000)   # nothing is mapped there
+        job = threading.Thread(target=lambda: s.sendto(acsp.encode_restart_session(), ("127.0.0.1", 19601)) if armed.wait(10) else None)
+        job.start()
+        with pytest.raises(RuntimeError, match="signal"):
+            sessionpatch.grow(srv.pid, [0, 1, 2, 0, 2], 20, None, armed)
+        job.join()
+        time.sleep(1.0)
+        assert srv.poll() is None, "the server died"
+        assert length() == 3
+        s.sendto(acsp.encode_next_session(), ("127.0.0.1", 19601))   # still answers its plugin
+        time.sleep(1.0)
+        assert srv.poll() is None
+    finally:
+        srv.terminate()
+        out = srv.communicate(timeout=5)[0].decode(errors="replace")
+    assert "panic" not in out and "SIGSEGV" not in out, out[-600:]

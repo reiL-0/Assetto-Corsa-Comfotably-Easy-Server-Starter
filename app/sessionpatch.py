@@ -33,6 +33,7 @@ STATIC = (0, 1, 2, 3, 4, 5, 10, 11, 12)   # the words copied from the original s
 TYPES = {"practice": 1, "qualify": 2, "race": 3}
 PT_ATTACH, PT_DETACH, PT_CONT, PT_GETREGS, PT_SETREGS = 16, 17, 7, 12, 13
 WALL = 0x40000000
+BENIGN = (signal.SIGURG, signal.SIGCHLD, signal.SIGALRM, signal.SIGPROF, signal.SIGWINCH)   # signals a Go thread gets in normal life (preemption, timers): passed on while we work. Anything else during our call (a SIGSEGV from a bad call) aborts and puts everything back
 _NAMES = "r15 r14 r13 r12 rbp rbx r11 r10 r9 r8 rax rcx rdx rsi rdi orig_rax rip cs eflags rsp ss fs_base gs_base ds es fs gs".split()
 
 
@@ -80,11 +81,12 @@ def _tgkill(pid: int, tid: int, sig: int) -> None:
     libc.syscall(234, pid, tid, sig)   # x86_64
 
 
-def _stop(pid: int, tid: int) -> bool:
+def _stop(pid: int, tid: int, resend: bool = True) -> bool:
     """Make a RUNNING traced thread stop; True once it is in a ptrace-stop with its SIGSTOP consumed (a thread that has ended counts as stopped: there is nothing left to do). A SIGTRAP is ours and is never passed on:
     if the thread had just hit the breakpoint (rip right after it) it is moved back to its start and let go, so it runs the function for real and then meets the SIGSTOP."""
     try:
-        _tgkill(pid, tid, int(signal.SIGSTOP))
+        if resend:   # (not again for a thread that was already asked: two pending SIGSTOPs would stop the whole process after the detach)
+            _tgkill(pid, tid, int(signal.SIGSTOP))
         for _ in range(50):
             sig = _wait_stop(tid, 0.2)
             if sig == signal.SIGSTOP:
@@ -124,9 +126,9 @@ def _attach_all(pid: int, attached: set[int], running: set[int]) -> None:
                 running.add(t)   # its attach-stop has not come: it counts as running (it will be stopped, or detached, like any other)
 
 
-def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.Event | None = None) -> str:
+def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.Event | None = None, armed: threading.Event | None = None) -> str:
     """Replace main.Sessions of the RUNNING acServer `pid` by a slice of len(layout) sessions (slot i takes the fixed words of ORIGINAL slot layout[i]). Blocks until a thread reaches broadcastSession (something must
-    make it: RESTART_SESSION; `cancel` set from outside gives up). Every ptrace call is made from this thread (the tracer is a thread, not a process): run it with asyncio.to_thread, once. Raises RuntimeError with the reason when it cannot.
+    make it: RESTART_SESSION; `cancel` set from outside gives up; `armed` is set when the breakpoint is in and every thread runs: only then may something ask for the session change). Every ptrace call is made from this thread (the tracer is a thread, not a process): run it with asyncio.to_thread, once. Raises RuntimeError with the reason when it cannot.
     Whatever happens the breakpoints are taken out, the thread that was moved gets its registers back and every traced thread is stopped and detached: a thread left attached would stop at its next signal and nobody would wake it."""
     mem = open(f"/proc/{pid}/mem", "r+b", 0)
     rd = lambda a, n: (mem.seek(a), mem.read(n))[1]
@@ -152,6 +154,8 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
                 running.add(t)
             except OSError:
                 pass
+        if armed:
+            armed.set()
         hit, end = None, time.time() + timeout
         while hit is None and time.time() < end and not (cancel and cancel.is_set()):
             for t in list(running):
@@ -171,19 +175,20 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
             time.sleep(0.0005)
         if hit is None:
             raise RuntimeError("cancelled" if cancel and cancel.is_set() else f"no session change within {timeout:.0f} s")
-        wr(BROADCAST, bp_orig)   # first thing: nobody else may trip over the breakpoint
-        bp_orig = None
-        for t in sorted(running):   # everybody else stops while the slice is swapped
-            if _stop(pid, t):
-                running.discard(t)
-        if running:
-            raise RuntimeError(f"threads {sorted(running)} would not stop")
         r0 = Regs()
         _pt(PT_GETREGS, hit, 0, ctypes.addressof(r0))
         regs = Regs.from_buffer_copy(bytes(r0))
         r0.rip = BROADCAST   # where it goes back to: the entry of broadcastSession, as if it had not run yet
         saved = Regs.from_buffer_copy(bytes(r0))
         regs.rip = BROADCAST
+        moved = (hit, saved)   # from now on it is stopped one byte INTO an instruction: whatever happens it must get these registers back before it is let go
+        wr(BROADCAST, bp_orig)   # nobody else may trip over the breakpoint
+        bp_orig = None
+        for t in sorted(running):   # everybody else stops while the slice is swapped
+            if _stop(pid, t):
+                running.discard(t)
+        if running:
+            raise RuntimeError(f"threads {sorted(running)} would not stop")
         esp0 = r0.rsp & 0xFFFFFFFF
         ret = struct.unpack("<I", rd(esp0, 4))[0]
         cur_ptr, cur_idx = struct.unpack("<I", rd(CURRENT, 4))[0], struct.unpack("<i", rd(CURIDX, 4))[0]
@@ -192,7 +197,6 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
         ret_fix = (ret, rd(ret, 1))
         wr(ret, b"\xcc")
         regs.rsp, regs.rip, regs.orig_rax = sp, MAKESLICE, 0xFFFFFFFFFFFFFFFF
-        moved = (hit, saved)
         _pt(PT_SETREGS, hit, 0, ctypes.addressof(regs))
         _pt(PT_CONT, hit)
         running.add(hit)
@@ -203,6 +207,8 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
             running.discard(hit)
             if sig == signal.SIGTRAP:
                 break
+            if sig not in BENIGN:
+                raise RuntimeError(f"the call to runtime.makeslice was met by signal {sig}")
             _pt(PT_CONT, hit, 0, sig)
             running.add(hit)
         wr(ret_fix[0], ret_fix[1])
@@ -239,10 +245,14 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
         for t in sorted(attached):
             try:
                 if t in running and not _stop(pid, t):
-                    _stop(pid, t)   # once more
+                    _stop(pid, t, resend=False)   # once more, waiting only
                 _pt(PT_DETACH, t, 0, 0)
             except (OSError, RuntimeError):
                 pass
+        try:
+            os.kill(pid, signal.SIGCONT)   # if a stop signal slipped through anyway, the process must not stay stopped
+        except OSError:
+            pass
         mem.close()
 
 
@@ -264,16 +274,19 @@ async def install(server_id: int, sequence: list[dict], kinds: list[int], inst) 
         if not gridtimes.known_binary(inst.pid, inst.started_at):
             return _fail(server_id, "this acServer is not the build the session patch belongs to")
         if len(layout) > len(kinds):
-            loop = asyncio.get_running_loop()
-            trigger = loop.call_later(0.3, lambda: inst.acsp and inst.acsp.send(acsp.encode_restart_session()))   # makes a thread reach broadcastSession; the same session again
-            cancel = threading.Event()
+            cancel, armed = threading.Event(), threading.Event()
+            job = asyncio.create_task(asyncio.to_thread(grow, inst.pid, layout, 30.0, cancel, armed))
             try:
-                what = await asyncio.to_thread(grow, inst.pid, layout, 30.0, cancel)
+                for _ in range(400):   # up to 20 s for it to get every thread under ptrace and the breakpoint in
+                    if armed.is_set() or job.done():
+                        break
+                    await asyncio.sleep(0.05)
+                if armed.is_set() and not job.done():
+                    inst.acsp.send(acsp.encode_restart_session())   # makes a thread reach broadcastSession: the same session again
+                what = await job
             except asyncio.CancelledError:
                 cancel.set()   # the thread cannot be interrupted: it is told to give up and put everything back
                 raise
-            finally:
-                trigger.cancel()
             log.info("server %s: %s", server_id, what)
         for i, st in enumerate(sequence):
             if supervisor.get(server_id) is not inst:
