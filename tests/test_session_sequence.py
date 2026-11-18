@@ -379,3 +379,18 @@ def test_a_failed_step_is_tried_again_by_the_next_description_of_the_session(mon
 
     asyncio.run(go())
     assert calls == ["tried", (60_000, 5_000)]
+
+
+def test_the_template_with_no_qualify_validates_and_the_first_race_needs_no_policy():
+    """Practice, race 1, intermediate, race 2 inverted: no qualify section is needed, race 1 takes the practice's own grid (acServer sorts by best lap) and only race 2 asks for the policy."""
+    seq = [
+        {"kind": "practice", "name": "Práctica", "time_min": 10},
+        {"kind": "race", "name": "Carrera 1", "laps": 8, "wait_s": 30},
+        {"kind": "practice", "name": "Intermedia", "time_min": 3},
+        {"kind": "race", "name": "Carrera 2", "laps": 8, "wait_s": 30},
+    ]
+    s = SessionIn(name="S", track="spa", cars=["gt3"], practice_min=10, race_laps=8, sequence=seq, grid_from_race=6)
+    assert [st.kind for st in s.sequence] == ["practice", "race", "practice", "race"] and s.grid_from_race == 6
+    assert sessionpatch.layout_for([st.model_dump() for st in s.sequence], [1, 3]) == [0, 1, 0, 1]   # a server with a practice and a race section only
+    with pytest.raises(ValidationError):
+        SessionIn(name="S", track="spa", cars=["gt3"], race_laps=8, sequence=seq)   # but a practice step needs its section

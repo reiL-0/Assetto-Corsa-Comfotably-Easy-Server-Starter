@@ -210,7 +210,7 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
         if not await _race_at(client, nxt):
             log.debug("server %s: the session after %s is not a race: no grid times", client.server_id, idx)
             return
-        prev_race = await _race_at(client, (idx - 1) % count) if count else False   # an order from the race before only makes sense right after a race
+        prev_race = idx > 0 and bool(count) and await _race_at(client, idx - 1)   # an order from the race before only makes sense right after a race OF THIS CYCLE: the opening session of a cycle that ends in a race is not «between two races» (its race is graded by its own times)
         end = time.monotonic() + LEAD_S + LATE_S
         while True:
             err = await _tick(client, idx, prev_race)

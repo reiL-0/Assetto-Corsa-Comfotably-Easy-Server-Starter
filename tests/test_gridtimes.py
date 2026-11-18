@@ -293,3 +293,20 @@ def test_no_policy_or_a_result_from_before_this_session_gives_no_order(tmp_path)
 def test_shape_is_acservers_reversed_grid():
     g = ["a", "b", "c", "d"]
     assert gridtimes.shape(g, 0) == g and gridtimes.shape(g, 2) == ["b", "a", "c", "d"] and gridtimes.shape(g, -1) == ["d", "c", "b", "a"]
+
+
+@pytest.mark.parametrize("idx, count, asked", [(0, 4, False), (2, 5, True)])
+def test_the_automatic_grid_applies_to_the_session_between_two_races_not_to_the_opening_one(monkeypatch, idx, count, asked):
+    """Practice, race 1, intermediate, race 2, looping: the opening practice also has a race before it (race 2 of the last cycle) and one after it, but race 1 is graded by that practice's own times."""
+    seen = []
+    monkeypatch.setattr(gridtimes, "_write", lambda *a: None)
+    monkeypatch.setattr(gridtimes, "order_now", lambda sid, since: (seen.append(sid), ["A"])[1])
+    monkeypatch.setattr(gridtimes, "LEAD_S", 0.0)
+    monkeypatch.setattr(gridtimes, "LATE_S", 0.0)
+    monkeypatch.setattr(gridtimes, "DRAIN_S", 0.0)
+    import app.supervisor as supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=4242, started_at=1.0))
+    client = _client(9309, cars={0: {"driver_guid": "A"}})
+    client.send = lambda data: [client.session_types.__setitem__(i, 3) for i in range(count) if i != idx]   # every other session is a race
+    asyncio.run(gridtimes._guard(client, 0.0, idx, count))
+    assert bool(seen) is asked
