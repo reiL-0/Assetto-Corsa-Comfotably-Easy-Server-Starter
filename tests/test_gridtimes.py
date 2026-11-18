@@ -300,7 +300,7 @@ def test_the_automatic_grid_applies_to_the_session_between_two_races_not_to_the_
     """Practice, race 1, intermediate, race 2, looping: the opening practice also has a race before it (race 2 of the last cycle) and one after it, but race 1 is graded by that practice's own times."""
     seen = []
     monkeypatch.setattr(gridtimes, "_write", lambda *a: None)
-    monkeypatch.setattr(gridtimes, "order_now", lambda sid, since: (seen.append(sid), ["A"])[1])
+    monkeypatch.setattr(gridtimes, "order_now", lambda sid, since, source="race": (seen.append((sid, source)), ["A"])[1])
     monkeypatch.setattr(gridtimes, "LEAD_S", 0.0)
     monkeypatch.setattr(gridtimes, "LATE_S", 0.0)
     monkeypatch.setattr(gridtimes, "DRAIN_S", 0.0)
@@ -310,3 +310,91 @@ def test_the_automatic_grid_applies_to_the_session_between_two_races_not_to_the_
     client.send = lambda data: [client.session_types.__setitem__(i, 3) for i in range(count) if i != idx]   # every other session is a race
     asyncio.run(gridtimes._guard(client, 0.0, idx, count))
     assert bool(seen) is asked
+
+
+# --- the grid from the qualifying (practice, qualify, practice to arrange the grid, race) ----------------------------------------------------------------------
+
+def _qualify_server(flag, tmp_path):
+    """A server whose results folder holds a qualifying where the fastest lap of Bob is dirty (cuts): the site classifies Cat, Alice, Bob. acServer's own order (Result) is another one."""
+    from pathlib import Path
+    from sqlmodel import Session as DbSession
+
+    from app.config import settings
+    from app.db import engine
+    from app.models import Server
+    api = TestClient(app, headers=ADMIN)
+    sid = api.post("/api/v1/servers", json={"name": f"Quali{flag}"}).json()["id"]
+    with DbSession(engine) as db:
+        srv = db.get(Server, sid)
+        srv.session = {"grid_from_qualify": flag}
+        db.add(srv)
+        db.commit()
+    folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = "2026_11_18_9_0_QUALIFY.json"
+    (folder / name).write_text(json.dumps({"Type": "QUALIFY", "TrackName": "spa", "TrackConfig": "", "Name": "Qualify", "Result": [
+        {"DriverName": "Bob", "DriverGuid": "2", "CarModel": "c", "BestLap": 88000, "TotalTime": 1},
+        {"DriverName": "Alice", "DriverGuid": "1", "CarModel": "c", "BestLap": 90000, "TotalTime": 1},
+        {"DriverName": "Cat", "DriverGuid": "3", "CarModel": "c", "BestLap": 89500, "TotalTime": 1}],
+        "Laps": [{"DriverGuid": "2", "LapTime": 88000, "Cuts": 2}, {"DriverGuid": "2", "LapTime": 91000, "Cuts": 0},
+                 {"DriverGuid": "1", "LapTime": 90000, "Cuts": 0}, {"DriverGuid": "3", "LapTime": 89500, "Cuts": 0}]}))
+    return sid, name
+
+
+def test_the_grid_comes_from_the_qualifying_as_the_site_classifies_it_with_the_grid_penalties(tmp_path):
+    from sqlmodel import Session as DbSession
+
+    from app.db import engine
+    from app.models import Penalty
+    sid, name = _qualify_server(True, tmp_path)
+    assert gridtimes.order_now(sid, since=0, source="qualify") == ["3", "1", "2"]   # clean laps: Cat, Alice, Bob (not acServer's Bob, Cat, Alice)
+    with DbSession(engine) as db:
+        db.add(Penalty(server_id=sid, filename=name, driver_guid="3", kind="grid", value=1, reason="test", created_by="root"))
+        db.commit()
+    assert gridtimes.order_now(sid, since=0, source="qualify") == ["1", "3", "2"]   # Cat loses a place on the grid while the practice is on
+    gridtimes.set_order(sid, ["2"], "root")
+    assert gridtimes.order_now(sid, since=0, source="qualify") == ["2"]              # the director's own order wins
+    gridtimes.clear_order(sid)
+    assert gridtimes.order_now(sid, since=0, source="race") == []                    # and the race policy has nothing to read here
+
+
+def test_the_qualifying_is_only_used_when_the_server_asks_for_it(tmp_path):
+    sid, _ = _qualify_server(False, tmp_path)
+    assert gridtimes.order_now(sid, since=0, source="qualify") == []
+
+
+@pytest.mark.parametrize("types, idx, source", [
+    ({0: 1, 1: 2, 2: 1, 3: 3}, 2, "qualify"),   # practice, qualify, PRACTICE, race
+    ({0: 1, 1: 2, 2: 1, 3: 3}, 0, None),        # the opening practice: its race before is the last cycle's, nothing to arrange
+    ({0: 1, 1: 2, 2: 1, 3: 3}, 1, None),        # the qualifying itself: a practice comes next, not a race
+    ({0: 1, 1: 2, 2: 3, 3: 1, 4: 3}, 3, "race"),  # practice, qualify, race, INTERMEDIATE, race
+    ({0: 1, 1: 3, 2: 1, 3: 3}, 2, "race"),       # practice, race, INTERMEDIATE, race
+])
+def test_the_guard_reads_the_result_of_the_kind_of_session_that_came_before(monkeypatch, types, idx, source):
+    import struct
+    seen = []
+    monkeypatch.setattr(gridtimes, "_write", lambda *a: None)
+    monkeypatch.setattr(gridtimes, "order_now", lambda sid, since, src="race": (seen.append(src), ["A"])[1])
+    monkeypatch.setattr(gridtimes, "get_order", lambda sid: [])
+    for name, v in (("LEAD_S", 0.0), ("LATE_S", 0.0), ("DRAIN_S", 0.0)):
+        monkeypatch.setattr(gridtimes, name, v)
+    import app.supervisor as supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=4242, started_at=1.0))
+    client = _client(9310, cars={0: {"driver_guid": "A"}})
+    client.send = lambda data: (lambda i: client.session_types.__setitem__(i, types[i]))(struct.unpack("<h", data[1:3])[0])   # the answer to «what is session i?»
+    asyncio.run(gridtimes._guard(client, 0.0, idx, len(types)))
+    assert seen == ([source] if source else [])
+
+
+def test_a_long_wait_before_the_session_does_not_leave_the_result_before_it_out_of_reach(monkeypatch):
+    since = []
+    monkeypatch.setattr(gridtimes, "order_now", lambda sid, s, src="race": (since.append(s), ["A"])[1])
+    monkeypatch.setattr(gridtimes, "_write", lambda *a: None)
+    import app.supervisor as supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=4242, started_at=1.0))
+    client = _client(9311, cars={0: {"driver_guid": "A"}})
+    client.session_t0, client.session = 10_000.0, {"wait_time": 300}   # a practice with a 5 minute wait: its clock starts 5 minutes after the result file was written
+    asyncio.run(gridtimes._tick(client, 2, "qualify"))
+    client.session = {}
+    asyncio.run(gridtimes._tick(client, 2, "qualify"))
+    assert since == [10_000.0 - 120 - 300, 10_000.0 - 120]

@@ -144,24 +144,30 @@ def shape(grid: list[str], n: int) -> list[str]:
     return grid[:n][::-1] + grid[n:] if n > 0 else list(grid)
 
 
-def last_race_file(server_id: int, since: float) -> Path | None:
-    """The newest race result of this server written at or after `since` (unix time): the race that just ended, whose file acServer writes when its session ends."""
+def last_result_file(server_id: int, since: float, kind: str = "RACE") -> Path | None:
+    """The newest result of this kind (RACE, QUALIFY) of this server written at or after `since` (unix time): the session that just ended, whose file acServer writes when it ends."""
     folder = Path(settings.data_dir) / "instances" / str(server_id) / "results"
-    files = [p for p in folder.glob("*_RACE.json") if p.stat().st_mtime >= since] if folder.exists() else []
+    files = [p for p in folder.glob(f"*_{kind}.json") if p.stat().st_mtime >= since] if folder.exists() else []
     return max(files, key=lambda p: (results.result_start(p.name) or datetime.min.astimezone(), p.name), default=None)
 
 
-def order_now(server_id: int, since: float) -> list[str]:
-    """The order to deliver now: the director's own (GridOrder) if there is one, else the race before it by the server's `grid_from_race` (0 as finished with the stewards' grid penalties, N = first N inverted,
-    -1 = all inverted); [] when neither. Reads the database and a result file: call it off the event loop."""
+def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
+    """The order to deliver now: the director's own (GridOrder) if there is one, else the result of the session before it:
+    source "race": the race, by the server's `grid_from_race` (0 as finished, N = first N inverted, -1 = all inverted);
+    source "qualify": the qualifying as the site classifies it (clean laps), when the server's `grid_from_qualify` is set (a practice after the qualifying to arrange the grid).
+    Both with the stewards' grid penalties applied; [] when none of that. Reads the database and a result file: call it off the event loop."""
     if order := get_order(server_id):
         return order
     with Session(engine) as s:
         srv = s.get(Server, server_id)
-        policy = ((srv.session if srv else None) or {}).get("grid_from_race")
+        session = (srv.session if srv else None) or {}
+        if source == "qualify":
+            policy, kind = (0 if session.get("grid_from_qualify") else None), "QUALIFY"
+        else:
+            policy, kind = session.get("grid_from_race"), "RACE"
         if policy is None:
             return []
-        path = last_race_file(server_id, since)
+        path = last_result_file(server_id, since, kind)
         if path is None:
             return []
         parsed = results.parse_result_file(path)
@@ -210,10 +216,11 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
         if not await _race_at(client, nxt):
             log.debug("server %s: the session after %s is not a race: no grid times", client.server_id, idx)
             return
-        prev_race = idx > 0 and bool(count) and await _race_at(client, idx - 1)   # an order from the race before only makes sense right after a race OF THIS CYCLE: the opening session of a cycle that ends in a race is not «between two races» (its race is graded by its own times)
+        # an order from the session before only makes sense right after it IN THIS CYCLE: the opening session of a cycle that ends in a race is not «between two races» (its race is graded by its own times)
+        source = {3: "race", 2: "qualify"}.get(await _type_at(client, idx - 1)) if idx > 0 and count else None
         end = time.monotonic() + LEAD_S + LATE_S
         while True:
-            err = await _tick(client, idx, prev_race)
+            err = await _tick(client, idx, source)
             if err and err != warned:
                 log.warning("server %s: grid times not written: %s", client.server_id, err)
             warned = err
@@ -226,8 +233,8 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
         log.exception("server %s: the grid guard failed", client.server_id)
 
 
-async def _race_at(client, nxt: int) -> bool:
-    """Is session `nxt` a race, as acServer says NOW (the director may have redefined it)? Asked twice and the second answer trusted: one still in flight from an earlier question would be old."""
+async def _type_at(client, nxt: int) -> int | None:
+    """The type of session `nxt` (1 practice, 2 qualify, 3 race), as acServer says NOW (the director may have redefined it). Asked twice and the second answer trusted: one still in flight from an earlier question would be old."""
     from app.live import acsp   # late: acsp imports this module
     for _ in range(2):
         client.session_types.pop(nxt, None)
@@ -237,15 +244,20 @@ async def _race_at(client, nxt: int) -> bool:
                 break
             await asyncio.sleep(0.2)
         await asyncio.sleep(DRAIN_S)
-    return client.session_types.get(nxt) == 3
+    return client.session_types.get(nxt)
 
 
-async def _tick(client, idx: int, prev_race: bool = False) -> str | None:
+async def _race_at(client, nxt: int) -> bool:
+    return await _type_at(client, nxt) == 3
+
+
+async def _tick(client, idx: int, source: str | None = None) -> str | None:
     """One write. Returns why nothing was written (or None); the database and the memory are read off the event loop.
     ponytail: the cars are read here and written a moment later in the thread: a slot that changes hands in between gets the old driver's place for one second (the next tick corrects it)."""
     from app import supervisor   # late, like acsp.py does: supervisor owns the client
-    if prev_race:
-        order = await asyncio.to_thread(order_now, client.server_id, client.session_t0 - 120)
+    if source:
+        wait = int((getattr(client, "session", None) or {}).get("wait_time") or 0)   # the file of the session before is written when this one is SET UP, a start that the wait puts that much after it
+        order = await asyncio.to_thread(order_now, client.server_id, client.session_t0 - 120 - wait, source)
     else:
         order = await asyncio.to_thread(get_order, client.server_id)
     inst = supervisor.get(client.server_id)

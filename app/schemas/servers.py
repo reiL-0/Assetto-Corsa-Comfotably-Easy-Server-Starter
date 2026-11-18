@@ -204,6 +204,7 @@ class SessionIn(BaseModel):
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
     sequence: list[SequenceStep] | None = Field(default=None, min_length=4, max_length=12)   # the sessions of the cycle when they are not just practice, qualify, race (e.g. P, Q, R1, intermediate practice, R2): installed in the running acServer at every start (app/sessionpatch.py)
+    grid_from_qualify: bool = False   # a practice AFTER the qualifying, right before a race, arranges the grid: the race starts as the qualifying is classified on the site (clean laps) with the stewards' grid penalties applied (app/gridtimes.py)
     grid_from_race: int | None = Field(default=None, ge=-1, le=50)   # the grid of the race that follows an intermediate session comes from the race before it: 0 = as it finished (stewards' grid penalties applied), N = invert the first N, -1 = all; None = the director sets it by hand (app/gridtimes.py)
 
     @field_validator("car_setups")

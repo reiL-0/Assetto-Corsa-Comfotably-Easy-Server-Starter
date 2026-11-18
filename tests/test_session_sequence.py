@@ -394,3 +394,16 @@ def test_the_template_with_no_qualify_validates_and_the_first_race_needs_no_poli
     assert sessionpatch.layout_for([st.model_dump() for st in s.sequence], [1, 3]) == [0, 1, 0, 1]   # a server with a practice and a race section only
     with pytest.raises(ValidationError):
         SessionIn(name="S", track="spa", cars=["gt3"], race_laps=8, sequence=seq)   # but a practice step needs its section
+
+
+def test_the_template_practice_qualify_practice_race_validates():
+    """The second practice is there to arrange the grid: the race starts as the qualifying is classified, with the stewards' grid penalties."""
+    seq = [
+        {"kind": "practice", "name": "Práctica", "time_min": 10},
+        {"kind": "qualify", "name": "Clasificación", "time_min": 8},
+        {"kind": "practice", "name": "Ajuste de parrilla", "time_min": 4},
+        {"kind": "race", "name": "Carrera", "laps": 10, "wait_s": 30},
+    ]
+    s = SessionIn(name="S", track="spa", cars=["gt3"], practice_min=10, qualify_min=8, race_laps=10, sequence=seq, grid_from_qualify=True)
+    assert s.grid_from_qualify is True and sessionpatch.layout_for([st.model_dump() for st in s.sequence], [1, 2, 3]) == [0, 1, 0, 2]
+    assert SessionIn(name="S", track="spa", cars=["gt3"], practice_min=10, qualify_min=8, race_laps=10, sequence=seq).grid_from_qualify is False
