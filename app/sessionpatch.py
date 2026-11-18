@@ -5,6 +5,7 @@ time, wait) but never add one. So after the server starts, the slice is replaced
 `main.broadcastSession` (the manager asks for it with RESTART_SESSION: same session, no index change), the sessions are copied, `main.Sessions` and `main.CurrentSession` repointed, and every slot is then defined with
 `SET_SESSION_INFO` from the sequence. Nothing on disk changes, a restart of the server undoes it, and the manager does it again at every start, before anybody joins (a client learns the session list when it connects).
 The layout facts (a Session is 15 words of 4 bytes, which words are static) come from decompiling the server and are described in acserver-re/patches/grow_sessions.py, where this code comes from.
+The ptrace work runs in a PROCESS of its own (`python -m app.sessionpatch`, started by `install`): inside the manager, asyncio's thread that waits for the acServer child shares the thread group of the tracer and swallows the stop events of the server's main thread (seen on staging), and a helper that dies detaches everything by itself.
 Only for the acServer build of `gridtimes.ACSERVER_SHA256`; on any other the sequence is not installed and the server runs its three sessions (it says so in the log).
 
 A sequence step is {kind: practice|qualify|race, name, time_min, laps, wait_s}; the first three sections of the server's config are the originals the extra slots copy their fixed words from (by kind).
@@ -17,16 +18,17 @@ import ctypes
 import logging
 import os
 import signal
+import json
 import struct
+import sys
 import threading
 import time
-
-from app import gridtimes
+from pathlib import Path
 
 log = logging.getLogger("acm.sessionpatch")
 
 SESSIONS, CURRENT, MAKESLICE, SESSION_TYPE, BROADCAST = 0x83E2EB8, 0x83E2734, 0x807F460, 0x82A5140, 0x8218090   # main.Sessions, main.CurrentSession, runtime.makeslice, main.Session's type, main.broadcastSession
-CURIDX = gridtimes.CURRENT_INDEX
+CURIDX = 0x83F45E0   # main.CurrentSessionIndex (the same as app/gridtimes.py CURRENT_INDEX; not imported: this module must stay light, it is also run as a program)
 WORDS, STRIDE = 15, 60
 MAX_SESSIONS = 12   # also the ceiling of SetSessionIn.index (app/schemas/servers.py)
 STATIC = (0, 1, 2, 3, 4, 5, 10, 11, 12)   # the words copied from the original slot: name, type, time, laps, wait, is_open. 6-9 are runtime (start / end time), 13 is the slot's own index
@@ -256,10 +258,36 @@ def grow(pid: int, layout: list[int], timeout: float = 30.0, cancel: threading.E
         mem.close()
 
 
+async def _run_helper(pid: int, layout: list[int], on_armed) -> str:
+    """Run `grow` in a helper process: it prints ARMED once the breakpoint is in and every thread runs (then `on_armed()` asks for the session change), and one last line, OK ... or ERR ... . A cancel or a timeout
+    SIGTERMs it: it puts everything back before it goes (killing it outright would not). Raises RuntimeError with the reason."""
+    root = Path(__file__).resolve().parent.parent
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "app.sessionpatch", str(pid), json.dumps(layout), "30", cwd=root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        last = ""
+        async with asyncio.timeout(45):
+            while line := await proc.stdout.readline():
+                last = line.decode().strip()
+                if last == "ARMED":
+                    on_armed()
+            await proc.wait()
+        if proc.returncode != 0 or not last.startswith("OK"):
+            err = (await proc.stderr.read()).decode().strip().splitlines()
+            raise RuntimeError(last.removeprefix("ERR ") if last.startswith("ERR") else (err[-1] if err else f"the helper ended with {proc.returncode}"))
+        return last.removeprefix("OK ")
+    finally:
+        if proc.returncode is None:   # cancelled or timed out
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), 10)
+            except TimeoutError:
+                proc.kill()
+
+
 async def install(server_id: int, sequence: list[dict], kinds: list[int], inst) -> str | None:
     """After the server `inst` started: grow its slice to the sequence and define every slot. Returns why not (it logs it too), None when done. Tied to THAT instance: if it stops or is replaced meanwhile, it gives up.
     ponytail: a driver who joins in the first second or so (a wake by joining) learns the old three-session list; the server plays the whole sequence anyway and he learns it when he joins again."""
-    from app import supervisor   # late: supervisor owns the instance
+    from app import gridtimes, supervisor   # late: supervisor owns the instance; gridtimes is heavy
     from app.live import acsp
     for _ in range(60):   # the plugin socket needs a moment to hear the server
         if supervisor.get(server_id) is not inst or not inst.running:
@@ -274,30 +302,38 @@ async def install(server_id: int, sequence: list[dict], kinds: list[int], inst) 
         if not gridtimes.known_binary(inst.pid, inst.started_at):
             return _fail(server_id, "this acServer is not the build the session patch belongs to")
         if len(layout) > len(kinds):
-            cancel, armed = threading.Event(), threading.Event()
-            job = asyncio.create_task(asyncio.to_thread(grow, inst.pid, layout, 30.0, cancel, armed))
-            try:
-                for _ in range(400):   # up to 20 s for it to get every thread under ptrace and the breakpoint in
-                    if armed.is_set() or job.done():
-                        break
-                    await asyncio.sleep(0.05)
-                if armed.is_set() and not job.done():
-                    inst.acsp.send(acsp.encode_restart_session())   # makes a thread reach broadcastSession: the same session again
-                what = await job
-            except asyncio.CancelledError:
-                cancel.set()   # the thread cannot be interrupted: it is told to give up and put everything back
-                raise
+            what = await _run_helper(inst.pid, layout, lambda: inst.acsp.send(acsp.encode_restart_session()))   # RESTART_SESSION: a thread reaches broadcastSession, the same session again
             log.info("server %s: %s", server_id, what)
         for i, st in enumerate(sequence):
             if supervisor.get(server_id) is not inst:
                 return _fail(server_id, "the server was replaced while its sessions were being defined")
             inst.acsp.send(acsp.encode_set_session_info(i, st["name"], TYPES[st["kind"]], st["laps"], st["time_min"], st["wait_s"]))
             await asyncio.sleep(0.05)
-    except (RuntimeError, OSError, ValueError) as e:
-        return _fail(server_id, str(e))
+    except (RuntimeError, OSError, ValueError, TimeoutError) as e:
+        return _fail(server_id, str(e) or type(e).__name__)
     return None
 
 
 def _fail(server_id: int, why: str) -> str:
     log.warning("server %s: the session sequence was NOT installed (the server runs its own three sessions): %s", server_id, why)
     return why
+
+
+def main(argv: list[str]) -> int:
+    """`python -m app.sessionpatch <pid> <layout json> [timeout]`: grow the server, print ARMED then OK/ERR. SIGTERM = give up cleanly."""
+    pid, layout = int(argv[0]), json.loads(argv[1])
+    timeout = float(argv[2]) if len(argv) > 2 else 30.0
+    cancel, armed = threading.Event(), threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: cancel.set())
+    watcher = threading.Thread(target=lambda: (armed.wait(), print("ARMED", flush=True)), daemon=True)
+    watcher.start()
+    try:
+        print("OK " + grow(pid, layout, timeout, cancel, armed), flush=True)
+        return 0
+    except (RuntimeError, OSError) as e:
+        print(f"ERR {e}", flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

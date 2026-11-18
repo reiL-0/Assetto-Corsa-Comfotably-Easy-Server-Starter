@@ -109,15 +109,15 @@ def test_install_restarts_the_session_to_trip_the_patch_then_defines_every_slot(
     monkeypatch.setattr(supervisor, "get", lambda sid: inst)
     monkeypatch.setattr(gridtimes, "known_binary", lambda pid, started: True)
 
-    def fake_grow(pid, layout, timeout=30.0, cancel=None, armed=None):
-        time.sleep(0.4)   # getting every thread under ptrace takes a while: nothing may be asked before it says «armed»
+    async def fake_helper(pid, layout, on_armed):
+        await asyncio.sleep(0.2)   # getting every thread under ptrace takes a while: nothing may be asked before it says «armed»
         assert sent == [], "the session change was asked for before the breakpoint was in"
-        armed.set()
-        time.sleep(0.3)
+        on_armed()
+        await asyncio.sleep(0.1)
         grown.append((pid, layout))
-        return "grown"
+        return "grown to 5 sessions"
 
-    monkeypatch.setattr(sessionpatch, "grow", fake_grow)
+    monkeypatch.setattr(sessionpatch, "_run_helper", fake_helper)
     assert asyncio.run(sessionpatch.install(9401, SEQ, [1, 2, 3], inst)) is None
     assert grown == [(4242, [0, 1, 2, 0, 2])]
     assert sent[0] == acsp.encode_restart_session()   # RESTART_SESSION (the same session again), not NEXT_SESSION
@@ -132,7 +132,7 @@ def test_install_leaves_the_server_alone_on_a_build_it_does_not_know(monkeypatch
     inst = _fake_instance(sent)
     monkeypatch.setattr(supervisor, "get", lambda sid: inst)
     monkeypatch.setattr(gridtimes, "known_binary", lambda pid, started: False)
-    monkeypatch.setattr(sessionpatch, "grow", lambda *a, **k: pytest.fail("must not touch an unknown binary"))
+    monkeypatch.setattr(sessionpatch, "_run_helper", lambda *a, **k: pytest.fail("must not touch an unknown binary"))
     assert "not the build" in asyncio.run(sessionpatch.install(9402, SEQ, [1, 2, 3], inst))
     assert sent == []
 
@@ -226,3 +226,30 @@ def test_a_patch_that_fails_halfway_gives_the_thread_back_unharmed(tmp_path, mon
         srv.terminate()
         out = srv.communicate(timeout=5)[0].decode(errors="replace")
     assert "panic" not in out and "SIGSEGV" not in out, out[-600:]
+
+
+def test_the_helper_process_reports_why_it_could_not_do_it():
+    import asyncio
+    with pytest.raises(RuntimeError, match="No such file|ERR|Errno"):
+        asyncio.run(sessionpatch._run_helper(2_999_999, [0, 1, 2, 0, 2], lambda: None))   # no such process
+
+
+@pytest.mark.skipif(not (SIM / "acServer").exists(), reason="needs the local acServer simulator (ACM_TEST_ACSERVER_SIM)")
+def test_the_helper_process_grows_the_real_acserver(tmp_path):
+    """The real path of `install`: a separate process does the ptrace. Needs ptrace_scope 0 (the VPS) or the tracer to be the server's parent: where neither is true the helper is refused and the test says so."""
+    import asyncio
+    srv = subprocess.Popen(["./acServer"], cwd=SIM, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 19602))
+    try:
+        time.sleep(3)
+        try:
+            what = asyncio.run(sessionpatch._run_helper(srv.pid, [0, 1, 2, 0, 2], lambda: s.sendto(acsp.encode_restart_session(), ("127.0.0.1", 19601))))
+        except RuntimeError as e:
+            if "not permitted" in str(e).lower() or "permission denied" in str(e).lower():
+                pytest.skip(f"ptrace between sibling processes is refused here (Yama): {e}")
+            raise
+        assert what.startswith("grown to 5 sessions") and srv.poll() is None
+    finally:
+        srv.terminate()
+        srv.wait(5)
