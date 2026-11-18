@@ -349,6 +349,9 @@ class ACSPClient(asyncio.DatagramProtocol):
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
+        self.grid_task: asyncio.Task | None = None   # the guard that writes the director's grid into the times before a race (app/gridtimes.py)
+        self.grid_key: tuple | None = None           # (session index, time_min, type) the guard was armed for
+        self.session_types: dict[int, int] = {}      # session index -> its type, from every description acServer gave (the guard asks what comes next)
         self.keep_off = False  # a new set-up was applied to this running server: its practice is no longer the one to keep (app/services/server_service.apply)
         self.on_client_loaded = None  # callable(car_id) or None: a car finished loading (app/live/cspweather.py greets it with the current weather)
         self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
@@ -398,6 +401,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.board.apply(event)
         self._record(event)
         if t in ("new_session", "session_info"):
+            if event.get("session_index") is not None and event.get("session_type") is not None:
+                self.session_types[event["session_index"]] = event["session_type"]
             from app import supervisor   # late: supervisor owns this client and the applied preset snapshot
             from app.live.racecontrol import _lock, state_of
             inst = supervisor.get(self.server_id)
@@ -437,6 +442,8 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
             timeline.on_session_event(self.server_id, event)
+            from app import gridtimes   # (late, like timeline: the director's grid order is written into the last seconds of the session before a race)
+            gridtimes.on_session(self, event, t == "new_session")
             if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
@@ -685,6 +692,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             self._hello.cancel()
         if self._sweep:
             self._sweep.cancel()
+        if self.grid_task:
+            self.grid_task.cancel()
         if self.transport:
             self.transport.close()
 

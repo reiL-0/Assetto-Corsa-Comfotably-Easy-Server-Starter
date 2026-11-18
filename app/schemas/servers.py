@@ -312,6 +312,11 @@ class KickIn(BaseModel):
     driver_guid: str = Field(pattern=r"^\d{17}$")
 
 
+class GridIn(BaseModel):
+    """The starting order of the next race: Steam IDs, pole first (app/gridtimes.py). Drivers it does not name go last."""
+    guids: list[Annotated[str, Field(pattern=r"^\d{17}$")]] = Field(min_length=1, max_length=100)
+
+
 class SetSessionIn(BaseModel):
     index: int = Field(ge=0, le=7)
     name: str = Field(min_length=1, max_length=40)

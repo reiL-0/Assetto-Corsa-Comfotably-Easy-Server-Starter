@@ -479,6 +479,17 @@ class PracticeKeep(SQLModel, table=True):
     drivers: list = Field(default_factory=list, sa_type=JSON)   # [{guid, name, model, skin, best_ms, best_valid_ms, laps, valid_laps}]
 
 
+class GridOrder(SQLModel, table=True):
+    """The starting order the director wants for the next race of a server (app/gridtimes.py): Steam IDs, pole first. One row per server; it is deleted when a race begins (that race used it)
+    or by the director. It lives in the database so that a manager or server restart does not lose it: a driver who leaves and comes back keeps his place, a new one goes last."""
+    __tablename__ = "grid_orders"
+
+    server_id: int = Field(primary_key=True)
+    guids: list = Field(default_factory=list, sa_type=JSON)
+    source: str = ""   # who or what set it (a username, or what computed it)
+    created_at: datetime = Field(default_factory=_now)
+
+
 class PitLimit(SQLModel, table=True):
     """The pit-lane speed limit of a track layout (migrated to the server rules by migration 17: app/db.py `_m017_pit_rule_per_server`): set by the director for the track, 0/absent = no rule. A car reported over `limit_kmh + tolerance_kmh` is sanctioned: `penalty_s` 0 = a drive-through,
     N = N seconds on the race result."""
