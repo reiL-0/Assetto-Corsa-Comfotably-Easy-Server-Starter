@@ -295,8 +295,11 @@ def parse_result_file(path: Path, guid_fallback: Callable[[], dict[str, str]] | 
         for lap in data.get("Laps", [])
     ]
 
+    times = sorted(e["best_lap_ms"] for e in classification if e["best_lap_ms"])
     return {
         "type": session_type,
+        # the practice that arranges the grid: app/gridtimes.py wrote 1 ms, 2 ms... into its BestLaps, so those are not lap times (a real practice has no such times)
+        "grid_delivery": session_type == "Practice" and len(times) >= 1 and times == list(range(1, len(times) + 1)),
         "track": csp.clean_track(data.get("TrackName")),
         "track_config": data.get("TrackConfig"),
         "name": data.get("Name"),

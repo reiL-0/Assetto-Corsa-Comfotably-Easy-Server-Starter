@@ -668,6 +668,15 @@ def get_grid(server_id: int, sess: SessionDep) -> dict:
     return {"guids": gridtimes.get_order(server_id)}
 
 
+@steward.get("/{server_id}/grid/preview")
+def grid_preview(server_id: int, sess: SessionDep) -> dict:
+    """The order of the next race as it stands now and why each driver has his place (app/gridtimes.py preview): the director's own, or the one the guard will write from the session before."""
+    from app import gridtimes
+    _get(sess, server_id)
+    inst = supervisor.get(server_id)
+    return gridtimes.preview(server_id, inst.acsp if inst else None)
+
+
 @steward.delete("/{server_id}/grid")
 def delete_grid(server_id: int, sess: SessionDep) -> dict:
     from app import gridtimes

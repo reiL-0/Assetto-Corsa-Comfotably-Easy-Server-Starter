@@ -181,6 +181,93 @@ def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
     return shape(grid, int(policy))
 
 
+# --- what the panel shows: the order the next race will have, and why ----------------------------------------------------------------------------------------------
+
+def _names(guids: list[str]) -> dict[str, str]:
+    """The last name each driver was seen with (joins); a driver never seen has none."""
+    from sqlmodel import select
+    from app.models import Activity
+    if not guids:
+        return {}
+    with Session(engine) as s:
+        rows = s.exec(select(Activity.guid, Activity.name).where(Activity.kind == "join", Activity.guid.in_(guids)).order_by(Activity.ts)).all()
+    return {g: n for g, n in rows if n}
+
+
+def _source_now(server_id: int, client) -> tuple[str | None, str]:
+    """(source, why not): which order the guard would deliver in the session being played, by the SEQUENCE saved for the server (the guard asks acServer for the types, which is the same unless somebody redefines sessions by hand):
+    only the non-race session right before a race delivers, from the session before it."""
+    session = getattr(client, "session", None) or {}
+    idx = session.get("current_session_index", session.get("session_index"))
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+        sess = (srv.session if srv else None) or {}
+    steps = sess.get("sequence") or []
+    if not client or idx is None or not steps:
+        return None, "El orden de la carrera lo decide acServer con la clasificación (sin secuencia de sesiones con práctica de ajuste)."
+    idx = int(idx)
+    cur, nxt = steps[idx % len(steps)], steps[(idx + 1) % len(steps)]
+    if cur["kind"] == "race" or nxt["kind"] != "race" or idx == 0:
+        return None, "El orden se calcula en la práctica de ajuste, antes de la carrera."
+    before = steps[idx - 1]
+    if before["kind"] == "race":
+        return ("race", "") if sess.get("grid_from_race") is not None else (None, "La carrera anterior no pasa su orden: falta «parrilla de la carrera anterior».")
+    if before["kind"] != "qualify":   # (the guard takes a qualifying order only from a qualifying: a practice before the practice that arranges the grid says nothing)
+        return None, "La sesión anterior no es una clasificación: no hay orden que entregar."
+    if before.get("stage") == 3:
+        return "knockout", ""
+    if before.get("run_interval_s"):
+        return "singlerun", ""
+    return ("qualify", "") if sess.get("grid_from_qualify") else (None, "La política de parrilla es «La decido yo»: sin orden fijado, acServer usa la clasificación.")
+
+
+def preview(server_id: int, client) -> dict:
+    """The order of the next race as the panel shows it: [{guid, name, online, reason, tone}] and where it comes from. `mode`: manual (the director's own, GridOrder), auto (what the guard will write from the session before),
+    none (nothing to say yet: `note` says why). Reads the database and result files: call it off the event loop."""
+    slots = {c.get("driver_guid"): cid for cid, c in list((getattr(client, "cars", None) or {}).items()) if c.get("driver_guid")}   # guid -> slot (plan() puts the unnamed ones after the named in slot order)
+    cars = {c.get("driver_guid"): c for c in list((getattr(client, "cars", None) or {}).values()) if c.get("driver_guid")}
+    manual = get_order(server_id)
+    source, note, order, reasons = None, "", manual, {}
+    if manual:
+        mode, source = "manual", "manual"
+    else:
+        source, note = _source_now(server_id, client)
+        mode = "auto" if source else "none"
+        if source:
+            wait = int((getattr(client, "session", None) or {}).get("wait_time") or 0)
+            since = client.session_t0 - 120 - wait
+            order = order_now(server_id, since, source)
+            if source in ("qualify", "race") and order:   # why each place: where he finished, and what the stewards took
+                kind = "RACE" if source == "race" else "QUALIFY"
+                path = last_result_file(server_id, since, kind)
+                if path is not None:
+                    with Session(engine) as s:
+                        parsed = results.parse_result_file(path)
+                        pens = results.penalties_for(s, server_id, path.name)
+                    base = [e["driver_guid"] for e in parsed["classification"] if e["driver_guid"]]
+                    lost = {}
+                    for p in pens:
+                        if p.kind == "grid":
+                            lost[p.driver_guid] = lost.get(p.driver_guid, 0) + p.value
+                    for i, g in enumerate(order):
+                        b = base.index(g) + 1 if g in base else None
+                        txt = f"P{b} en la {'carrera' if source == 'race' else 'clasificación'}" if b else "Sin tiempo"
+                        if lost.get(g):
+                            reasons[g] = (f"{txt} · −{lost[g]} por sanción de parrilla", "pen")
+                        elif b and b - (i + 1) > 0:
+                            reasons[g] = (f"{txt} · sube {b - (i + 1)} puesto" + ("s" if b - (i + 1) > 1 else ""), "ok")
+                        else:
+                            reasons[g] = (txt, "ok")
+            elif order:
+                reasons = {g: ("Por la eliminatoria" if source == "knockout" else "Por su tanda", "ok") for g in order}
+    names = _names(list(dict.fromkeys([*order, *cars])))
+    rows = [{"guid": g, "name": (cars.get(g) or {}).get("driver_name") or names.get(g) or g, "online": g in cars,
+             "reason": "Orden fijado a mano" if manual else reasons.get(g, ("", "ok"))[0], "tone": "hand" if manual else reasons.get(g, ("", "ok"))[1]} for g in order]
+    late = sorted((g for g in cars if g not in order), key=lambda g: slots[g]) if (order or mode == "manual") else []   # connected and not named: the guard puts them after the named ones (plan())
+    rows += [{"guid": g, "name": cars[g].get("driver_name") or names.get(g) or g, "online": True, "reason": "Nuevo: entró después, va al final", "tone": "new"} for g in late]
+    return {"mode": mode, "source": source, "note": note, "order": rows}
+
+
 # --- the guard (one task per non-race session that comes right before a race) ----------------------------------------------------------------------------------
 
 def on_session(client, event: dict, is_new: bool) -> None:

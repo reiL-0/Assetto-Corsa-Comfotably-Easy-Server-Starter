@@ -91,6 +91,17 @@ def _new_penalty(sess: SessionDep, server_id: int, filename: str, parsed: dict, 
     return out
 
 
+def _carry(sess: SessionDep, server_id: int, filename: str) -> None:
+    """Bring the carried grid penalties of this result's league up to date after a grid penalty was added or taken away (app/league.py sync_grid_carry)."""
+    from app import league   # late: league imports this module's neighbours
+    from app.leaguelock import lock
+    c = _league_of(sess, server_id, filename)
+    if c is not None:
+        with lock:   # the sync and its commit under the league's lock, like the counting that also writes these rows
+            league.sync_grid_carry(sess, c)
+            sess.commit()
+
+
 @router.get("/catalogue")
 def catalogue(server_id: int, filename: str, sess: SessionDep) -> list[dict]:
     """The penalties the steward can pick for this result: its league's catalogue (empty when it is not a league's)."""
@@ -130,7 +141,10 @@ def add_penalty(server_id: int, filename: str, body: PenaltyIn, sess: SessionDep
         raise HTTPException(400, "that driver is not in this result")
     with _write:
         _open(sess, server_id, filename)
-        return _new_penalty(sess, server_id, filename, parsed, body.driver_guid, body.kind, body.value * 1000 if body.kind in TIMED else body.value, body.reason.strip(), user.username)
+        out = _new_penalty(sess, server_id, filename, parsed, body.driver_guid, body.kind, body.value * 1000 if body.kind in TIMED else body.value, body.reason.strip(), user.username)
+        if body.kind == "grid":
+            _carry(sess, server_id, filename)   # a grid penalty on a league race goes to the next race of the league
+        return out
 
 
 @router.delete("/close", status_code=204)
@@ -153,12 +167,17 @@ def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: Session
     out, parsed = _out(p), _existing_result(sess, server_id, filename)
     with _write:
         _open(sess, server_id, filename)
+        pid, kind = p.id, p.kind
         if p.auto_key:
             p.dismissed = True
             sess.add(p)
         else:
             sess.delete(p)
+            if kind == "grid":   # what it carried to the next race goes with it, whenever that was
+                sess.execute(delete(Penalty).where(Penalty.auto_key == f"carry:{pid}"))
         sess.commit()
+        if kind == "grid":
+            _carry(sess, server_id, filename)
     record(server_id, "penalty_forgiven", filename=filename, penalty_id=penalty_id, driver_guid=p.driver_guid, executed=True)
     discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))
 
