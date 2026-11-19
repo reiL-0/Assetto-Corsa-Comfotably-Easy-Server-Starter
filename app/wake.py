@@ -230,8 +230,23 @@ def details_durations(info: dict) -> list[int]:
     return [d if (i < len(types) and types[i] == 3 and not timed) else d * 60 for i, d in enumerate(info.get("durations") or [])]
 
 
-def details(s: Server, live: bytes | None, host: str = "") -> dict:
-    """Body of /api/details, with the same pending-event view as the stopped lobby."""
+def _session_count(inst) -> int | None:
+    """How many sessions the running acServer says it has (ACSP session_info), None when the ACSP link is not there."""
+    acsp = getattr(inst, "acsp", None)
+    return (getattr(acsp, "session", None) or {}).get("session_count") if acsp else None
+
+
+def sequence_view(s: Server, info: dict, session_count: int | None) -> None:
+    """The real acServer's /INFO lists the three sections of its config; with a session sequence installed (acServer says it has the sequence's number of sessions) the sessions are the sequence's: their types, durations
+    and `timed` replace those, so `sessiontypes[session]` is the session being played. Not installed (a count that is not the sequence's): acServer plays its own three and what it says stands."""
+    if (seq := timeline.sequence_of(s)) and session_count == len(seq):
+        info["sessiontypes"], info["durations"], info["timed"] = timeline.sequence_info(seq)
+
+
+def details(s: Server, live: bytes | None, host: str = "", session_count: int | None = None) -> dict:
+    """Body of /api/details, with the same pending-event view as the stopped lobby. `session_count`: how many sessions the RUNNING acServer says it has (ACSP): when it is the sequence's, the patch is
+    installed and `session` is an index into the sequence, but acServer's own /INFO still lists the three sections of the config: the types and durations are the sequence's (without this a card says
+    «Práctica» for a server that is in «Carrera 1», because it reads sessiontypes[session])."""
     plan = _preview(s) if not live else None
     if plan:
         s = _preview_server(s, plan)
@@ -241,6 +256,8 @@ def details(s: Server, live: bytes | None, host: str = "") -> dict:
         info = facade_info(s)
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
     info["name"] = clean_name(info.get("name"))   # clean, whatever the source was
+    if live:
+        sequence_view(s, info, session_count)
     info["wrappedPort"] = info["cport"]   # Content Manager keeps asking THIS port for the details (ServerInformationExtended.PortExtended)
     if "durations" in info:
         info["durations"] = details_durations(info)
@@ -306,6 +323,7 @@ def _http_handler(server_id: int, ac_seen):
                 elif path.startswith("/api/details"):
                     ctype = "application/json; charset=utf-8"
                     live = await asyncio.to_thread(_upstream, internal, "/INFO") if running else None
+                    count = _session_count(inst) if running else None   # (the sessions acServer plays NOW: the sequence's when the patch is in)
                     advertised = urlsplit(settings.public_url).hostname if settings.public_url else ""
                     hostname, sep, given_port = host.rpartition(":")
                     is_valid_host = False
@@ -319,12 +337,13 @@ def _http_handler(server_id: int, ac_seen):
                             except ValueError:
                                 is_valid_host = bool(re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9.-]{0,253}[a-zA-Z0-9])?", hostname)) and ".." not in hostname
                     image_host = host if is_valid_host else ""
-                    data = _dump(await asyncio.to_thread(details, s, live, image_host)).encode()
+                    data = _dump(await asyncio.to_thread(details, s, live, image_host, count)).encode()
                 elif running and path.startswith(("/INFO", "/JSON")):   # the real acServer answers (only what the lobby asks: this port has no login); its own HTTP port number is swapped for ours in /INFO
                     data = await asyncio.to_thread(_upstream, internal, path)
                     if path.startswith("/INFO") and data:
                         try:
                             info = json.loads(data)
+                            sequence_view(s, info, _session_count(inst))
                             data = _dump(lobby_info(s, info)).encode()
                         except ValueError:
                             pass

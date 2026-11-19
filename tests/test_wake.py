@@ -640,6 +640,20 @@ def test_details_of_a_running_server_turns_the_real_info_minutes_into_seconds_an
     assert real["durations"] == [3, 5, 2]
 
 
+def test_a_running_server_with_a_sequence_says_the_sessions_of_the_sequence_not_the_three_of_the_config():
+    from types import SimpleNamespace
+    steps = [{"kind": "race", "name": "R1", "laps": 2}, {"kind": "practice", "name": "Intermedia", "time_min": 3}, {"kind": "race", "name": "R2", "laps": 2}, {"kind": "practice", "name": "P", "time_min": 10}]
+    s = SimpleNamespace(id=998, base_port=9800, name="x", welcome="", config={}, entry_list=[], session={"sequence": steps})
+    real = {"name": "Real", "sessiontypes": [1, 2, 3], "durations": [10, 15, 2], "timed": False, "session": 0, "timeleft": 100, "cport": 18081}   # acServer's own /INFO: the three sections; it is in the 1st session (a race)
+    got = wake.details(s, json.dumps(real).encode(), session_count=4)   # acServer says it has 4 sessions: the patch is in
+    assert got["sessiontypes"][got["session"]] == 3, "a card that reads sessiontypes[session] says «Carrera», not «Práctica»"
+    assert got["sessiontypes"] == [3, 1, 3, 1] and got["durations"] == [2, 180, 2, 600], "the sequence's: laps for a race, then minutes as seconds"
+    kept = wake.details(s, json.dumps(real).encode(), session_count=3)   # not installed: acServer plays its own three and what it says stands
+    assert kept["sessiontypes"] == [1, 2, 3] and wake.details(s, json.dumps(real).encode())["sessiontypes"] == [1, 2, 3], "no count: nothing is guessed"
+    info = dict(real); wake.sequence_view(s, info, 4)
+    assert info["sessiontypes"] == [3, 1, 3, 1] and info["durations"] == [2, 3, 2, 10], "the lobby's /INFO: minutes as CM converts them itself"
+
+
 def test_a_first_session_that_is_a_race_by_laps_has_no_time_to_count_down_and_races_of_two_kinds_are_refused():
     from types import SimpleNamespace
 
