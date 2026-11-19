@@ -213,7 +213,9 @@ async def _session(client, idx: int, is_new: bool) -> None:
                 if await asyncio.to_thread(clear, client.server_id):
                     log.info("server %s: the race began, the knockout is over", client.server_id)
             elif step.get("stage") == 1 and (is_new or await asyncio.to_thread(load, client.server_id) is None):
-                cars = list(client.cars.values())
+                from app import gridtimes   # late
+                pace = gridtimes.pace_guid(client.server_id)   # the pace car is not an entrant: it is always the first of the grid (gridtimes.plan)
+                cars = [c for c in client.cars.values() if not pace or str(c.get("driver_guid") or "") != pace]
                 guids = [str(c.get("driver_guid") or "") for c in cars]
                 names = {str(c.get("driver_guid") or ""): str(c.get("driver_name") or "") for c in cars}
                 await asyncio.to_thread(save, client.server_id, new_cycle(guids, time.time(), names))
@@ -226,6 +228,9 @@ async def _connection(client, guid: str, name: str = "") -> None:
     async with client.knockout_lock:
         try:
             def go() -> str | None:
+                from app import gridtimes   # late
+                if guid and guid == gridtimes.pace_guid(client.server_id):
+                    return None   # the pace car is not an entrant, nor a late one
                 data = load(client.server_id)
                 if data is None:
                     return None

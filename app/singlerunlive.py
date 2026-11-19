@@ -59,7 +59,9 @@ def hold_view(server_id: int, client, now: float | None = None) -> dict | None:
     interval = (step or {}).get("run_interval_s")
     if not interval or (session.get("name") and session.get("name") != step.get("name")):
         return None
-    connected = {c["driver_guid"]: cid for cid, c in list(client.cars.items()) if c.get("driver_guid")}
+    from app import gridtimes   # late
+    pace = gridtimes.pace_guid(server_id)   # the pace car takes no turn (it is always the first of the grid)
+    connected = {c["driver_guid"]: cid for cid, c in list(client.cars.items()) if c.get("driver_guid") and c["driver_guid"] != pace}
     t0 = client.session_t0 + (step.get("wait_s") or 0)   # ponytail: the wait is assumed to be inside `elapsed_ms`; check it on a real session
     now = time.time() if now is None else now
     release = _release(client, connected, t0, interval, now)

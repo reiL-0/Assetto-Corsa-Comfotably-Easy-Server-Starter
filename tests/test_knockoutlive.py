@@ -384,3 +384,21 @@ def test_a_cut_only_makes_sense_on_stages_one_and_two():
     for bad in ([STEPS[0], STEPS[1], STEPS[2], {**STEPS[3], "cut": 1}, *STEPS[4:]], [{**STEPS[0], "cut": 1}, *STEPS[1:]]):   # the last stage; a practice
         with pytest.raises(ValidationError):
             SessionIn(**base, sequence=bad)
+
+
+def test_the_pace_car_is_not_an_entrant_of_the_knockout_nor_a_late_one(monkeypatch):
+    from app import supervisor
+    monkeypatch.setattr(supervisor, "get", lambda s: SimpleNamespace(pid=1, started_at=1.0, pace_steam_id=CARS[7]))
+    sid = _server()
+
+    async def go():
+        client = _client(sid, CARS[:3] + [CARS[7]])                    # three drivers and the pace car
+        await knockoutlive._session(client, 1, True)                   # Q1 begins
+        assert knockoutlive.load(sid)["entrants"] == CARS[:3]
+        f = _file(sid, 1, CARS[:3])
+        await knockoutlive._end(client, f"results/{f}", 1)             # Q1 is over: whoever comes now is late
+        await knockoutlive._connection(client, CARS[7])                # the pace car reconnects: not late
+        await knockoutlive._connection(client, "late-1")               # a real late one is
+        assert knockoutlive.load(sid)["late"] == ["late-1"]
+
+    asyncio.run(go())
