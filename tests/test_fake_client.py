@@ -35,7 +35,7 @@ NAMES = ["Ana", "Beto", "Carla"]
 class Rig:
     """A copy of the simulator (guids in the entry list: the server only lets in the ones it knows) + a plugin socket to command it."""
 
-    def __init__(self, tmp: Path):
+    def __init__(self, tmp: Path, plugin: bool = True):
         self.dir = tmp / "sim"
         shutil.copytree(SIM, self.dir, ignore=shutil.ignore_patterns("logs", "results", "*.log"))
         (self.dir / "logs").mkdir(exist_ok=True)
@@ -43,10 +43,13 @@ class Rig:
         entry = (self.dir / "cfg" / "entry_list.ini")
         it = iter(GUIDS)
         entry.write_text(re.sub(r"GUID=.*\n", lambda m: f"GUID={next(it)}\n", entry.read_text()))
+        cfg = self.dir / "cfg" / "server_cfg.ini"      # short sessions and waits: a timed session ends by itself in a minute
+        cfg.write_text(re.sub(r"(?m)^(TIME=)\d+", r"\g<1>1", re.sub(r"(?m)^WAIT_TIME=\d+", "WAIT_TIME=5", re.sub(r"(?m)^RESULT_SCREEN_TIME=\d+", "RESULT_SCREEN_TIME=3", cfg.read_text()))))
         self.log = open(tmp / "srv.log", "w")
         self.srv = subprocess.Popen(["./acServer"], cwd=self.dir, stdout=self.log, stderr=subprocess.STDOUT)   # our child: /proc/pid/mem and ptrace work
         self.plugin = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.plugin.bind(("127.0.0.1", 19602))
+        if plugin:   # the manager's own ACSPClient takes that port when it is in the test
+            self.plugin.bind(("127.0.0.1", 19602))
         self.drivers: list = []
         self._stop = threading.Event()
         end = time.time() + 15
@@ -194,3 +197,46 @@ def test_f1_style_sequence_three_qualifyings_then_the_race_with_connected_driver
     assert [s[3] for s in seen[:3]] == [1, 1, 1]
     assert sorted(ds[0].grid_list) == [0, 1, 2]
     assert all(d.grid_slot is not None for d in ds)
+
+
+def test_the_manager_writes_the_saved_grid_by_itself_in_the_last_seconds_of_the_qualifying(tmp_path, monkeypatch):
+    """The whole manager side: ACSPClient (the real one, on acServer's plugin port) + gridtimes.on_session with an order saved in the database.
+    Nobody runs a command: the order is written into acServer's times in the last 5 s of a timed qualifying whose next session is the race (about 65 s of real time)."""
+    import asyncio
+    from app.live import acsp as acsp_mod
+    SID = 7701
+    gridtimes.set_order(SID, [str(GUIDS[2]), str(GUIDS[0]), str(GUIDS[1])], "manual")     # Carla, Ana, Beto
+    rig = Rig(tmp_path, plugin=False)
+    from types import SimpleNamespace
+    from app import supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=rig.srv.pid, started_at=None))   # the process the supervisor would own
+
+    async def run():
+        client = await acsp_mod.connect(SID, remote_port=19601, local_port=19602, car_slots=3)
+        try:
+            ds = await asyncio.to_thread(rig.join)
+            await asyncio.sleep(1)
+            client.send(acsp.encode_next_session())                                          # practice -> qualify (1 min)
+            end = time.time() + 15
+            while time.time() < end and not all(d.session_type == fc.QUALIFY for d in ds):
+                await asyncio.sleep(0.2)
+            assert all(d.session_type == fc.QUALIFY for d in ds)
+            for slot, ms in {0: 87000, 1: 88000, 2: 89000}.items():                          # the REAL qualifying says Ana, Beto, Carla
+                ds[slot].lap(ms)
+            end = time.time() + 90
+            while time.time() < end and not all(d.session_type == fc.RACE for d in ds):
+                await asyncio.sleep(0.5)
+            return ds
+        finally:
+            if client.transport:
+                client.transport.close()
+            for t in (client.grid_task, getattr(client, "_hello", None), getattr(client, "_sweep", None)):
+                if t:
+                    t.cancel()
+    try:
+        ds = asyncio.run(run())
+        assert all(d.session_type == fc.RACE for d in ds), "the race never started"
+        assert ds[0].grid_list == [2, 0, 1], ds[0].grid_list                                 # the saved order, not the laps
+        assert [d.grid_slot for d in ds] == [1, 2, 0]
+    finally:
+        rig.close()
