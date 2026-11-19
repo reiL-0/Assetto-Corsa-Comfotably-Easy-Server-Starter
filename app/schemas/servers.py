@@ -140,6 +140,39 @@ class NascarSessionIn(BaseModel):
 UNLIMITED_MIN = 30000   # «unlimited» session time (20 days): acServer has no such switch. Measured on a real acServer: 65535 min overflows its 32-bit millisecond clock (timeleft comes out NEGATIVE and the session would end at once); the largest safe value is 35791 min, 30000 leaves room
 
 
+class SequenceStep(BaseModel):
+    """One session of a session sequence (app/sessionpatch.py): what acServer will play at this position of the cycle."""
+
+    kind: Literal["practice", "qualify", "race"]
+    name: str = Field(min_length=1, max_length=40)
+    time_min: int = Field(default=0, ge=0, le=1440)   # minutes; a race by laps has 0
+    laps: int = Field(default=0, ge=0, le=999)        # a race by laps; practice and qualify have 0
+    wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the session starts (any kind: acServer counts it from the moment the session begins)
+    over_s: int | None = Field(default=None, ge=0, le=3600)   # RACE ONLY: seconds the race stays open after the winner finishes, for the rest to get in; None = the server's own RACE_OVER_TIME
+    result_s: int | None = Field(default=None, ge=0, le=600)  # seconds the results are shown when this session ends, before the next one is set up (every kind); None = the server's own RESULT_SCREEN_TIME
+    cut: int | None = Field(default=None, ge=0, le=50)        # STAGE 1 or 2 only: how many cars are cut at the end of it; None = the automatic cut (F1's 6 and 6 with 22 cars, scaled to the grid)
+    stage: int | None = Field(default=None, ge=1, le=3)       # QUALIFY ONLY: this step is stage 1, 2 or 3 of a knockout qualifying like Formula 1's (Q1, Q2, Q3: app/knockout.py): the slowest are cut and held in the pits for the next stage
+    run_interval_s: int | None = Field(default=None, ge=5, le=300)   # QUALIFY ONLY: qualifying by single-car runs like IndyCar's ovals (app/singlerun.py): one car is let out of the pits every this many seconds, None = a normal qualifying
+    run_warmup: int = Field(default=1, ge=0, le=5)            # single runs: laps at the start of a run that do not count (the one that leaves the pits)
+    run_laps: int = Field(default=2, ge=1, le=10)             # single runs: the timed laps of a run (2 on the short ovals, 4 at Indianapolis)
+
+    @model_validator(mode="after")
+    def _has_a_length(self) -> SequenceStep:
+        if self.kind != "race" and (self.laps or not self.time_min):
+            raise ValueError("a practice or a qualify is timed: time_min > 0 and no laps")
+        if self.kind == "race" and bool(self.laps) == bool(self.time_min):
+            raise ValueError("a race is by laps or by time, one of them")
+        if self.kind != "race" and self.over_s is not None:
+            raise ValueError("over_s: only a race waits for the others to finish after the winner")
+        if self.stage is not None and self.kind != "qualify":
+            raise ValueError("stage: only a qualifying can be a stage of a knockout")
+        if self.run_interval_s is not None and (self.kind != "qualify" or self.stage is not None):
+            raise ValueError("run_interval_s: single runs are a qualifying on its own (not yet a stage of a knockout)")
+        if self.cut is not None and self.stage not in (1, 2):
+            raise ValueError("cut: only stage 1 and stage 2 cut cars (the last stage ranks the ones left)")
+        return self
+
+
 class SessionIn(BaseModel):
     """What the admin panel's "new session" form sends."""
 
@@ -181,6 +214,9 @@ class SessionIn(BaseModel):
     reversed_grid: int = Field(default=0, ge=-1, le=50)  # race grid: 0 as qualified, N = invert the first N, -1 = all
     loop: bool = True  # start over after the last session (practice -> qualify -> race -> practice ...)
     restart: bool = True
+    sequence: list[SequenceStep] | None = Field(default=None, min_length=4, max_length=12)   # the sessions of the cycle when they are not just practice, qualify, race (e.g. P, Q, R1, intermediate practice, R2): installed in the running acServer at every start (app/sessionpatch.py)
+    grid_from_qualify: bool = False   # a practice AFTER the qualifying, right before a race, arranges the grid: the race starts as the qualifying is classified on the site (clean laps) with the stewards' grid penalties applied (app/gridtimes.py)
+    grid_from_race: int | None = Field(default=None, ge=-1, le=50)   # the grid of the race that follows an intermediate session comes from the race before it: 0 = as it finished (stewards' grid penalties applied), N = invert the first N, -1 = all; None = the director sets it by hand (app/gridtimes.py)
 
     @field_validator("car_setups")
     @classmethod
@@ -190,6 +226,29 @@ class SessionIn(BaseModel):
                 raise ValueError("car_setups: a setup name is empty")
             _setup_name(name)
         return v
+
+    @model_validator(mode="after")
+    def _sequence_fits_the_sections(self) -> SessionIn:
+        if self.sequence is None:
+            return self
+        have = {"practice": bool(self.practice_min), "qualify": bool(self.qualify_min), "race": bool(self.race_laps or self.race_min)}
+        for st in self.sequence:
+            if not have[st.kind]:
+                raise ValueError(f"sequence: there is a {st.kind} step but the session has no {st.kind} section (practice_min / qualify_min / race_laps / race_min)")
+        if not any(st.kind == "race" for st in self.sequence):
+            raise ValueError("sequence: it needs at least one race")
+        if self.reversed_grid:
+            raise ValueError("sequence: acServer's own reversed grid does not work with a sequence (use grid_from_race)")
+        stage_names = [st.name for st in self.sequence if st.stage is not None]
+        others = [st.name for st in self.sequence if st.stage is None]
+        if len(stage_names) != len(set(stage_names)) or set(stage_names) & set(others):
+            raise ValueError("sequence: the steps of the knockout stages need names no other step has (each result file says which stage it is by that name)")
+        stages = [st.stage for st in self.sequence if st.stage is not None]
+        if stages and stages != list(range(1, len(stages) + 1)):
+            raise ValueError("sequence: the knockout stages are 1, 2, 3 in that order, each once (the steps with a `stage`)")
+        if stages and not any(st.kind == "race" for st in self.sequence[[st.stage for st in self.sequence].index(stages[-1]):]):
+            raise ValueError("sequence: a race must come after the last knockout stage")
+        return self
 
     @model_validator(mode="after")
     def _off_is_not_a_rule(self) -> SessionIn:
@@ -312,8 +371,13 @@ class KickIn(BaseModel):
     driver_guid: str = Field(pattern=r"^\d{17}$")
 
 
+class GridIn(BaseModel):
+    """The starting order of the next race: Steam IDs, pole first (app/gridtimes.py). Drivers it does not name go last."""
+    guids: list[Annotated[str, Field(pattern=r"^\d{17}$")]] = Field(min_length=1, max_length=100)
+
+
 class SetSessionIn(BaseModel):
-    index: int = Field(ge=0, le=7)
+    index: int = Field(ge=0, le=11)   # the 12 slots of the grown acServer (app/sessionpatch.py MAX_SESSIONS); the server itself answers «out of bounds» past its real length
     name: str = Field(min_length=1, max_length=40)
     session_type: int = Field(ge=1, le=3)
     laps: int = Field(default=0, ge=0, le=999)

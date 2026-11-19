@@ -349,6 +349,13 @@ class ACSPClient(asyncio.DatagramProtocol):
     def __init__(self, server_id: int, max_events: int = 1000) -> None:
         self.server_id = server_id
         self.restore_when_session_changes: tuple[int, bytes] | None = None  # (session index, its original SET_SESSION_INFO): see app/timeline.py
+        self.grid_task: asyncio.Task | None = None   # the guard that writes the director's grid into the times before a race (app/gridtimes.py)
+        self.knockout_lock = asyncio.Lock()          # the knockout's database writes of this server go one after the other (app/knockoutlive.py)
+        self.waits_lock = asyncio.Lock()             # the waits of two sessions are written one after the other
+        self.waits_idx: int | None = None            # the session index whose end-of-session waits were written (app/sessionpatch.py)
+        self.grid_last: dict | None = None           # the last plan written (so the log says it once)
+        self.grid_key: tuple | None = None           # (session index, time_min, type) the guard was armed for
+        self.session_types: dict[int, int] = {}      # session index -> its type, from every description acServer gave (the guard asks what comes next)
         self.keep_off = False  # a new set-up was applied to this running server: its practice is no longer the one to keep (app/services/server_service.apply)
         self.on_client_loaded = None  # callable(car_id) or None: a car finished loading (app/live/cspweather.py greets it with the current weather)
         self.car_slots = 0  # > 0 only when re-attached to a server that was already running (see connect)
@@ -358,6 +365,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.trail: dict[int, deque] = {}  # car_id -> last TRAIL (time, pos, velocity) samples: a contact is reported 1.5-2.5 s late, app/stewards looks back in here
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
+        self.run_release: dict[str, float] = {}   # guid -> the unix time its single run is let out (app/singlerunlive.py); one per session, kept in memory
         self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
         self.winner_done = False   # the winner of this race has been announced
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
@@ -398,6 +406,8 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.board.apply(event)
         self._record(event)
         if t in ("new_session", "session_info"):
+            if event.get("session_index") is not None and event.get("session_type") is not None:
+                self.session_types[event["session_index"]] = event["session_type"]
             from app import supervisor   # late: supervisor owns this client and the applied preset snapshot
             from app.live.racecontrol import _lock, state_of
             inst = supervisor.get(self.server_id)
@@ -408,15 +418,17 @@ class ACSPClient(asyncio.DatagramProtocol):
                 if t == "session_info":
                     if event.get("session_index", event.get("current_session_index")) == event.get("current_session_index"):   # (only the description of the CURRENT session: the answer about another one, e.g. to the redefinition of session 0 the timeline makes when a race starts, must not turn the race into a practice)
                         self.session.update(event)
+                        self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 else:
                     self.session = event
+                    self.run_release = {}   # single-run qualifying: the release times of this session (app/singlerunlive.py)
+                    self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                     self.field.clear()
                     self.length.reset()
                     self.oval, self._oval_known = False, False
                     self._length_logged = None
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
-                self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
                 if nascar is not None:
                     try:
@@ -437,6 +449,12 @@ class ACSPClient(asyncio.DatagramProtocol):
                 self._kick_qualy_banned(list(self.cars.values()))
             from app import timeline   # (late: timeline needs this module's encoders)
             timeline.on_session_event(self.server_id, event)
+            from app import gridtimes   # (late, like timeline: the director's grid order is written into the last seconds of the session before a race)
+            gridtimes.on_session(self, event, t == "new_session")
+            from app import sessionpatch   # (and the waits of this session's step)
+            sessionpatch.on_session(self, event, t == "new_session")
+            from app import knockoutlive   # (and the knockout qualifying: Q1 begins a cycle, a race ends it)
+            knockoutlive.on_session(self, event, t == "new_session")
             if t == "new_session" and self.restore_when_session_changes and event["session_index"] != self.restore_when_session_changes[0]:
                 self.send(self.restore_when_session_changes[1])   # the shortened session is over: its original length again
                 self.restore_when_session_changes = None
@@ -475,7 +493,11 @@ class ACSPClient(asyncio.DatagramProtocol):
         elif t == "end_session":
             from app.racecontrol import claim_stages   # the NASCAR stage order of the race that just ended becomes that result's own
             claim_stages(self.server_id, event["filename"])
+            from app import knockoutlive   # (a stage of the knockout qualifying: its file is written down)
+            knockoutlive.on_end(self, event["filename"])
         elif t == "new_connection":
+            from app import knockoutlive   # (an entrant of Q1, or a late one: app/knockoutlive.py)
+            knockoutlive.on_connection(self, str(event.get("driver_guid") or ""), str(event.get("driver_name") or ""))
             self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
@@ -508,6 +530,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             joined = {**event, "type": "new_connection"}
             self.board.apply(joined)
             self.cars[event["car_id"]] = joined
+            from app import knockoutlive   # (the same as a connection: a manager that came back during Q1 learns who is there)
+            knockoutlive.on_connection(self, str(event["driver_guid"]), str(event.get("driver_name") or ""))
         elif t == "client_event":
             from app.live.racecontrol import state_of   # (late, like the others)
             rc = state_of(self.server_id, True, self.session)
@@ -685,6 +709,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             self._hello.cancel()
         if self._sweep:
             self._sweep.cancel()
+        if self.grid_task:
+            self.grid_task.cancel()
         if self.transport:
             self.transport.close()
 

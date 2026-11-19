@@ -23,7 +23,7 @@ from sqlmodel import select
 from app import supervisor
 from app import csp
 from app.live import cspweather
-from app.auth import require
+from app.auth import CurrentUser, require
 from app.config import settings
 from app.db import SessionDep
 from app.live import acsp
@@ -53,6 +53,7 @@ from app.schemas.servers import (  # noqa: F401 - re-exported: other modules imp
     ChatIn,
     KickIn,
     SetSessionIn,
+    GridIn,
     AdminCommandIn,
 )
 
@@ -649,6 +650,29 @@ def set_session_info(server_id: int, body: SetSessionIn, sess: SessionDep) -> di
     _get(sess, server_id)
     _acsp(server_id).send(acsp.encode_set_session_info(body.index, body.name, body.session_type, body.laps, body.time_min, body.wait_s))
     return {"sent": True}
+
+
+@steward.put("/{server_id}/grid")
+def set_grid(server_id: int, body: GridIn, sess: SessionDep, user: CurrentUser) -> dict:
+    """The starting order of the next race (Steam IDs, pole first). It is kept in the database; in the last seconds of the practice / qualify before the race it is written into acServer's times (app/gridtimes.py)."""
+    from app import gridtimes
+    _get(sess, server_id)
+    gridtimes.set_order(server_id, body.guids, user.username)
+    return {"guids": gridtimes.get_order(server_id)}
+
+
+@steward.get("/{server_id}/grid")
+def get_grid(server_id: int, sess: SessionDep) -> dict:
+    from app import gridtimes
+    _get(sess, server_id)
+    return {"guids": gridtimes.get_order(server_id)}
+
+
+@steward.delete("/{server_id}/grid")
+def delete_grid(server_id: int, sess: SessionDep) -> dict:
+    from app import gridtimes
+    _get(sess, server_id)
+    return {"deleted": gridtimes.clear_order(server_id)}
 
 
 @steward.post("/{server_id}/admin")
