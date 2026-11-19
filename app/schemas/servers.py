@@ -152,6 +152,9 @@ class SequenceStep(BaseModel):
     result_s: int | None = Field(default=None, ge=0, le=600)  # seconds the results are shown when this session ends, before the next one is set up (every kind); None = the server's own RESULT_SCREEN_TIME
     cut: int | None = Field(default=None, ge=0, le=50)        # STAGE 1 or 2 only: how many cars are cut at the end of it; None = the automatic cut (F1's 6 and 6 with 22 cars, scaled to the grid)
     stage: int | None = Field(default=None, ge=1, le=3)       # QUALIFY ONLY: this step is stage 1, 2 or 3 of a knockout qualifying like Formula 1's (Q1, Q2, Q3: app/knockout.py): the slowest are cut and held in the pits for the next stage
+    run_interval_s: int | None = Field(default=None, ge=5, le=300)   # QUALIFY ONLY: qualifying by single-car runs like IndyCar's ovals (app/singlerun.py): one car is let out of the pits every this many seconds, None = a normal qualifying
+    run_warmup: int = Field(default=1, ge=0, le=5)            # single runs: laps at the start of a run that do not count (the one that leaves the pits)
+    run_laps: int = Field(default=2, ge=1, le=10)             # single runs: the timed laps of a run (2 on the short ovals, 4 at Indianapolis)
 
     @model_validator(mode="after")
     def _has_a_length(self) -> SequenceStep:
@@ -163,6 +166,8 @@ class SequenceStep(BaseModel):
             raise ValueError("over_s: only a race waits for the others to finish after the winner")
         if self.stage is not None and self.kind != "qualify":
             raise ValueError("stage: only a qualifying can be a stage of a knockout")
+        if self.run_interval_s is not None and (self.kind != "qualify" or self.stage is not None):
+            raise ValueError("run_interval_s: single runs are a qualifying on its own (not yet a stage of a knockout)")
         if self.cut is not None and self.stage not in (1, 2):
             raise ValueError("cut: only stage 1 and stage 2 cut cars (the last stage ranks the ones left)")
         return self

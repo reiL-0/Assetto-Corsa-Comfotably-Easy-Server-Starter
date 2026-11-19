@@ -495,8 +495,10 @@ def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = Non
 
 def _pit_hold(server_id: int, inst) -> dict | None:
     """`pit_hold` of the race state: the cars the knockout qualifying holds in the pits (the hub keeps their brakes on). Every route that returns the race state carries it, the same way."""
-    from app import knockoutlive
-    return knockoutlive.hold_view(server_id, inst.acsp.session, inst.acsp.cars) if inst and inst.acsp else None
+    from app import knockoutlive, singlerunlive
+    if not (inst and inst.acsp):
+        return None
+    return knockoutlive.hold_view(server_id, inst.acsp.session, inst.acsp.cars) or singlerunlive.hold_view(server_id, inst.acsp)
 
 
 @state_router.get("/race-state")

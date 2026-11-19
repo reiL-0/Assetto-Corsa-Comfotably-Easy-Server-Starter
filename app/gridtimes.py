@@ -158,6 +158,9 @@ def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
     Both with the stewards' grid penalties applied; [] when none of that. Reads the database and a result file: call it off the event loop."""
     if order := get_order(server_id):
         return order
+    if source == "singlerun":   # a qualifying by single runs: app/singlerunlive.py ranks the runs
+        from app import singlerunlive
+        return singlerunlive.grid_now(server_id, since)
     if source == "knockout":   # Q1, Q2, Q3 of a knockout qualifying: app/knockoutlive.py has the grid of the three stages
         from app import knockoutlive
         return knockoutlive.grid_now(server_id)
@@ -226,6 +229,8 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
             before, _ = await asyncio.to_thread(sessionpatch.step_and_original, client.server_id, idx - 1)
             if (before or {}).get("stage") == 3:   # the practice that follows Q3: the grid is the knockout's
                 source = "knockout"
+            elif (before or {}).get("run_interval_s"):
+                source = "singlerun"
         end = time.monotonic() + LEAD_S + LATE_S
         while True:
             err = await _tick(client, idx, source)

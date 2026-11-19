@@ -365,6 +365,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.trail: dict[int, deque] = {}  # car_id -> last TRAIL (time, pos, velocity) samples: a contact is reported 1.5-2.5 s late, app/stewards looks back in here
         self.telemetry: dict[int, dict] = {}  # car_id -> in-game app sample (own car, ~8 Hz)
         self.session: dict = {}
+        self.run_release: dict[str, float] = {}   # guid -> the unix time its single run is let out (app/singlerunlive.py); one per session, kept in memory
         self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
         self.winner_done = False   # the winner of this race has been announced
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
@@ -417,15 +418,17 @@ class ACSPClient(asyncio.DatagramProtocol):
                 if t == "session_info":
                     if event.get("session_index", event.get("current_session_index")) == event.get("current_session_index"):   # (only the description of the CURRENT session: the answer about another one, e.g. to the redefinition of session 0 the timeline makes when a race starts, must not turn the race into a practice)
                         self.session.update(event)
+                        self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 else:
                     self.session = event
+                    self.run_release = {}   # single-run qualifying: the release times of this session (app/singlerunlive.py)
+                    self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                     self.field.clear()
                     self.length.reset()
                     self.oval, self._oval_known = False, False
                     self._length_logged = None
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
-                self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
                 if nascar is not None:
                     try:
