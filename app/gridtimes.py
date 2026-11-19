@@ -78,7 +78,8 @@ def pace_guid(server_id: int) -> str:
 def plan(order: list[str], cars: dict[int, str], pace: str = "") -> dict[int, int]:
     """{slot (acServer's SessionID): best lap in ms}: the pace car first (place 1, in or out of the order), then the connected cars in the director's order, the ones it does not name after them in slot order. 1-based: 0 means «no lap» to acServer."""
     place = {guid: i for i, guid in enumerate(order) if guid != pace}
-    ranked = sorted(cars, key=lambda sid: (0 if pace and cars[sid] == pace else 1, place.get(cars[sid], len(order)), sid))
+    first = min((sid for sid, g in cars.items() if pace and g == pace), default=None)   # (one slot only: a stale second one with the same SteamID is a driver like any other)
+    ranked = sorted(cars, key=lambda sid: (0 if sid == first else 1, place.get(cars[sid], len(order)), sid))
     return {sid: i + 1 for i, sid in enumerate(ranked)}
 
 
@@ -385,7 +386,8 @@ async def _tick(client, idx: int, source: str | None = None) -> str | None:
     if order:
         ranks = plan(order, cars, pace)
     else:   # nothing to deliver: acServer's own order stands, but the pace car is always the first (1 ms is below any lap; the others keep their times)
-        ranks = {cid: 1 for cid, g in cars.items() if pace and g == pace}
+        slot = min((cid for cid, g in cars.items() if pace and g == pace), default=None)
+        ranks = {} if slot is None else {slot: 1}
     if not ranks:
         return None
     err = await asyncio.to_thread(_write, inst.pid, inst.started_at, ranks, client.server_id, idx)

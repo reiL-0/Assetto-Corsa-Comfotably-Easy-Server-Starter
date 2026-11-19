@@ -408,6 +408,7 @@ def test_the_pace_car_is_always_place_one_and_the_others_count_from_two():
     assert gridtimes.plan(["B", "PACE", "A"], {0: "A", 1: "B", 2: "PACE"}, "PACE") == {2: 1, 1: 2, 0: 3}   # named in the order, in the middle: first anyway
     assert gridtimes.plan(order, {0: "A", 1: "B", 2: "C"}, "PACE") == {2: 1, 0: 2, 1: 3}                    # the pace car is not connected: nothing changes
     assert gridtimes.plan(order, {0: "A", 1: "B", 2: "C", 3: "PACE"}) == {2: 1, 0: 2, 1: 3, 3: 4}           # no pace car named: as before (unnamed go last)
+    assert gridtimes.plan(order, {0: "A", 1: "PACE", 2: "C", 3: "PACE"}, "PACE") == {1: 1, 2: 2, 0: 3, 3: 4}  # a stale second slot of the pace car is a driver like any other
 
 
 def test_the_pace_car_is_who_the_director_named_or_the_preset_names_until_the_manager_takes_it(monkeypatch):
