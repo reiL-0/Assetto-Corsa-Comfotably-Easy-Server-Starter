@@ -255,6 +255,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
     with archive.open("rb") as fh:
         magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
+    stage = None   # the pace bot's copy of the track's AI lines: made before the cut, kept only if the track is installed
     try:
         fmt = unpack.archive_format(magic)
         if fmt == "zip":
@@ -291,6 +292,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 try:
                     from app import pitentry
                     pitentry.write_all(top)   # (before the cut: `ai/` does not stay on the server, the pit entry worked out from it does: in the manager's data folder, never in the track)
+                    stage = Path(tempfile.mkdtemp(dir=_scratch()))
+                    pitentry.stage_lines(top, stage)
                 except Exception:
                     import logging
                     logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
@@ -307,6 +310,13 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
             dest_parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(top, dest_parent / root, dirs_exist_ok=True)
+            if stage is not None:
+                try:
+                    from app import pitentry
+                    pitentry.commit_lines(stage, root)   # (the track is installed: now the lines of the pace bot are the new ones)
+                except Exception:
+                    import logging
+                    logging.getLogger("acmanager.content").exception("the pace lines of an uploaded track could not be kept; the upload goes on")
             res = Installed(root)
             if cataloged:
                 res.kind = kind
@@ -320,6 +330,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
         raise HTTPException(400, str(e)) from e
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def _room(extra: int = 0) -> None:

@@ -8,12 +8,15 @@ An estimate: the hub corrects it with the real entry as soon as it sees one. The
 import json
 import math
 import os
+import logging
 import re
+import shutil
 import struct
 from pathlib import Path
 
 from app.config import settings
 
+log = logging.getLogger("acmanager.pitentry")
 OFF_M = 8.0     # the pit axis is this far from the racing line: it has left the track
 MAX_BYTES = 4 << 20     # a real racing line is a few hundred KB (VIR: 2 MB): more is not one
 MAX_POINTS = 100_000
@@ -66,6 +69,74 @@ def store_path(track: str, config: str) -> Path | None:
     if not NAME.fullmatch(track) or (config and not NAME.fullmatch(config)) or ".." in track + config:
         return None
     return Path(settings.data_dir) / "pit_entry" / track / f"{config or '-'}.json"   # (a folder per track: two different pairs never share a file; no name starts with «-»)
+
+
+LINES = ("fast_lane.ai", "pit_lane.ai")   # what the pace bot drives on: the racing line and the pit lane axis
+MAX_LAYOUTS = 32   # layouts of one upload whose lines are kept (a real track has a handful)
+
+
+def lines_path(track: str, config: str) -> Path | None:
+    """Where the two AI lines of a layout are kept for the pace bot (`<data_dir>/pace_lines/<track>/<layout or ->/`, outside the track like the entry: the content is hashed and sealed); None for a name that could be a path."""
+    if not NAME.fullmatch(track) or (config and not NAME.fullmatch(config)) or ".." in track + config:
+        return None
+    return Path(settings.data_dir) / "pace_lines" / track / (config or "-")
+
+
+def stage_lines(track: Path, stage: Path) -> int:
+    """BEFORE the cut (`ai/` is not kept): copies the two lines of every layout of an unpacked track whose pair `read_ai` accepts (size, version 7, points) into `stage/<layout or ->/`. Nothing is kept yet: the upload may still
+    be refused (a rights claim, the quota), and then the lines of the track already installed must stay. `commit_lines` makes them the kept ones once the track is installed. A layout that is in the upload WITHOUT a
+    valid pair is staged as an empty folder: the kept lines of that layout are older than the track now installed, and no line is better than a wrong one (the bot refuses to start). Returns how many pairs were staged."""
+    n = seen = 0
+    for layout in [track, *(d for d in sorted(track.iterdir()) if d.is_dir())]:
+        name = "-" if layout == track else layout.name
+        if not (layout / "data").is_dir() or (layout != track and not NAME.fullmatch(name)) or seen >= MAX_LAYOUTS:
+            continue
+        seen += 1
+        (stage / name).mkdir(parents=True)
+        try:
+            for f in LINES:
+                read_ai(layout / "ai" / f)
+            for f in LINES:
+                (stage / name / f).write_bytes((layout / "ai" / f).read_bytes())
+            n += 1
+        except (OSError, ValueError, struct.error) as e:   # (read_ai: too big / not a version 7 file / not numbers; or it has no ai/ at all)
+            if (layout / "ai").exists():
+                log.warning("pace lines of %s not kept: %s", layout.name, e)
+            shutil.rmtree(stage / name)
+            (stage / name).mkdir()
+    return n
+
+
+def commit_lines(stage: Path, track: str) -> int:
+    """AFTER the track is installed (the caller holds the content lock, so two uploads of one track never meet here): each staged layout replaces the kept pair as a whole folder, so a reader sees the old pair or the new one,
+    never a line of each. A failure is logged and leaves what was kept as it was. Returns how many layouts were kept."""
+    n = 0
+    for d in sorted(stage.iterdir()) if stage.is_dir() else ():
+        dest = lines_path(track, "" if d.name == "-" else d.name)
+        if dest is None:
+            continue
+        new, old = dest.with_name(".new-" + dest.name), dest.with_name(".old-" + dest.name)   # (a layout name never starts with a dot: NAME)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists() and old.exists():
+                os.replace(old, dest)   # a crash left a swap half done: the pair that was kept comes back before anything else
+            shutil.rmtree(new, ignore_errors=True)
+            shutil.rmtree(old, ignore_errors=True)
+            if not all((d / f).is_file() for f in LINES):   # the layout came without a valid pair: the old one no longer matches the track
+                shutil.rmtree(dest, ignore_errors=True)
+                continue
+            shutil.copytree(d, new)
+            if dest.exists():
+                os.replace(dest, old)
+            os.replace(new, dest)
+            shutil.rmtree(old, ignore_errors=True)
+            n += 1
+        except OSError as e:
+            log.warning("pace lines of %s/%s not kept: %s", track, dest.name, e)
+            shutil.rmtree(new, ignore_errors=True)
+            if not dest.exists() and old.exists():
+                os.replace(old, dest)   # (the swap broke half way: the old pair comes back)
+    return n
 
 
 def write_all(track: Path) -> int:

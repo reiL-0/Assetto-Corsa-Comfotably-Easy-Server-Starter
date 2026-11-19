@@ -249,3 +249,26 @@ def test_a_claim_that_lands_while_the_track_is_being_cut_down_still_stops_the_in
     r = client.post("/api/v1/content/tracks", files={"file": ("rt.zip", _zip(files), "application/zip")})
     assert r.status_code == 403 and "rights claim" in r.text
     assert not (content._tracks_dir() / "race_t").exists()
+
+
+def test_an_uploaded_track_keeps_its_lines_for_the_pace_bot_only_when_it_is_installed(tmp_path, monkeypatch):
+    from test_pitentry import _track
+    from app import pitentry, storage
+    from fastapi import HTTPException
+    lay = _track(tmp_path / "src")
+    files = {"pl_track/models_gp.ini": b"[MODEL_0]", "pl_track/gp/data/surfaces.ini": b"[SURFACE_0]", "pl_track/pl_track.kn5": b"K" * 500,
+             "pl_track/gp/ai/fast_lane.ai": (lay / "ai" / "fast_lane.ai").read_bytes(), "pl_track/gp/ai/pit_lane.ai": (lay / "ai" / "pit_lane.ai").read_bytes()}
+    r = client.post("/api/v1/content/tracks", files={"file": ("pl.zip", _zip(files), "application/zip")})
+    assert r.status_code == 201, r.text
+    kept = pitentry.lines_path("pl_track", "gp")
+    first = (kept / "fast_lane.ai").read_bytes()
+    assert first == (lay / "ai" / "fast_lane.ai").read_bytes() and (kept / "pit_lane.ai").is_file()
+    assert not list((content._tracks_dir() / "pl_track").rglob("fast_lane.ai")), "not inside the track (hashed, sealed, offered to the drivers)"
+    # a refused upload (over the quota) must not replace the lines of the track that is installed
+    other = dict(files, **{"pl_track/gp/ai/fast_lane.ai": _track(tmp_path / "src2", "gp").joinpath("ai", "fast_lane.ai").read_bytes() + b""})
+    import struct
+    other["pl_track/gp/ai/fast_lane.ai"] = struct.pack("<4i", 7, 2, 0, 0) + struct.pack("<4fi", 0.0, 0.0, 0.0, 0.0, 0) + struct.pack("<4fi", 5.0, 0.0, 5.0, 7.0, 1)
+    monkeypatch.setattr(storage, "check_install", lambda *a, **k: (_ for _ in ()).throw(HTTPException(413, "no room")))
+    refused = client.post("/api/v1/content/tracks", files={"file": ("pl2.zip", _zip(other), "application/zip")})
+    assert refused.status_code == 413, refused.text
+    assert (kept / "fast_lane.ai").read_bytes() == first, "the refused upload did not touch the kept lines"

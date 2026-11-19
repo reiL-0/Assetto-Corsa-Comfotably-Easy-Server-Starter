@@ -6,10 +6,11 @@
   * wait: parked in the pit lane. lead: leaves the pits, laps the fast line at `kmh` (speeds up 5 km/h per second, slows down 8, like the hub). in: keeps the pace
     to the pit entry, then 80 km/h along the pit lane and parks at its box (the middle of the pit lane).
   * It says it is in the pit lane the way the hub does:  GET {base}/api/csp/pit?server=ID&slot=S&name=N&pit=0|1  (once a second): that is what lets the manager give the green.
-  * The track comes from the server's content: <content>/tracks/<track>[/<config>]/ai/fast_lane.ai + pit_lane.ai (read at every connection, so a track change = a restart = a new handshake).
+  * The track's two lines (fast_lane.ai + pit_lane.ai) come from the manager's copy kept when the track was uploaded (`--lines`, <data_dir>/pace_lines/<track>/<layout or ->/: the server's content does not keep `ai/`),
+    else from `--content`'s tracks/<track>[/<config>]/ai. Read at every connection, so a track change = a restart = a new handshake. A track uploaded before this existed has to be uploaded again (or its two files copied there).
   * It joins only while the session says `pace_source: "bot"` (state of the manager; "off" and "real" keep it out, and it leaves the server when the setting changes). It reconnects by itself (backoff) when the server restarts or drops it. Needs the server to know its GUID (the pace car's SteamID of the manager) in the entry list.
 
-    python3 ops/pace_bot.py --host 127.0.0.1 --port 9600 --guid 7656119... --name "Pace Car" --server 2 --base https://staging.example --content /opt/acserver/content
+    python3 ops/pace_bot.py --host 127.0.0.1 --port 9600 --guid 7656119... --name "Pace Car" --server 2 --base https://staging.example --lines /opt/acm-staging/data/pace_lines
 
 ponytail: the box is the middle of the pit lane (not the car's own box); entering/leaving the pit spline is a jump of a few metres; no collision avoidance, other clients see a car they
 cannot push. `YAW`: the heading is atan2(dx, dz) of the line: check on a real client that the car looks forward (flip the sign/offset here if not).
@@ -21,6 +22,7 @@ import bisect
 import importlib.util
 import json
 import math
+import os
 import struct
 import sys
 import threading
@@ -74,13 +76,19 @@ class Spline:
         return self.cum[i]
 
 
-def find_ai(content: str, track: str, config: str = "") -> Path:
-    """<content>/tracks/<track>[/<config>]/ai: where the server's own content keeps the lines."""
-    base = Path(content) / "tracks" / track
-    for d in ([base / config / "ai"] if config else []) + [base / "ai"]:
-        if (d / "fast_lane.ai").exists():
+def find_ai(content: str, track: str, config: str = "", lines: str = "") -> Path:
+    """Where the two lines of the track are: the manager's own copy `<lines>/<track>/<config or ->/` (kept when the track is uploaded: the server's content does not keep `ai/`), else
+    `<content>/tracks/<track>[/<config>]/ai` (a content folder that does have them)."""
+    found = []
+    if lines:
+        found.append(Path(lines) / track / (config or "-"))
+    if content:
+        base = Path(content) / "tracks" / track
+        found += ([base / config / "ai"] if config else []) + [base / "ai"]
+    for d in found:
+        if (d / "fast_lane.ai").exists() and (d / "pit_lane.ai").exists():
             return d
-    raise FileNotFoundError(f"no ai/fast_lane.ai for {track}/{config} under {content}")
+    raise FileNotFoundError(f"no fast_lane.ai + pit_lane.ai for {track}/{config or '-'} (looked in {', '.join(map(str, found)) or 'nowhere: give --lines or --content'})")
 
 
 class PaceBot:
@@ -215,6 +223,21 @@ def drive(d, bot: PaceBot, link: Link):
         time.sleep(max(0.0, 1 / HZ - (time.monotonic() - now)))
 
 
+def load_lines(content: str, track: str, config: str, lines: str, tries: int = 4) -> "PaceBot":
+    """Both lines of the track from ONE folder: the manager swaps the whole folder when a track is uploaded again, so if it changed while the two files were read (another inode, or gone) they are read again."""
+    for i in range(tries):
+        ai = find_ai(content, track, config, lines)
+        try:
+            before = os.stat(ai).st_ino
+            bot = PaceBot(Spline.load(ai / "fast_lane.ai", True), Spline.load(ai / "pit_lane.ai", False))
+            if os.stat(ai).st_ino == before:
+                return bot
+        except FileNotFoundError:
+            pass   # (swapped under our hands)
+        time.sleep(0.5)
+    raise FileNotFoundError(f"the lines of {track}/{config or '-'} keep changing")
+
+
 def wanted(base: str, server: int) -> bool:
     """Does the session want the bot on this server? Only a clear yes; the website or the manager being out is a no (it does not join a server it cannot be told about)."""
     try:
@@ -234,8 +257,7 @@ def serve(args):
             d = fc.FakeDriver(args.host, args.port, guid=args.guid, name=args.name, car=args.car, password=args.password).connect()
             link = None
             try:
-                ai = find_ai(args.content, d.track, d.track_config)
-                bot = PaceBot(Spline.load(ai / "fast_lane.ai", True), Spline.load(ai / "pit_lane.ai", False))
+                bot = load_lines(args.content, d.track, d.track_config, args.lines)
                 link = Link(args.base, args.server, bot, d)
                 threading.Thread(target=link.run, daemon=True).start()
                 print(f"pace bot in slot {d.session_id} on {d.track}/{d.track_config}", flush=True)
@@ -261,5 +283,6 @@ if __name__ == "__main__":
     ap.add_argument("--password", default="")
     ap.add_argument("--server", type=int, required=True, help="the server id on the website")
     ap.add_argument("--base", required=True, help="the website, e.g. https://www.oppenpaddockracing.site")
-    ap.add_argument("--content", required=True, help="the server's content folder")
+    ap.add_argument("--lines", default="", help="the manager's <data_dir>/pace_lines: the lines kept when a track is uploaded")
+    ap.add_argument("--content", default="", help="the server's content folder (when its tracks keep an ai/ folder)")
     serve(ap.parse_args())

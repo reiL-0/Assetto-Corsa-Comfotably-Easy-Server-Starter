@@ -93,12 +93,25 @@ def test_the_website_contract_the_hub_uses(tmp_path):
     srv.shutdown()
 
 
-def test_find_ai_prefers_the_layout(tmp_path):
+def test_find_ai_prefers_the_managers_copy_then_the_layout(tmp_path):
     for sub in ("ai", "gp/ai"):
         (tmp_path / "tracks/t" / sub).mkdir(parents=True)
-        (tmp_path / "tracks/t" / sub / "fast_lane.ai").write_bytes(b"")
+        for n in ("fast_lane.ai", "pit_lane.ai"):
+            (tmp_path / "tracks/t" / sub / n).write_bytes(b"")
     assert pb.find_ai(str(tmp_path), "t", "gp") == tmp_path / "tracks/t/gp/ai"
     assert pb.find_ai(str(tmp_path), "t", "") == tmp_path / "tracks/t/ai"
+    kept = tmp_path / "lines/t/gp"   # what the manager keeps when the track is uploaded: first
+    kept.mkdir(parents=True)
+    (kept / "fast_lane.ai").write_bytes(b"")
+    assert pb.find_ai(str(tmp_path), "t", "gp", str(tmp_path / "lines")) == tmp_path / "tracks/t/gp/ai", "one line alone is not a pair"
+    (kept / "pit_lane.ai").write_bytes(b"")
+    assert pb.find_ai(str(tmp_path), "t", "gp", str(tmp_path / "lines")) == kept
+    try:
+        pb.find_ai("", "t", "gp", "")
+    except FileNotFoundError as e:
+        assert "--lines" in str(e)
+    else:
+        raise AssertionError("with nowhere to look it says so")
 
 
 def test_the_bot_joins_the_real_acserver_and_drives_its_line(tmp_path):
@@ -229,3 +242,17 @@ def test_the_bot_is_on_the_server_only_when_the_session_names_it(tmp_path):
     bot, d = make(tmp_path), type("D", (), {"session_id": 3, "name": "P"})()
     link = pb.Link(base, 1, bot, d)
     assert link.want
+
+
+def test_the_bot_reads_both_lines_from_one_folder(tmp_path):
+    kept = tmp_path / "lines" / "t" / "gp"
+    kept.mkdir(parents=True)
+    make(kept)
+    bot = pb.load_lines("", "t", "gp", str(tmp_path / "lines"))
+    assert bot.fast.closed and not bot.pit.closed
+    try:
+        pb.load_lines("", "t", "other", str(tmp_path / "lines"))
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a track without lines does not start")
