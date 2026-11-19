@@ -253,8 +253,9 @@ class FakeDriver:
     def set_speed(self, kmh: float):
         self._speed = kmh / 3.6
 
-    def place(self, x: float, y: float, z: float, norm: float | None = None):
-        self._pos = (x, y, z)
+    def place(self, x: float, y: float, z: float, norm: float | None = None, yaw: float = 0.0, vel: tuple | None = None):
+        """Where the car is. `yaw` (rad) and `vel` (m/s vector) are what the other clients interpolate with; without `vel` the speed goes on Z (as before)."""
+        self._pos, self._yaw, self._vel = (x, y, z), yaw, vel
         if norm is not None:
             self._norm = norm
 
@@ -262,8 +263,9 @@ class FakeDriver:
         """One car update (what the game sends 18 times a second)."""
         self._seq = (self._seq + 1) & 0xFF
         x, y, z = self._pos
+        vx, vy, vz = self._vel if getattr(self, "_vel", None) else (0.0, 0.0, self._speed)
         pak = struct.pack("<BI3f3f3f4BBBHB I h B f", self._seq, int((time.monotonic() - self._t0) * 1000),
-                          x, y, z, 0.0, 0.0, 0.0, 0.0, 0.0, self._speed,
+                          x, y, z, getattr(self, "_yaw", 0.0), 0.0, 0.0, vx, vy, vz,
                           0, 0, 0, 0, 127, 127, 3000 if self._speed else 800, 2 if self._speed else 0,
                           0, 0, 0, self._norm)
         self.udp.send(bytes([POSITION_UPDATE]) + pak)
