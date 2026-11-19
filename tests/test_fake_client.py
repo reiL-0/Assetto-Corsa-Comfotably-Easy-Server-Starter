@@ -112,6 +112,9 @@ class Rig:
         time.sleep(0.5)
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self._stop.set()
         for d in self.drivers:
             d.disconnect()
@@ -124,11 +127,16 @@ class Rig:
 
 
 def delivered(rig, session_type="PRACTICE"):
-    """{guid: best lap ms} of the newest result file of this type in the simulator: after the adjusting practice it holds what the manager wrote (1 ms, 2 ms, 3 ms ...)."""
+    """{guid: best lap ms} of the newest result file of this type in the simulator: after the adjusting practice it holds what the manager wrote (1 ms, 2 ms, 3 ms ...). Waits for the file to be there and whole."""
     import json
-    files = sorted((rig.dir / "results").glob(f"*_{session_type}.json"), key=lambda p: p.stat().st_mtime)
-    doc = json.loads(files[-1].read_text(encoding="utf-8-sig"))
-    return {r["DriverGuid"]: r["BestLap"] for r in doc["Result"]}
+    for _ in range(20):
+        files = sorted((rig.dir / "results").glob(f"*_{session_type}.json"), key=lambda p: p.stat().st_mtime)
+        try:
+            doc = json.loads(files[-1].read_text(encoding="utf-8-sig"))
+            return {r["DriverGuid"]: r["BestLap"] for r in doc["Result"]}
+        except (IndexError, ValueError, KeyError):
+            time.sleep(0.5)
+    raise AssertionError("the adjusting practice has no (whole) result file")
 
 
 @pytest.fixture
@@ -318,7 +326,7 @@ F1_LIVE = [
 ]
 
 
-def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_knockouts(tmp_path, monkeypatch):
+def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_knockouts(tmp_path, monkeypatch, request):
     """Q1 cuts the slowest (Ana), Q2 the slower of the two left (Beto), Q3 is Carla's: the manager must say who is held in each stage (pit_hold, what the hub obeys)
     and the grid of the race must be Carla, Beto, Ana even though the slots go 0, 1, 2. About 3 minutes of real time (the adjusting practice is timed and the stages must end in different minutes, like the real ones)."""
     import asyncio
@@ -342,6 +350,7 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
         db.add(srv)
         db.commit()
     rig = Rig(tmp_path, plugin=False)
+    request.addfinalizer(rig.close)   # released even when the preparation below fails
     results_dir = Path(settings.data_dir) / "instances" / str(sid) / "results"       # the folder the manager reads is the one acServer writes
     results_dir.parent.mkdir(parents=True, exist_ok=True)
     if results_dir.exists() or results_dir.is_symlink():
@@ -378,7 +387,6 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
                 if ends_a_stage:   # acServer names a result file by the MINUTE (2026_11_19_12_21_QUALIFY.json): two stages ending in one minute would be one file (real stages last 13+ minutes)
                     while last_end["minute"] == time.strftime("%H%M"):
                         await asyncio.sleep(1)
-                    last_end["minute"] = time.strftime("%H%M")
                 before = [d.new_sessions for d in ds]
                 for _ in range(3):
                     client.send(acsp.encode_next_session())
@@ -388,6 +396,8 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
                     if all(d.new_sessions > b for d, b in zip(ds, before)):
                         break
                 assert ds[0].current.name == name, (ds[0].current, name)
+                if ends_a_stage:
+                    last_end["minute"] = time.strftime("%H%M")           # taken after the new session: the file of the stage that ended was written before it
                 await asyncio.sleep(1.5)                              # the manager reads the new session and saves the cycle
 
             def hold():
@@ -452,7 +462,7 @@ INDY_LIVE = [
 ]
 
 
-def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_grid_is_by_total_time(tmp_path, monkeypatch):
+def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_grid_is_by_total_time(tmp_path, monkeypatch, request):
     """Single runs every 10 s: the cars that have not left (and the ones that already ran) are in pit_hold, the ranking is the total of the 2 timed laps (the first lap of a run is the warm-up) and the race grid is that.
     About 2 minutes of real time (the qualifying and the adjusting practice are timed)."""
     import asyncio
@@ -476,6 +486,7 @@ def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_
         db.add(srv)
         db.commit()
     rig = Rig(tmp_path, plugin=False)
+    request.addfinalizer(rig.close)   # released even when the preparation below fails
     results_dir = Path(settings.data_dir) / "instances" / str(sid) / "results"
     results_dir.parent.mkdir(parents=True, exist_ok=True)
     if results_dir.is_symlink():
