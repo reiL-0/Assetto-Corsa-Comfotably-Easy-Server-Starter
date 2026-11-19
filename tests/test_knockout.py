@@ -100,3 +100,27 @@ def test_the_simulation_script_runs_and_prints_a_full_grid(capsys, monkeypatch):
     sim.main()
     out = capsys.readouterr().out
     assert "cars per stage [14, 10, 7]" in out and "P16" in out and "joined late" in out
+
+
+def test_the_director_can_choose_how_many_cars_are_cut_after_each_stage():
+    assert knockout.field_sizes(22, cuts=[None, None]) == [22, 16, 10]   # automatic = F1's
+    assert knockout.field_sizes(30, cuts=[8, 8]) == [30, 22, 14]          # a bigger grid
+    assert knockout.field_sizes(12, cuts=[2, 3]) == [12, 10, 7]           # a smaller one
+    assert knockout.field_sizes(22, cuts=[3, None]) == [22, 19, 13]       # only the first one: the second stays automatic (6)
+    assert knockout.field_sizes(8, cuts=[0, 0]) == [8, 8, 8]              # nobody cut
+    assert knockout.field_sizes(5, cuts=[10, 10]) == [5, 1, 1]            # more than there are: one is always left in each stage
+    with pytest.raises(ValueError):
+        knockout.field_sizes(22, cuts=[1])
+    with pytest.raises(ValueError):
+        knockout.field_sizes(22, cuts=[-1, 2])
+
+
+def test_a_knockout_with_the_directors_cuts_cuts_and_places_them():
+    cars = [f"c{i}" for i in range(10)]
+    q1 = _times(cars)
+    out = knockout.run(cars, [q1], cuts=[3, 2])                           # 10 -> 7 -> 5
+    assert out["held"] == ["c7", "c8", "c9"] and out["sizes"] == [10, 7, 5]
+    q2 = _times(cars[:7])
+    q3 = _times(cars[:5])
+    full = knockout.run(cars, [q1, q2, q3], cuts=[3, 2])
+    assert full["grid"] == cars and [st.out for st in full["stages"]] == [["c7", "c8", "c9"], ["c5", "c6"], []]
