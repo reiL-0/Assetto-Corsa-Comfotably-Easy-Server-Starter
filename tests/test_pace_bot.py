@@ -197,3 +197,35 @@ def test_a_garbled_answer_counts_as_a_failure(tmp_path):
         link.poll_once()
     assert link.cmd == ("in", 0.0), "ten unreadable answers in a row = the website is out"
     srv.shutdown()
+
+
+def test_the_bot_is_on_the_server_only_when_the_session_names_it(tmp_path):
+    import http.server
+    import json
+    import threading
+    state = {"pace_source": "bot", "pacecar": {"car": 3, "kmh": 90, "mode": "lead"}}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(state).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    assert pb.wanted(base, 1)
+    for other in ("real", "off"):
+        state["pace_source"] = other
+        assert not pb.wanted(base, 1), other
+    del state["pace_source"]
+    assert pb.wanted(base, 1), "an older manager that does not say: the bot was deployed on purpose"
+    srv.shutdown()
+    assert not pb.wanted(base, 1), "the website out: it does not join"
+    bot, d = make(tmp_path), type("D", (), {"session_id": 3, "name": "P"})()
+    link = pb.Link(base, 1, bot, d)
+    assert link.want

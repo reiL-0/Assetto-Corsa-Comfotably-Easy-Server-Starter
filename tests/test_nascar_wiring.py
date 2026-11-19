@@ -407,12 +407,12 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'red_ref', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'pace_source', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
-    assert armed.keys() - {'cuts_round', 'cuts_rounds', 'cuts_ladder'} == before.keys()   # (the default cut rule has a ladder: a race state adds the per-round counters the empty template does not have)
-    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed', 'cuts_round', 'cuts_rounds', 'cuts_ladder')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed')}
+    assert armed.keys() - {'cuts_round', 'cuts_rounds', 'cuts_ladder'} == before.keys() - {'pace_source'}   # (race-state alone says the session's pace source; the default cut rule has a ladder: a race state adds the per-round counters the empty template does not have)
+    assert {k: v for k, v in armed.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed', 'cuts_round', 'cuts_rounds', 'cuts_ladder')} == {k: v for k, v in before.items() if k not in ('rev', 'ts', 'nascar', 'nascar_armed', 'pace_source')}
     assert before['nascar_armed'] is None and armed['nascar_armed'] == {'total': 70, 'shares': [30, 45, 25]}   # (the arming of the server: what survives practice, qualifying and restarts)
     assert armed['nascar']['total'] == 70 and armed['rev'] > before['rev']
     assert armed['nascar']['next_delay_min'] == 10
@@ -437,7 +437,14 @@ def test_http_live_delay_configuration(live):
             assert state['nascar']['next_delay_min'] == expected
         else:
             assert state['nascar'] is None
-        assert api.get(f'{V}/servers/{sid}/race-state').json() == state
+        assert _race_state_http(sid) == state
+
+
+def _race_state_http(sid):
+    """race-state over HTTP without `pace_source`: only this endpoint says the session's pace source (for the pace bot); the control endpoints answer the snapshot without it."""
+    state = api.get(f'{V}/servers/{sid}/race-state').json()
+    state.pop('pace_source', None)
+    return state
 
 
 @pytest.mark.parametrize('delay', [-1, 61])
@@ -448,7 +455,7 @@ def test_http_invalid_delay_preserves_total_and_delay(live, delay, method, total
     url = f'{V}/servers/{sid}/race-control/nascar'
     before = api.post(url, json={'total': 70, 'next_delay_min': 2}).json()
     assert getattr(api, method)(url, json={'total': total, 'next_delay_min': delay}).status_code == 422
-    assert api.get(f'{V}/servers/{sid}/race-state').json() == before
+    assert _race_state_http(sid) == before
 
 
 @pytest.mark.parametrize('delay', [0, 2])

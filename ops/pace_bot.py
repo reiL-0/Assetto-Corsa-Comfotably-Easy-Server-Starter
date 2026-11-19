@@ -7,7 +7,7 @@
     to the pit entry, then 80 km/h along the pit lane and parks at its box (the middle of the pit lane).
   * It says it is in the pit lane the way the hub does:  GET {base}/api/csp/pit?server=ID&slot=S&name=N&pit=0|1  (once a second): that is what lets the manager give the green.
   * The track comes from the server's content: <content>/tracks/<track>[/<config>]/ai/fast_lane.ai + pit_lane.ai (read at every connection, so a track change = a restart = a new handshake).
-  * It reconnects by itself (backoff) when the server restarts or drops it. Needs the server to know its GUID (the pace car's SteamID of the manager) in the entry list.
+  * It joins only while the session says `pace_source: "bot"` (state of the manager; "off" and "real" keep it out, and it leaves the server when the setting changes). It reconnects by itself (backoff) when the server restarts or drops it. Needs the server to know its GUID (the pace car's SteamID of the manager) in the entry list.
 
     python3 ops/pace_bot.py --host 127.0.0.1 --port 9600 --guid 7656119... --name "Pace Car" --server 2 --base https://staging.example --content /opt/acserver/content
 
@@ -150,7 +150,7 @@ class Link:
 
     def __init__(self, base: str, server: int, bot: PaceBot, driver):
         self.base, self.server, self.bot, self.d = base.rstrip("/"), server, bot, driver
-        self.cmd, self.stop, self.fails, self._warned = ("wait", 0.0), threading.Event(), 0, {}   # cmd = (mode, kmh): one tuple so the loop never reads half of a change
+        self.want, self.cmd, self.stop, self.fails, self._warned = True, ("wait", 0.0), threading.Event(), 0, {}   # want: the session still says the bot is this server's pace car; cmd = (mode, kmh): one tuple so the loop never reads half of a change
 
     @property
     def mode(self):
@@ -171,9 +171,11 @@ class Link:
 
     def poll_once(self):
         try:
-            pc = json.loads(self._get(f"/api/csp/state?server={self.server}")).get("pacecar")
+            state = json.loads(self._get(f"/api/csp/state?server={self.server}"))
+            pc = state.get("pacecar")
             cmd = (pc.get("mode", "wait"), float(pc.get("kmh") or 0)) if pc and pc.get("car") == self.d.session_id else ("wait", 0.0)
             self.cmd, self.fails, self._warned["state"] = cmd, 0, None   # (only an answer that was read whole counts as the website being there)
+            self.want = state.get("pace_source", "bot") == "bot"   # (a manager that does not know the setting: the bot was deployed on purpose)
         except Exception as e:   # the website or the manager is down: it keeps its last order, and after 10 s without them it comes into the pits (the hub's lost link)
             self.fails += 1
             self._warn("state", str(e))
@@ -196,7 +198,7 @@ def drive(d, bot: PaceBot, link: Link):
     """Until the server drops us."""
     t = time.monotonic()
     seen = d.new_sessions
-    while not any(k == "closed" for _, k, _ in d.events):
+    while link.want and not any(k == "closed" for _, k, _ in d.events):   # (not wanted any more = the session chose a real pace car or none: it leaves the server)
         now = time.monotonic()
         dt, t = now - t, now
         if d.new_sessions != seen:   # a new session: back to the box
@@ -213,9 +215,21 @@ def drive(d, bot: PaceBot, link: Link):
         time.sleep(max(0.0, 1 / HZ - (time.monotonic() - now)))
 
 
+def wanted(base: str, server: int) -> bool:
+    """Does the session want the bot on this server? Only a clear yes; the website or the manager being out is a no (it does not join a server it cannot be told about)."""
+    try:
+        with urllib.request.urlopen(f"{base.rstrip('/')}/api/csp/state?server={server}", timeout=3) as r:
+            return json.loads(r.read()).get("pace_source", "bot") == "bot"
+    except Exception:
+        return False
+
+
 def serve(args):
     delay = 2.0
     while True:
+        if not wanted(args.base, args.server):   # off or a real pace car: stays out, and looks again in a while
+            time.sleep(10)
+            continue
         try:
             d = fc.FakeDriver(args.host, args.port, guid=args.guid, name=args.name, car=args.car, password=args.password).connect()
             link = None

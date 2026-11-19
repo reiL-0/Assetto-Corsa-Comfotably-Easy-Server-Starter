@@ -458,6 +458,11 @@ def autoflags_tick(now: float) -> None:
             elif act[0] == "green" and rc.formation_go():
                 _say(rc, SAY["green"], "flag")
         rc.pace_adapt(samples, inst.acsp.length.metres())
+        every = {i: s for i, c in inst.acsp.cars.items() if (s := speed_kmh(c)) is not None and i in stamps and 0 <= mono - stamps[i] <= 3}   # (the pace car is a non-racing guid: `speeds` leaves it out)
+        fault = rc.pace_watch(samples, every, mono)   # (the pace car stuck or silent: sent to the pits by itself)
+        if fault:
+            _say(rc, "El pace car no avanza: vuelve a boxes automáticamente · la verde y el «to go» son del director" if fault == "stuck"
+                 else "El pace car no responde: vuelve a boxes automáticamente · la verde y el «to go» son del director", "flag")   # (whole texts: the website translates them, OPR WP/banner_i18n.py)
         rc.yellow_tick(samples, speeds, mono, now)
         _flag_messages(inst, rc)
         models = {c: (info.get("car_model") or "") for c, info in cars.items()}
@@ -513,11 +518,12 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         give_back_rule_of(server_id)
     server = _get(sess, server_id)
     hold = _pit_hold(server_id, inst)
+    pace_source = (server.session or {}).get("pace_source") or "real"   # (the pace bot reads it to know whether it should be on the server at all)
     if rc:
-        return {**rc.snapshot(), "nascar_armed": armed_view(inst, server), "pit_hold": hold}
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, server), "pit_hold": hold, "pace_source": pace_source}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "pit_hold": hold, "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"pace_source": pace_source, "nascar_armed": armed_view(inst, server), "pit_hold": hold, "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
