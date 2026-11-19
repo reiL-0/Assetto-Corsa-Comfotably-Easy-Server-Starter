@@ -155,9 +155,12 @@ def facade_info(s: Server, preview: bool = True) -> dict:
     info["cport"] = _ports(s.base_port)["http"]   # the snapshot came from acServer's own HTTP port: players are told ours
     info["extra"] = True   # the lobby flag; Content Manager does NOT use it to find /api/details: that is the " ℹ<port>" marker (lobby_info)
     info.update(clients=0, session=0)
-    if timeline.config_durations(s.config):   # the snapshot may have been taken while a session was shortened to catch up with the clock
+    if seq := timeline.sequence_of(s):   # a session sequence: the sessions Content Manager lists are ITS sessions, not the three sections of the config
+        info["sessiontypes"], info["durations"], info["timed"] = timeline.sequence_info(seq)
+    elif timeline.config_durations(s.config):   # the snapshot may have been taken while a session was shortened to catch up with the clock
         info["durations"] = timeline.config_durations(s.config)
-    info["timeleft"] = (info["durations"][0] * 60) if info.get("durations") else 0   # the first session, in full
+    first_is_laps = bool(info.get("sessiontypes")) and info["sessiontypes"][0] == 3 and not info.get("timed")   # (a race by laps has no length in time: nothing to count down)
+    info["timeleft"] = (info["durations"][0] * 60) if info.get("durations") and not first_is_laps else 0   # the first session, in full
     pos = timeline.server_position(s)
     if pos:   # the session clock keeps running while the server is off (app/timeline.py)
         info.update(session=pos["index"], timeleft=int(pos["remaining_s"]))
@@ -220,6 +223,13 @@ def _league_of(server_id: int) -> int | None:
         return None
 
 
+def details_durations(info: dict) -> list[int]:
+    """`durations` of /api/details, in SECONDS: Content Manager takes this answer's durations as they come (`ServerInformationExtra.Durations`: «In seconds») and writes them over the ones it read from /INFO, which it
+    converts itself (minutes to seconds for the sessions that are not a race, and for a race only when `timed`). A race by laps stays as it is: laps."""
+    types, timed = info.get("sessiontypes") or [], bool(info.get("timed"))
+    return [d if (i < len(types) and types[i] == 3 and not timed) else d * 60 for i, d in enumerate(info.get("durations") or [])]
+
+
 def details(s: Server, live: bytes | None, host: str = "") -> dict:
     """Body of /api/details, with the same pending-event view as the stopped lobby."""
     plan = _preview(s) if not live else None
@@ -232,6 +242,8 @@ def details(s: Server, live: bytes | None, host: str = "") -> dict:
     info["cport"], info["extra"] = _ports(s.base_port)["http"], True
     info["name"] = clean_name(info.get("name"))   # clean, whatever the source was
     info["wrappedPort"] = info["cport"]   # Content Manager keeps asking THIS port for the details (ServerInformationExtended.PortExtended)
+    if "durations" in info:
+        info["durations"] = details_durations(info)
     req = requirements.lines(requirements.current(_league_of(s.id)))   # what the player must install, under the welcome text: the league's list while its event is on this server
     info["description"] = s.welcome + ("\n\nRequisitos:\n" + "\n".join(req) if req else "")
     if host:
