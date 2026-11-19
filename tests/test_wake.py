@@ -608,3 +608,50 @@ def test_the_name_marker_is_replaced_never_duplicated_and_real_names_survive():
         assert got.count("ℹ") == wanted.count("ℹ") + 1, (given, got)
         assert wake.clean_name(got) == wanted, (given, got)                                   # and /api/details gets the clean name back
     assert wake.lobby_info(s, {})["name"].endswith(f"ℹ{http}")                                 # a missing name does not crash
+
+
+def test_api_details_durations_are_in_seconds_because_content_manager_does_not_convert_them():
+    """/INFO keeps acServer's own minutes (CM converts those); /api/details is read as seconds (ServerInformationExtra.Durations) and written over the sessions: a 5 there would show as 5 seconds."""
+    info = {"sessiontypes": [1, 2, 3], "durations": [15, 5, 12], "timed": False}
+    assert wake.details_durations(info) == [900, 300, 12]                       # a race by laps stays laps
+    assert wake.details_durations({**info, "timed": True}) == [900, 300, 720]   # a timed race: minutes, so seconds
+    assert wake.details_durations({"durations": [5, 3]}) == [300, 180]          # no session types: nothing is a lap race
+    assert wake.details_durations({}) == [] and info["durations"] == [15, 5, 12]   # it does not touch what it was given
+
+
+def test_the_lobby_lists_the_sessions_of_a_sequence_not_the_three_of_the_config():
+    from types import SimpleNamespace
+    steps = [{"kind": "practice", "name": "P", "time_min": 5}, {"kind": "qualify", "name": "Q1", "time_min": 18}, {"kind": "qualify", "name": "Q2", "time_min": 15},
+             {"kind": "practice", "name": "Ajuste", "time_min": 4}, {"kind": "race", "name": "R", "laps": 10}]
+    s = SimpleNamespace(id=1, base_port=9800, name="F1", config={"SERVER": {"NAME": "F1", "TRACK": "spa", "CARS": "gt3"}, "PRACTICE": {"TIME": 5}, "QUALIFY": {"TIME": 18}, "RACE": {"LAPS": 10}},
+                        entry_list=[], welcome="", anchor_index=None, anchor_at=None, session={"sequence": steps})
+    info = wake.facade_info(s, preview=False)
+    assert info["sessiontypes"] == [1, 2, 2, 1, 3] and info["durations"] == [5, 18, 15, 4, 10] and info["timed"] is False and info["timeleft"] == 5 * 60
+    timed = SimpleNamespace(**{**s.__dict__, "session": {"sequence": [*steps[:4], {"kind": "race", "name": "R", "time_min": 20}]}})
+    assert wake.facade_info(timed, preview=False)["durations"][-1] == 20 and wake.facade_info(timed, preview=False)["timed"] is True
+
+
+def test_details_of_a_running_server_turns_the_real_info_minutes_into_seconds_and_info_itself_is_untouched():
+    from types import SimpleNamespace
+    real = {"name": "Real", "sessiontypes": [1, 2, 3], "durations": [3, 5, 2], "timed": False, "timeleft": 176, "cport": 18081}
+    s = SimpleNamespace(id=999, base_port=9800, name="x", welcome="", config={}, entry_list=[], session=None)
+    got = wake.details(s, json.dumps(real).encode())
+    assert got["durations"] == [180, 300, 2] and got["timeleft"] == 176   # acServer's [3, 5, 2] (3 min, 5 min, 2 laps) as CM reads /api/details; timeleft was already seconds
+    assert real["durations"] == [3, 5, 2]
+
+
+def test_a_first_session_that_is_a_race_by_laps_has_no_time_to_count_down_and_races_of_two_kinds_are_refused():
+    from types import SimpleNamespace
+
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.servers import SessionIn
+    steps = [{"kind": "race", "name": "R1", "laps": 10}, {"kind": "practice", "name": "P", "time_min": 3}, {"kind": "race", "name": "R2", "laps": 10}]
+    s = SimpleNamespace(id=1, base_port=9800, name="x", config={"SERVER": {"NAME": "x", "TRACK": "spa", "CARS": "gt3"}, "RACE": {"LAPS": 10}}, entry_list=[], welcome="", anchor_index=None, anchor_at=None,
+                        session={"sequence": steps})
+    assert wake.facade_info(s, preview=False)["timeleft"] == 0      # 10 laps are not 600 seconds
+    base = {"name": "S", "track": "spa", "cars": ["gt3"], "practice_min": 5, "race_laps": 10}
+    assert len(SessionIn(**base, sequence=[*steps, {"kind": "practice", "name": "P2", "time_min": 2}]).sequence) == 4
+    with pytest.raises(ValidationError):
+        SessionIn(**base, sequence=[*steps, {"kind": "race", "name": "R3", "time_min": 20}])   # laps and time in one list: CM cannot say it

@@ -143,6 +143,15 @@ def config_durations(config: dict) -> list[int]:
             for name, _ in TYPES if (sec := config.get(name))]
 
 
+def sequence_info(sequence: list[dict]) -> tuple[list[int], list[int], bool]:
+    """What /INFO says about a session sequence: (the type of each session, its duration, `timed`): minutes for practice and qualify, laps for a race by laps, minutes for a timed race. `timed` is the first race's
+    (Content Manager reads every race of the list with the same flag)."""
+    kinds = {"practice": 1, "qualify": 2, "race": 3}
+    races = [st for st in sequence if st["kind"] == "race"]
+    return ([kinds[st["kind"]] for st in sequence], [int(st.get("laps") or 0) if st["kind"] == "race" and st.get("laps") else int(st.get("time_min") or 0) for st in sequence],
+            bool(races) and not int(races[0].get("laps") or 0))
+
+
 def definition(seg: Seg, minutes: int | None = None) -> bytes:
     return acsp.encode_set_session_info(seg.index, seg.name, seg.type, seg.laps, seg.minutes if minutes is None else minutes, seg.wait)
 

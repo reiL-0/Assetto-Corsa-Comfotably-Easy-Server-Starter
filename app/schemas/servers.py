@@ -237,6 +237,9 @@ class SessionIn(BaseModel):
                 raise ValueError(f"sequence: there is a {st.kind} step but the session has no {st.kind} section (practice_min / qualify_min / race_laps / race_min)")
         if not any(st.kind == "race" for st in self.sequence):
             raise ValueError("sequence: it needs at least one race")
+        races = [st for st in self.sequence if st.kind == "race"]
+        if any(r.laps for r in races) and any(not r.laps for r in races):
+            raise ValueError("sequence: the races are all by laps or all by time (Content Manager has one flag for the whole list)")
         if self.reversed_grid:
             raise ValueError("sequence: acServer's own reversed grid does not work with a sequence (use grid_from_race)")
         stage_names = [st.name for st in self.sequence if st.stage is not None]
