@@ -378,7 +378,7 @@ def pace_car_check() -> None:
         rc = state_of(inst.server_id, True, inst.acsp.session, create=bool(want))
         if rc and want:
             inst.pace_steam_id = None
-            rc.set_pace_car(slot_of(inst.acsp.cars, want), PACE_CAR_KMH, want)
+            rc.set_pace_car(slot_of(inst.acsp.cars, want), getattr(inst, "pace_kmh", None) or PACE_CAR_KMH, want)   # (the session's speed, 120 when it says none)
         if rc and rc.pace_guid:
             rc.follow_pace_driver(slot_of(inst.acsp.cars, rc.pace_guid))
 

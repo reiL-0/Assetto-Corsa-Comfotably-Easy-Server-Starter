@@ -1776,3 +1776,37 @@ def test_stop_after_the_flag_waits_for_the_saved_result(live, monkeypatch, tmp_p
     adapter._STOP_AFTER[sid] = (now + 999, object())                         # asked for an instance that is gone: dropped, never applied to the one running now
     asyncio.run(adapter.stop_saved_races(now))
     assert stopped == ['manual'] and sid not in adapter._STOP_AFTER
+
+
+def test_the_pace_car_the_session_names_leads_at_the_speed_the_session_says_and_120_when_it_says_none(live, monkeypatch):
+    from pydantic import ValidationError
+
+    from app.schemas.servers import SessionIn
+    sid, client, _ = live
+    insts = [SimpleNamespace(server_id=sid, acsp=client, pace_steam_id='76561190000000009', pace_kmh=95)]
+    monkeypatch.setattr(adapter.supervisor, 'live', lambda: insts)
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
+    adapter.pace_car_check()
+    rc = live_rc.state_of(sid, True, client.session, create=False)
+    assert rc.pace_car == 9 and rc.snapshot()['pacecar']['kmh'] == 95, "the speed of the session"
+    assert insts[0].pace_steam_id is None, "named once: what the director chooses later stands"
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000010'}
+    insts[0].pace_steam_id, insts[0].pace_kmh = '76561190000000010', None
+    adapter.pace_car_check()
+    assert rc.snapshot()['pacecar']['kmh'] == 120, "no speed in the session: the usual 120"
+    base = {"name": "S", "track": "spa", "cars": ["gt3"], "practice_min": 5}
+    assert SessionIn(**base, pace_kmh=30).pace_kmh == 30 and SessionIn(**base, pace_kmh=250).pace_kmh == 250 and SessionIn(**base).pace_kmh is None
+    for bad in (29, 251, 0):
+        with pytest.raises(ValidationError):
+            SessionIn(**base, pace_kmh=bad)
+
+
+def test_applying_a_session_names_the_pace_car_again_only_when_its_id_changes_or_it_gives_a_new_speed():
+    from app.services.server_service import pace_changed
+    a, b = '76561190000000009', '76561190000000010'
+    assert pace_changed(a, None, a, 95) is False, "an old preset that says nothing of the speed does not bring the replaced pace car back"
+    assert pace_changed(a, 95, a, 95) is False, "the same again undoes nothing the director did"
+    assert pace_changed(a, 110, a, 95) is True, "a new speed is named again"
+    assert pace_changed(b, None, a, 95) is True and pace_changed(None, None, a, 95) is True, "another driver (or none) is a change"
+    assert pace_changed(a, 100, None, None) is True, "a speed where there was none"
+

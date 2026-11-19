@@ -196,6 +196,7 @@ class SessionIn(BaseModel):
     race_min: int | None = Field(default=None, ge=0, le=UNLIMITED_MIN)  # a timed race (endurance) instead of laps; not both; UNLIMITED_MIN = no end
     race_est_min: int | None = Field(default=None, ge=0, le=1440)  # how long a race BY LAPS lasts for the session clock of a stopped server (app/timeline.py): 0 = the default of 20 minutes; left out = the server keeps the one it has. Not sent to acServer
     car_counts: dict[str, Annotated[int, Field(strict=True, ge=0, le=MAX_SLOTS)]] | None = None   # open slots per model («5 of this, 2 of that»); then `cars` and `max_clients` follow from it. Ignored with `entries`
+    pace_kmh: int | None = Field(default=None, ge=30, le=250)   # the speed the pace car leads at when this session names him (the same range as a VSC: PACE_MIN..PACE_MAX of app/live/racecontrol.py); None = 120. The director's own choice in the live panel stands over it
     pace_steam_id: str | None = Field(default=None, pattern=r"^[0-9]{17}$")   # the pace car's driver (SteamID): named once when the server starts or the session is applied; the director can change it afterwards
     ballast: int = Field(default=0, ge=0, le=10000)   # kg for every slot (open ones too) whose own ballast is 0: a driver's own value wins
     restrictor: int = Field(default=0, ge=0, le=100)   # % for every slot whose own restrictor is 0, same rule
