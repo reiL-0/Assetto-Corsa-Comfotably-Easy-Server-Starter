@@ -239,7 +239,7 @@ def _session_count(inst) -> int | None:
 def sequence_view(s: Server, info: dict, session_count: int | None) -> None:
     """The real acServer's /INFO lists the three sections of its config; with a session sequence installed (acServer says it has the sequence's number of sessions) the sessions are the sequence's: their types, durations
     and `timed` replace those, so `sessiontypes[session]` is the session being played. Not installed (a count that is not the sequence's): acServer plays its own three and what it says stands."""
-    if (seq := timeline.sequence_of(s)) and session_count == len(seq):
+    if (seq := timeline.sequence_of(s)) and len(seq) > 3 and session_count == len(seq):   # (a sequence has 4 to 12 sessions: with 3, acServer's own three are what is played)
         info["sessiontypes"], info["durations"], info["timed"] = timeline.sequence_info(seq)
 
 
