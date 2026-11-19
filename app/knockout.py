@@ -20,19 +20,30 @@ from dataclasses import dataclass, field
 F1_Q3_CARS = 10
 
 
-def field_sizes(n: int, advance: list[int] | None = None) -> list[int]:
+def field_sizes(n: int, advance: list[int] | None = None, cuts: list[int | None] | None = None) -> list[int]:
     """Cars that RUN each stage: [n, through to Q2, through to Q3]. The F1 numbers (22 cars: 22, 16, 10; 20: 20, 15, 10; 24: 24, 17, 10) and, for a small server, half the entrants reach Q3 (16: 16, 12, 8; 8: 8, 6, 4);
-    fewer than 4 entrants: nobody is cut. `advance` = [to Q2, to Q3] fixes them by hand (each at least 1 and no more than the stage before)."""
+    fewer than 4 entrants: nobody is cut. `advance` = [to Q2, to Q3] fixes them by hand (each at least 1 and no more than the stage before). `cuts` = [cars cut after Q1, cars cut after Q2] (None for one = the automatic
+    cut): the director's own numbers for a grid bigger or smaller than F1's; a cut that would leave nobody in the next stage is held back to leave one."""
     if advance is not None:
         sizes = [n, *advance]
         if len(advance) != 2 or any(a < 1 for a in advance) or any(b > a for a, b in zip(sizes, sizes[1:])):
             raise ValueError(f"advance {advance} does not fit {n} entrants")
         return sizes
     if n < 4:
-        return [n, n, n]
-    q3 = min(F1_Q3_CARS, -(-n // 2))   # ceil(n / 2), at most 10
-    cut_first = -(-(n - q3) // 2)       # the first cut takes the larger half when it is odd
-    return [n, n - cut_first, q3]
+        auto = [n, n, n]
+    else:
+        q3 = min(F1_Q3_CARS, -(-n // 2))   # ceil(n / 2), at most 10
+        cut_first = -(-(n - q3) // 2)       # the first cut takes the larger half when it is odd
+        auto = [n, n - cut_first, q3]
+    if cuts is None:
+        return auto
+    if len(cuts) != 2 or any(c is not None and c < 0 for c in cuts):
+        raise ValueError(f"cuts {cuts}: two numbers (or None), none negative")
+    c1 = auto[0] - auto[1] if cuts[0] is None else cuts[0]
+    c2 = auto[1] - auto[2] if cuts[1] is None else cuts[1]
+    c1 = max(0, min(c1, n - 1))
+    c2 = max(0, min(c2, n - c1 - 1))
+    return [n, n - c1, n - c1 - c2]
 
 
 @dataclass
@@ -52,14 +63,14 @@ def classify(ran: list[str], times: dict[str, int | None], before: dict[str, int
 
 
 def run(entrants: list[str], stages: list[dict[str, int | None]], advance: list[int] | None = None, late: list[str] | None = None,
-        names: tuple[str, ...] = ("Q1", "Q2", "Q3")) -> dict:
+        names: tuple[str, ...] = ("Q1", "Q2", "Q3"), cuts: list[int | None] | None = None) -> dict:
     """The knockout, from the times of the stages played so far (1 to 3 dicts guid -> best lap in ms or None).
     `entrants`: who ran Q1 (the order is only the last tie-break). `late`: who joined after Q1 (they go behind everybody).
     Returns {"sizes", "stages": [Stage], "held": guids to hold in the pits for the NEXT stage, "grid": the grid so far}: with every stage played it is the full grid; with fewer, the cars still in the fight are
     not placed yet (the grid is the casualties so far, last place first)."""
     if not 1 <= len(stages) <= len(names):
         raise ValueError("one to three stages")
-    sizes = field_sizes(len(entrants), advance)
+    sizes = field_sizes(len(entrants), advance, cuts)
     done: list[Stage] = []
     ran, before = list(entrants), {g: i for i, g in enumerate(entrants)}
     for i, times in enumerate(stages):

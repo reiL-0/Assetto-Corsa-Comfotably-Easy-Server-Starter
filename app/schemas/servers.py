@@ -150,6 +150,7 @@ class SequenceStep(BaseModel):
     wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the session starts (any kind: acServer counts it from the moment the session begins)
     over_s: int | None = Field(default=None, ge=0, le=3600)   # RACE ONLY: seconds the race stays open after the winner finishes, for the rest to get in; None = the server's own RACE_OVER_TIME
     result_s: int | None = Field(default=None, ge=0, le=600)  # seconds the results are shown when this session ends, before the next one is set up (every kind); None = the server's own RESULT_SCREEN_TIME
+    cut: int | None = Field(default=None, ge=0, le=50)        # STAGE 1 or 2 only: how many cars are cut at the end of it; None = the automatic cut (F1's 6 and 6 with 22 cars, scaled to the grid)
     stage: int | None = Field(default=None, ge=1, le=3)       # QUALIFY ONLY: this step is stage 1, 2 or 3 of a knockout qualifying like Formula 1's (Q1, Q2, Q3: app/knockout.py): the slowest are cut and held in the pits for the next stage
 
     @model_validator(mode="after")
@@ -162,6 +163,8 @@ class SequenceStep(BaseModel):
             raise ValueError("over_s: only a race waits for the others to finish after the winner")
         if self.stage is not None and self.kind != "qualify":
             raise ValueError("stage: only a qualifying can be a stage of a knockout")
+        if self.cut is not None and self.stage not in (1, 2):
+            raise ValueError("cut: only stage 1 and stage 2 cut cars (the last stage ranks the ones left)")
         return self
 
 

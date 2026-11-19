@@ -320,3 +320,30 @@ def test_applying_the_same_sequence_again_does_not_end_a_cycle_in_play_but_anoth
     assert knockoutlive.load(sid) is not None
     apply([*STEPS[:5], {**STEPS[5], "laps": 12}])              # another sequence: no cycle carries over
     assert knockoutlive.load(sid) is None
+
+
+def test_the_cuts_the_director_set_are_the_ones_the_pits_and_the_grid_follow():
+    sid = _server()
+    with Session(engine) as db:   # Q1 cuts 1 car and Q2 cuts 3 (8 -> 7 -> 4)
+        srv = db.get(Server, sid)
+        srv.session = {"sequence": [{**st, "cut": {"Q1": 1, "Q2": 3}.get(st["name"])} if st["name"] in ("Q1", "Q2") else st for st in STEPS]}
+        db.add(srv)
+        db.commit()
+    assert knockoutlive.cuts_of(sid) == [1, 3]
+    _cycle(sid, q1_order=CARS)
+    assert knockoutlive.held_guids(sid, 2) == [CARS[7]]                                   # only the slowest of Q1
+    _cycle(sid, q1_order=CARS, q2_order=CARS[:7])
+    assert set(knockoutlive.held_guids(sid, 3)) == {CARS[7], CARS[4], CARS[5], CARS[6]}   # and the three of Q2
+    _cycle(sid, q1_order=CARS, q2_order=CARS[:7], q3_order=CARS[:4])
+    assert knockoutlive.grid_now(sid) == CARS
+
+
+def test_a_cut_only_makes_sense_on_stages_one_and_two():
+    from pydantic import ValidationError
+
+    from app.schemas.servers import SessionIn
+    base = {"name": "S", "track": "spa", "cars": ["gt3"], "practice_min": 10, "qualify_min": 18, "race_laps": 10}
+    assert SessionIn(**base, sequence=[STEPS[0], {**STEPS[1], "cut": 4}, {**STEPS[2], "cut": 2}, *STEPS[3:]]).sequence[1].cut == 4
+    for bad in ([STEPS[0], STEPS[1], STEPS[2], {**STEPS[3], "cut": 1}, *STEPS[4:]], [{**STEPS[0], "cut": 1}, *STEPS[1:]]):   # the last stage; a practice
+        with pytest.raises(ValidationError):
+            SessionIn(**base, sequence=bad)

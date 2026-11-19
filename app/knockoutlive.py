@@ -101,6 +101,16 @@ def stage_times(server_id: int, filename: str, names: dict[str, str] | None = No
     return out
 
 
+def cuts_of(server_id: int) -> list[int | None]:
+    """The cuts the director set on stages 1 and 2 of the sequence (None: the automatic cut)."""
+    from app.models import Server
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+        seq = ((srv.session if srv else None) or {}).get("sequence") or []
+    by_stage = {st["stage"]: st.get("cut") for st in seq if st.get("stage")}
+    return [by_stage.get(1), by_stage.get(2)]
+
+
 def played(server_id: int, data: dict, upto: int) -> list[dict] | None:
     """The times of stages 1..upto, or None when one of them has no file (nothing can be said then)."""
     out = []
@@ -124,7 +134,7 @@ def held_guids(server_id: int, stage: int) -> list[str] | None:
     times = played(server_id, data, stage - 1)
     if times is None:
         return None
-    out = knockout.run(data["entrants"], times)
+    out = knockout.run(data["entrants"], times, cuts=cuts_of(server_id))
     return list(dict.fromkeys(out["held"] + data["late"]))
 
 
@@ -155,7 +165,7 @@ def grid_now(server_id: int) -> list[str]:
     times = played(server_id, data, 3)
     if times is None:
         return []
-    grid = knockout.run(data["entrants"], times, late=data["late"])["grid"]
+    grid = knockout.run(data["entrants"], times, late=data["late"], cuts=cuts_of(server_id))["grid"]
     files = [Path(data["stages"][str(k)]).name for k in (1, 2, 3)]
     parsed = {"type": "Qualify", "laps": [], "classification": [
         {"position": i + 1, "driver_guid": g, "driver_name": "", "car_model": "", "best_lap_ms": None, "total_time_ms": None} for i, g in enumerate(grid)]}
