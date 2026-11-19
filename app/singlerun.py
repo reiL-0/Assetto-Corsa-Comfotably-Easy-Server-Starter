@@ -67,11 +67,22 @@ def average_kmh(laps_ms: list[int], length_m: float) -> float:
 
 def classify(runs: dict[str, Run], warmup: int = 1, laps: int = 2, metric: str = "average") -> list[str]:
     """Best first. Completed valid runs by the metric (average speed: the smaller total time first; top speed: the faster first); then the voided ones and the incomplete ones, in the order of the runs given
-    (the release order). A tie keeps the order of the runs given (whoever went out first)."""
+    (the release order). A tie goes to the faster single timed lap and then to whoever went out first (the order of the runs given)."""
     if metric not in METRICS:
         raise ValueError(f"metric {metric!r}: one of {METRICS}")
     order = list(runs)
     ok = {g: r.timed(warmup, laps) for g, r in runs.items()}
     good = [g for g in order if ok[g] is not None and (metric == "average" or runs[g].top_kmh is not None)]
-    key = (lambda g: sum(ok[g])) if metric == "average" else (lambda g: -runs[g].top_kmh)
+    key = (lambda g: (sum(ok[g]), min(ok[g]))) if metric == "average" else (lambda g: (-runs[g].top_kmh, sum(ok[g])))
     return sorted(good, key=key) + [g for g in order if g not in good]
+
+
+def stage_times(laps_by_guid: dict[str, list[int]], cuts_by_guid: dict[str, list[int]] | None = None, warmup: int = 1, laps: int = 2) -> dict[str, int | None]:
+    """The 'time' of each driver in a stage played by single runs, to rank it like any other stage (app/knockout.py): the TOTAL of his timed laps in ms (the smaller the faster: the same order as the average
+    speed), None for a run that is void or not complete. `laps_by_guid`: every lap each driver completed in the session, in order (the result file's Laps)."""
+    cuts = cuts_by_guid or {}
+    out: dict[str, int | None] = {}
+    for g, lap_list in laps_by_guid.items():
+        timed = Run(g, list(lap_list), list(cuts.get(g, []))).timed(warmup, laps)
+        out[g] = sum(timed) if timed else None
+    return out

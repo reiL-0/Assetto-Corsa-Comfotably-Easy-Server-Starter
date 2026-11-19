@@ -124,3 +124,37 @@ def test_a_knockout_with_the_directors_cuts_cuts_and_places_them():
     q3 = _times(cars[:5])
     full = knockout.run(cars, [q1, q2, q3], cuts=[3, 2])
     assert full["grid"] == cars and [st.out for st in full["stages"]] == [["c7", "c8", "c9"], ["c5", "c6"], []]
+
+
+def test_a_stage_run_in_groups_lets_the_best_of_each_group_through_and_ranks_the_casualties_of_both_together():
+    cars = [f"c{i:02d}" for i in range(14)]                 # c00 fastest ... c13 slowest, over both groups
+    groups = {g: 1 if i % 2 == 0 else 2 for i, g in enumerate(cars)}   # group 1: the even ones, group 2: the odd ones
+    q1 = _times(cars)
+    out = knockout.run(cars, [q1], advance=[8, 4], groups=groups)       # 14 -> 8 (4 per group) -> 4
+    st = out["stages"][0]
+    assert [g for g in st.order if g not in st.out] == ["c00", "c01", "c02", "c03", "c04", "c05", "c06", "c07"]   # the four best of each group
+    assert st.out == ["c08", "c09", "c10", "c11", "c12", "c13"]         # the casualties of both groups, by time
+    assert out["held"] == st.out
+    # it is not the same as the top eight overall when one group is faster
+    q1b = _times(["c00", "c02", "c04", "c06", "c08", "c10", "c12", "c01", "c03", "c05", "c07", "c09", "c11", "c13"])   # group 1 is the faster one
+    out = knockout.run(cars, [q1b], advance=[8, 4], groups=groups)
+    assert set(g for g in out["stages"][0].order if g not in out["stages"][0].out) == {"c00", "c02", "c04", "c06", "c01", "c03", "c05", "c07"}   # still 4 + 4
+
+
+def test_a_group_with_fewer_cars_than_its_places_leaves_them_to_the_best_of_the_others():
+    cars = [f"c{i}" for i in range(8)]
+    groups = {g: 1 if i < 7 else 2 for i, g in enumerate(cars)}         # 7 in group 1, 1 in group 2
+    assert knockout.per_group(cars, groups, 6) == {"c0", "c1", "c2", "c7", "c3", "c4"}   # quota 3 + 3: group 2 has one car, the other two places go to the best of group 1
+
+
+def test_the_full_indy_road_course_weekend_groups_then_the_twelve_then_the_fast_six():
+    cars = [f"c{i:02d}" for i in range(20)]
+    groups = {g: 1 if i % 2 == 0 else 2 for i, g in enumerate(cars)}
+    q1 = _times(cars)
+    q2 = _times(cars[:12])
+    q3 = _times(["c03", "c00", "c01", "c02", "c04", "c05"])
+    out = knockout.run(cars, [q1, q2, q3], advance=[12, 6], groups=groups, names=("Grupos", "Top 12", "Fast Six"))
+    assert out["grid"][:6] == ["c03", "c00", "c01", "c02", "c04", "c05"]       # the Fast Six, by its own times
+    assert out["grid"][6:12] == cars[6:12]                                       # the casualties of the round of twelve
+    assert out["grid"][12:] == cars[12:]                                         # the casualties of the groups, together
+    assert [len(st.ran) for st in out["stages"]] == [20, 12, 6]

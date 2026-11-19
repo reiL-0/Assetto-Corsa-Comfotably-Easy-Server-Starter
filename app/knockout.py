@@ -62,8 +62,28 @@ def classify(ran: list[str], times: dict[str, int | None], before: dict[str, int
     return sorted(ran, key=lambda g: ((times.get(g) or inf), before.get(g, len(before)), ran.index(g)))
 
 
+def per_group(order: list[str], groups: dict[str, int], keep: int) -> set[str]:
+    """Who goes through from a stage whose cars ran in groups (a road or street course of IndyCar: two groups, the best six of each reach the round of twelve): `keep` places split evenly among the groups (the first
+    ones take the odd one); a group that has fewer cars than its places leaves them to the best of the others."""
+    gs = sorted({groups[g] for g in order if g in groups})
+    base, extra = divmod(keep, len(gs)) if gs else (0, 0)
+    quota = {g: base + (1 if k < extra else 0) for k, g in enumerate(gs)}
+    taken = dict.fromkeys(gs, 0)
+    chosen: set[str] = set()
+    for g in order:   # best first
+        gr = groups.get(g)
+        if gr in quota and taken[gr] < quota[gr]:
+            chosen.add(g)
+            taken[gr] += 1
+    for g in order:   # the places a short group left
+        if len(chosen) >= keep:
+            break
+        chosen.add(g)
+    return chosen
+
+
 def run(entrants: list[str], stages: list[dict[str, int | None]], advance: list[int] | None = None, late: list[str] | None = None,
-        names: tuple[str, ...] = ("Q1", "Q2", "Q3"), cuts: list[int | None] | None = None) -> dict:
+        names: tuple[str, ...] = ("Q1", "Q2", "Q3"), cuts: list[int | None] | None = None, groups: dict[str, int] | None = None) -> dict:
     """The knockout, from the times of the stages played so far (1 to 3 dicts guid -> best lap in ms or None).
     `entrants`: who ran Q1 (the order is only the last tie-break). `late`: who joined after Q1 (they go behind everybody).
     Returns {"sizes", "stages": [Stage], "held": guids to hold in the pits for the NEXT stage, "grid": the grid so far}: with every stage played it is the full grid; with fewer, the cars still in the fight are
@@ -78,10 +98,15 @@ def run(entrants: list[str], stages: list[dict[str, int | None]], advance: list[
         order = classify(ran, times, before)
         last = i == len(names) - 1
         keep = len(order) if last else sizes[i + 1]
-        stage = Stage(names[i], list(ran), order, {g: times.get(g) for g in ran}, order[keep:], held)
+        if i == 0 and groups and not last:   # the first stage was run in groups: the best of EACH group go through, the casualties of all of them ranked together by their times
+            through = per_group(order, groups, keep)
+            ran_next, out_now = [g for g in order if g in through], [g for g in order if g not in through]
+        else:
+            ran_next, out_now = order[:keep], order[keep:]
+        stage = Stage(names[i], list(ran), order, {g: times.get(g) for g in ran}, out_now, held)
         done.append(stage)
         before = {g: j for j, g in enumerate(order)}
-        ran = order[:keep]
+        ran = ran_next
     complete = len(done) == len(names)
     casualties = [g for st in reversed(done) for g in st.out]   # the last stage's casualties first: they start ahead of the earlier ones
     grid = (done[-1].order + casualties) if complete else casualties   # the Q3 order, then the Q2 casualties, then the Q1 ones; before Q3 is played the cars still in the fight are not placed

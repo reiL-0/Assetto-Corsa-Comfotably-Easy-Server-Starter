@@ -88,3 +88,15 @@ def test_the_simulation_script_runs_and_prints_a_full_grid(capsys, monkeypatch):
     sim.main()
     out = capsys.readouterr().out
     assert "8 cars, 20 s apart" in out and "GRID" in out and "P8" in out
+
+
+def test_a_tie_goes_to_the_faster_single_lap_and_then_to_whoever_went_out_first():
+    runs = {"a": Run("a", [30_000, 25_500, 24_500]), "b": Run("b", [30_000, 25_000, 25_000]), "c": Run("c", [30_000, 25_000, 25_000])}
+    assert singlerun.classify(runs) == ["a", "b", "c"]   # a and b/c tie on the total (50 s): a has the faster lap; b and c tie completely: the release order
+
+
+def test_the_stage_times_of_single_runs_are_the_totals_of_the_timed_laps_or_none():
+    laps = {"a": [30_000, 25_000, 25_100], "b": [30_000, 24_000], "c": [30_000, 24_000, 24_000, 23_000], "d": [30_000, 24_000, 24_000]}
+    cuts = {"d": [0, 0, 1]}
+    assert singlerun.stage_times(laps, cuts) == {"a": 50_100, "b": None, "c": 48_000, "d": None}   # b is not done, d has a cut in a timed lap; c's extra lap does not count
+    assert singlerun.stage_times(laps, cuts, warmup=0, laps=4) == {"a": None, "b": None, "c": 101_000, "d": None}
