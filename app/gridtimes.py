@@ -63,10 +63,22 @@ class Mem:
         os.close(self.fd)
 
 
-def plan(order: list[str], cars: dict[int, str]) -> dict[int, int]:
-    """{slot (acServer's SessionID): best lap in ms}: the connected cars in the director's order, the ones it does not name after them in slot order. 1-based: 0 means «no lap» to acServer."""
-    place = {guid: i for i, guid in enumerate(order)}
-    ranked = sorted(cars, key=lambda sid: (place.get(cars[sid], len(order)), sid))
+def pace_guid(server_id: int) -> str:
+    """SteamID of the pace car's driver, "" when there is none: the director's own choice (RaceControl.pace_guid), or the one the preset names (`pace_steam_id`) while the manager has not taken it yet. Memory only: cheap to ask often."""
+    from app import supervisor   # late, like the rest of this module
+    from app.live import racecontrol
+    with racecontrol._lock:
+        rc = racecontrol._states.get(server_id)
+        if rc and rc.pace_guid:
+            return str(rc.pace_guid)
+    inst = supervisor.get(server_id)
+    return str(getattr(inst, "pace_steam_id", None) or "")
+
+
+def plan(order: list[str], cars: dict[int, str], pace: str = "") -> dict[int, int]:
+    """{slot (acServer's SessionID): best lap in ms}: the pace car first (place 1, in or out of the order), then the connected cars in the director's order, the ones it does not name after them in slot order. 1-based: 0 means «no lap» to acServer."""
+    place = {guid: i for i, guid in enumerate(order) if guid != pace}
+    ranked = sorted(cars, key=lambda sid: (0 if pace and cars[sid] == pace else 1, place.get(cars[sid], len(order)), sid))
     return {sid: i + 1 for i, sid in enumerate(ranked)}
 
 
@@ -261,9 +273,12 @@ def preview(server_id: int, client) -> dict:
                             reasons[g] = (txt, "ok")
             elif order:
                 reasons = {g: ("Por la eliminatoria" if source == "knockout" else "Por su tanda", "ok") for g in order}
+    pace = pace_guid(server_id)
+    if order and pace in cars:   # the pace car is always the first (plan()), whatever the order says
+        order = [pace] + [g for g in order if g != pace]
     names = _names(list(dict.fromkeys([*order, *cars])))
     rows = [{"guid": g, "name": (cars.get(g) or {}).get("driver_name") or names.get(g) or g, "online": g in cars,
-             "reason": "Orden fijado a mano" if manual else reasons.get(g, ("", "ok"))[0], "tone": "hand" if manual else reasons.get(g, ("", "ok"))[1]} for g in order]
+             "reason": "Pace car: sale primero" if g == pace else "Orden fijado a mano" if manual else reasons.get(g, ("", "ok"))[0], "tone": "hand" if manual and g != pace else reasons.get(g, ("", "ok"))[1]} for g in order]
     late = sorted((g for g in cars if g not in order), key=lambda g: slots[g]) if (order or mode == "manual") else []   # connected and not named: the guard puts them after the named ones (plan())
     rows += [{"guid": g, "name": cars[g].get("driver_name") or names.get(g) or g, "online": True, "reason": "Nuevo: entró después, va al final", "tone": "new"} for g in late]
     return {"mode": mode, "source": source, "note": note, "order": rows}
@@ -363,10 +378,14 @@ async def _tick(client, idx: int, source: str | None = None) -> str | None:
     else:
         order = await asyncio.to_thread(get_order, client.server_id)
     inst = supervisor.get(client.server_id)
-    if not order or not inst or not inst.pid:
+    if not inst or not inst.pid:
         return None
     cars = {cid: str(c.get("driver_guid") or "") for cid, c in list(client.cars.items())}
-    ranks = plan(order, cars)
+    pace = pace_guid(client.server_id)
+    if order:
+        ranks = plan(order, cars, pace)
+    else:   # nothing to deliver: acServer's own order stands, but the pace car is always the first (1 ms is below any lap; the others keep their times)
+        ranks = {cid: 1 for cid, g in cars.items() if pace and g == pace}
     if not ranks:
         return None
     err = await asyncio.to_thread(_write, inst.pid, inst.started_at, ranks, client.server_id, idx)

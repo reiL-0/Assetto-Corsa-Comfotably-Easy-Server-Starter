@@ -398,3 +398,61 @@ def test_a_long_wait_before_the_session_does_not_leave_the_result_before_it_out_
     client.session = {}
     asyncio.run(gridtimes._tick(client, 2, "qualify"))
     assert since == [10_000.0 - 120 - 300, 10_000.0 - 120]
+
+
+# --- the pace car: always place 1, in or out of the order --------------------------------------------------------------------------------------------------------------
+
+def test_the_pace_car_is_always_place_one_and_the_others_count_from_two():
+    order = ["C", "A", "B"]
+    assert gridtimes.plan(order, {0: "A", 1: "B", 2: "C", 3: "PACE"}, "PACE") == {3: 1, 2: 2, 0: 3, 1: 4}   # not in the order: first anyway
+    assert gridtimes.plan(["B", "PACE", "A"], {0: "A", 1: "B", 2: "PACE"}, "PACE") == {2: 1, 1: 2, 0: 3}   # named in the order, in the middle: first anyway
+    assert gridtimes.plan(order, {0: "A", 1: "B", 2: "C"}, "PACE") == {2: 1, 0: 2, 1: 3}                    # the pace car is not connected: nothing changes
+    assert gridtimes.plan(order, {0: "A", 1: "B", 2: "C", 3: "PACE"}) == {2: 1, 0: 2, 1: 3, 3: 4}           # no pace car named: as before (unnamed go last)
+
+
+def test_the_pace_car_is_who_the_director_named_or_the_preset_names_until_the_manager_takes_it(monkeypatch):
+    from app import supervisor
+    from app.live import racecontrol
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=1, started_at=1.0, pace_steam_id="76561199000000001"))
+    assert gridtimes.pace_guid(9501) == "76561199000000001"                        # the preset's field, not taken yet
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=1, started_at=1.0, pace_steam_id=None))
+    assert gridtimes.pace_guid(9501) == ""                                         # taken (or removed by the director) and no state names him
+    rc = racecontrol.RaceControl({})
+    rc.pace_guid = "76561199000000002"
+    racecontrol._states[9501] = rc
+    try:
+        assert gridtimes.pace_guid(9501) == "76561199000000002"                   # the director's live choice
+    finally:
+        racecontrol._states.pop(9501, None)
+
+
+def test_the_guard_puts_the_pace_car_first_with_an_order_and_alone_without_one(monkeypatch):
+    written = []
+    monkeypatch.setattr(gridtimes, "_write", lambda pid, started, ranks, sid, idx: written.append(ranks))
+    import app.supervisor as supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=4242, started_at=1.0, pace_steam_id="P"))
+    cars = {0: {"driver_guid": "A"}, 1: {"driver_guid": "B"}, 2: {"driver_guid": "P"}}
+    client = _client(9502, cars=cars)
+
+    async def go():
+        gridtimes.set_order(9502, ["B", "A"], "root")
+        await gridtimes._tick(client, 0)                    # the order says B, A; the pace car (slot 2) goes first
+        gridtimes.clear_order(9502)
+        client.grid_last = None
+        await gridtimes._tick(client, 0)                    # no order: only the pace car is written (1 ms), the others keep acServer's own times
+
+    asyncio.run(go())
+    assert written == [{2: 1, 1: 2, 0: 3}, {2: 1}]
+
+
+def test_the_panel_preview_shows_the_pace_car_first(monkeypatch):
+    import app.supervisor as supervisor
+    monkeypatch.setattr(supervisor, "get", lambda sid: SimpleNamespace(pid=1, started_at=1.0, pace_steam_id="P"))
+    gridtimes.set_order(9503, ["B", "A"], "root")
+    client = _client(9503, cars={0: {"driver_guid": "A", "driver_name": "Ana"}, 1: {"driver_guid": "B", "driver_name": "Beto"}, 2: {"driver_guid": "P", "driver_name": "Pace"}})
+    try:
+        rows = gridtimes.preview(9503, client)["order"]
+    finally:
+        gridtimes.clear_order(9503)
+    assert [r["guid"] for r in rows] == ["P", "B", "A"]
+    assert rows[0]["reason"] == "Pace car: sale primero" and rows[1]["reason"] == "Orden fijado a mano"

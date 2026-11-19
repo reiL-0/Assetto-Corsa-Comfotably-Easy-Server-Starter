@@ -81,3 +81,13 @@ def test_grid_ranks_by_total_time_voids_cuts_and_puts_who_never_ran_last():
     assert singlerunlive.grid_now(sid, 0) == [G[1], G[0], G[2], G[3]]                # the only single-run step of the sequence
     assert singlerunlive.grid_now(sid, 0, 0) == [G[1], G[0], G[2], G[3]]             # the step given by its index (the file says nothing of its session)
     assert singlerunlive.grid_now(sid, 0, 1) == []                                    # an index that is a practice, not a single-run step
+
+
+def test_the_pace_car_takes_no_turn_in_the_single_runs(monkeypatch):
+    from app import supervisor
+    monkeypatch.setattr(supervisor, "get", lambda s: SimpleNamespace(pid=1, started_at=1.0, pace_steam_id=G[3]))
+    sid = _server()
+    c = _client(1000.0)
+    held = singlerunlive.hold_view(sid, c, now=1001.0)
+    assert held == {"stage": singlerunlive.RUN_STAGE, "cars": [11, 12]}     # G[0] runs; G[1], G[2] wait; the pace car (G[3], car 13) is not in the queue at all
+    assert set(c.run_release) == {G[0], G[1], G[2]}
