@@ -82,6 +82,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | DELETE | `/api/v1/servers/{server_id}/grid` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/grid` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/grid` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| GET | `/api/v1/servers/{server_id}/grid/preview` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/incidents` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/kick/{car_id}` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | PUT | `/api/v1/servers/{server_id}/limits` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

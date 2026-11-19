@@ -49,6 +49,9 @@ def _count(sid, lg, start_age):
         s.add(sc)
         s.commit()
         league.count_results(s, sc, ev, time.time() + 60)
+        sc.state = "done"   # (a schedule left «running» would be ended and announced by the next test that ticks the scheduler)
+        s.add(sc)
+        s.commit()
 
 
 def _penalise(sid, fname, guid, value=2):
