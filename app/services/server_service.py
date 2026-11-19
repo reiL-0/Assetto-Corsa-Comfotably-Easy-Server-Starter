@@ -49,6 +49,12 @@ class ApplyResult:
     start_error: ServerError | None = None
 
 
+
+def pace_changed(new_id: str | None, new_kmh: int | None, old_id: str | None, old_kmh: int | None) -> bool:
+    """Does applying a session name the pace car again? When the Steam ID changes, or when the session gives a speed it did not have: an old preset or event that says nothing of the speed (None) must not bring
+    back the pace car the director replaced in the live panel, and clearing the speed takes effect at the next start (nothing live to undo)."""
+    return new_id != old_id or (new_kmh is not None and new_kmh != old_kmh)
+
 def ports(base: int) -> dict[str, int]:
     return ini_generator.ports(base, settings.port_range_start, settings.port_range_end)
 
@@ -151,6 +157,7 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
     except RuntimeError as e:
         raise ServerError(409, str(e)) from e
     inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
+    inst.pace_kmh = (s.session or {}).get("pace_kmh")
     inst.set_weather_plan(s.weather_plan, s.config)
     if old := _boots.pop(server_id, None):
         old.cancel()   # a start of a start that has not finished: the new instance is the one that counts
@@ -279,7 +286,7 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart, or a race that lasts otherwise): the clock starts over with the next start
     s.config = cfg
     s.welcome = body.welcome.strip()
-    old_pace = (s.session or {}).get("pace_steam_id")
+    old_pace, old_kmh = (s.session or {}).get("pace_steam_id"), (s.session or {}).get("pace_kmh")
     old_rolling = live_rc.rolling_mode(s.session)
     s.session = {**body.model_dump(exclude={"admin_password", "restart"}), "race_est_min": est}
     s.session["rulebook_revision"] = (hashlib.sha256(body.rulebook_snapshot.model_dump_json().encode()).hexdigest()
@@ -314,8 +321,8 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
         inst.cuts_off = tuple(body.cuts_off)
         if live_rc.rolling_mode(s.session) != old_rolling:   # (the same again must not undo the style the director chose since)
             live_rc.load_rolling(server_id, inst, s.session)
-        if body.pace_steam_id != old_pace:   # the same one again must not undo what the director did since
-            inst.pace_steam_id = body.pace_steam_id
+        if pace_changed(body.pace_steam_id, body.pace_kmh, old_pace, old_kmh):   # the same one again must not undo what the director did since
+            inst.pace_steam_id, inst.pace_kmh = body.pace_steam_id, body.pace_kmh
     result = ApplyResult()
     if body.restart:
         try:
@@ -355,6 +362,7 @@ async def adopt_running(sess: Session) -> int:
         )
         if inst:
             inst.pace_steam_id = (s.session or {}).get("pace_steam_id")
+            inst.pace_kmh = (s.session or {}).get("pace_kmh")
             inst.set_weather_plan(s.weather_plan, s.config)
         n += inst is not None
     return n

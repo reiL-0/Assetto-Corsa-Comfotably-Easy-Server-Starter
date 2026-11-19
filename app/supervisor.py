@@ -158,6 +158,7 @@ class Instance:
         self.nascar_config = nascar_config  # snapshot of Server.session.nascar; replaced on apply, read by ACSP without I/O
         self.cuts_off = cuts_off   # the kinds of session (practice / qualify / race) whose track-limit cuts the applied session switched off; like `rolling`, known before the first UDP event and replaced on apply
         self.rolling = rolling   # how a race starts (Server.session: nascar / f1 / off); like nascar_config it is known before the first UDP event; replaced on apply (live.racecontrol.load_rolling)
+        self.pace_kmh: int | None = None   # Server.session.pace_kmh: the speed pace_car_check gives him when it names him
         self.pace_steam_id: str | None = None   # Server.session.pace_steam_id until pace_car_check names him (then None); set on start / apply / adopt
         self.cwd = cwd
         self.proc = proc  # only for a process this manager spawned; an adopted one is known by its pid alone
