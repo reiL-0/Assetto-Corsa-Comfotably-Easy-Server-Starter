@@ -95,3 +95,81 @@ def test_two_different_pairs_never_share_a_file_and_the_entry_never_rounds_up_to
     assert not list(dest.parent.glob("*.tmp")), "the temporary file of the atomic write is gone"
     dest.write_text('{"entry": 0.99999}')
     assert pitentry.read("vir", "gp") == 0.9999
+
+
+def test_the_lines_are_staged_before_the_cut_and_kept_only_when_committed(tmp_path, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    lay = _track(tmp_path / "vir", "gp")
+    stage = tmp_path / "stage"
+    assert pitentry.stage_lines(tmp_path / "vir", stage) == 1
+    assert not pitentry.lines_path("vir", "gp").exists(), "staged is not kept: the upload may still be refused"
+    assert pitentry.commit_lines(stage, "vir") == 1
+    kept = pitentry.lines_path("vir", "gp")
+    assert all((kept / n).read_bytes() == (lay / "ai" / n).read_bytes() for n in pitentry.LINES)
+    # a new upload replaces the pair as a whole, and leaves no temporary folder behind
+    (lay / "ai" / "fast_lane.ai").write_bytes(pitentry.read_ai.__globals__["struct"].pack("<4i", 7, 2, 0, 0) + b"\0" * 40)
+    stage2 = tmp_path / "stage2"
+    assert pitentry.stage_lines(tmp_path / "vir", stage2) == 1 and pitentry.commit_lines(stage2, "vir") == 1
+    assert (kept / "fast_lane.ai").read_bytes() == (lay / "ai" / "fast_lane.ai").read_bytes()
+    assert sorted(p.name for p in kept.parent.iterdir()) == ["gp"], "no .new / .old folder is left"
+
+
+def test_a_track_that_is_one_layout_keeps_its_lines_under_a_dash_and_hostile_names_keep_nothing(tmp_path, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    src = _track(tmp_path / "src", "gp")
+    mono = tmp_path / "mono"
+    (mono / "data").mkdir(parents=True)
+    (mono / "ai").mkdir()
+    for n in pitentry.LINES:
+        (mono / "ai" / n).write_bytes((src / "ai" / n).read_bytes())
+    stage = tmp_path / "stage"
+    assert pitentry.stage_lines(mono, stage) == 1 and pitentry.commit_lines(stage, "mono") == 1
+    assert (pitentry.lines_path("mono", "") / "fast_lane.ai").is_file() and pitentry.lines_path("mono", "").name == "-"
+    assert pitentry.lines_path("..", "x") is None and pitentry.lines_path("a", "../b") is None
+    assert pitentry.commit_lines(tmp_path / "stage", "..") == 0, "a track name that could be a path keeps nothing"
+
+
+def test_lines_that_cannot_be_trusted_are_not_staged_and_one_line_alone_is_not_a_pair(tmp_path, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    lay = _track(tmp_path / "bad", "gp")
+    (lay / "ai" / "fast_lane.ai").write_bytes(struct.pack("<4i", 7, 10, 0, 0) + b"\0" * (pitentry.MAX_BYTES + 1))   # over the size limit
+    assert pitentry.stage_lines(tmp_path / "bad", tmp_path / "s1") == 0 and (tmp_path / "s1" / "gp").is_dir() and not list((tmp_path / "s1" / "gp").iterdir()), "neither line of that layout is staged (an empty folder says it is in the upload)"
+    lay2 = _track(tmp_path / "half", "gp")
+    (lay2 / "ai" / "pit_lane.ai").unlink()
+    assert pitentry.stage_lines(tmp_path / "half", tmp_path / "s2") == 0
+
+
+def test_a_layout_that_comes_without_a_valid_pair_loses_its_old_lines_and_the_temporary_names_are_nobodys(tmp_path, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    lay = _track(tmp_path / "t", "gp")
+    other = _track(tmp_path / "t", "gp.new")   # (a layout called like a temporary folder of the old naming)
+    stage = tmp_path / "s1"
+    assert pitentry.stage_lines(tmp_path / "t", stage) == 2 and pitentry.commit_lines(stage, "t") == 2
+    assert pitentry.lines_path("t", "gp.new").is_dir() and pitentry.lines_path("t", "gp").is_dir()
+    (lay / "ai" / "pit_lane.ai").unlink()   # the track is uploaded again: «gp» has no pit lane now
+    stage = tmp_path / "s2"
+    assert pitentry.stage_lines(tmp_path / "t", stage) == 1
+    assert pitentry.commit_lines(stage, "t") == 1
+    assert not pitentry.lines_path("t", "gp").exists(), "the old pair of a layout that arrived without one does not stay (no line is better than a wrong one)"
+    assert (pitentry.lines_path("t", "gp.new") / "fast_lane.ai").is_file(), "and a layout named like a temporary folder is left alone"
+
+
+def test_a_swap_that_was_cut_half_way_is_undone_before_the_next_one(tmp_path, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    _track(tmp_path / "t", "gp")
+    stage = tmp_path / "s"
+    pitentry.stage_lines(tmp_path / "t", stage)
+    pitentry.commit_lines(stage, "t")
+    kept = pitentry.lines_path("t", "gp")
+    kept.rename(kept.with_name(".old-gp"))   # (the process died right after moving the kept pair aside)
+    assert pitentry.commit_lines(stage, "t") == 1
+    assert (kept / "fast_lane.ai").is_file() and not kept.with_name(".old-gp").exists() and not kept.with_name(".new-gp").exists()
+    kept.rename(kept.with_name(".old-gp"))   # and an upload that brings nothing for that layout must still bring the old pair back, then remove it (no valid pair)
+    empty = tmp_path / "s_empty"
+    (empty / "gp").mkdir(parents=True)
+    assert pitentry.commit_lines(empty, "t") == 0 and not kept.exists() and not kept.with_name(".old-gp").exists()
