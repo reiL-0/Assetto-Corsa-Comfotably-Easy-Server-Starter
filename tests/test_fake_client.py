@@ -123,6 +123,14 @@ class Rig:
         self.log.close()
 
 
+def delivered(rig, session_type="PRACTICE"):
+    """{guid: best lap ms} of the newest result file of this type in the simulator: after the adjusting practice it holds what the manager wrote (1 ms, 2 ms, 3 ms ...)."""
+    import json
+    files = sorted((rig.dir / "results").glob(f"*_{session_type}.json"), key=lambda p: p.stat().st_mtime)
+    doc = json.loads(files[-1].read_text(encoding="utf-8-sig"))
+    return {r["DriverGuid"]: r["BestLap"] for r in doc["Result"]}
+
+
 @pytest.fixture
 def rig(tmp_path):
     r = Rig(tmp_path)
@@ -402,6 +410,8 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
             ds[2].lap(85000)
             await asyncio.sleep(1)
             await advance("Ajuste", True)
+            for d in ds:
+                d.lap(95000)                                        # a real lap (slower than the 1 ms, 2 ms ... the manager writes): the practice has a result file, as a real one does
             await asyncio.sleep(2)
             out["grid_now"] = await asyncio.to_thread(knockoutlive.grid_now, sid)
             end = time.time() + 90                                      # the adjusting practice ends by itself: gridtimes writes the knockout's grid in its last seconds
@@ -410,6 +420,7 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
             out["race"] = [d.session_type for d in ds]
             out["grid_list"] = ds[0].grid_list
             out["slots"] = [d.grid_slot for d in ds]
+            out["delivered"] = delivered(rig)
             return out
         finally:
             if client.transport:
@@ -428,6 +439,7 @@ def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_k
     assert out["grid_now"] == [guid(2), guid(1), guid(0)], out            # Carla, Beto, Ana
     assert out["race"] == [fc.RACE] * 3, out
     assert out["grid_list"] == [2, 1, 0] and out["slots"] == [2, 1, 0], out
+    assert out["delivered"] == {guid(2): 1, guid(1): 2, guid(0): 3}, out   # the manager wrote the knockout grid as 1 ms, 2 ms, 3 ms in the adjusting practice (the grid acServer carries from Q3 can be the same by chance)
 
 
 # --- the IndyCar style qualifying (single runs) played by the real manager and three fake drivers --------------------------------------------------------------------
@@ -505,7 +517,7 @@ def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_
             await asyncio.sleep(1.5)
             hold = lambda: asyncio.to_thread(singlerunlive.hold_view, sid, client)
             out["t0"] = await hold()                                    # Ana is out, Beto and Carla wait for their turn
-            runs = {0: [70000, 60000, 60000], 1: [70000, 59000, 59000], 2: [70000, 61000, 61000]}   # warm-up + the 2 timed laps; Beto is the fastest
+            runs = {0: [70000, 60000, 60000], 1: [70000, 59000, 62000], 2: [70000, 61000, 61000]}   # warm-up + the 2 timed laps. Total: Ana 120.0, Beto 121.0, Carla 122.0; best lap (acServer's own order): Beto 59.0, Ana 60.0, Carla 61.0
             t0 = client.session_t0
             for slot in (0, 1, 2):
                 await asyncio.sleep(max(0.0, t0 + slot * 10 + 2 - time.time()))   # each one runs after his own release
@@ -516,12 +528,18 @@ def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_
                 await asyncio.sleep(1)
             await asyncio.sleep(1)
             out["all_done"] = await hold()
+            end = time.time() + 90
+            while time.time() < end and not all(d.current.name == "Ajuste" for d in ds):
+                await asyncio.sleep(0.5)
+            for d in ds:
+                d.lap(95000)                                            # a real lap (slower than the 1 ms, 2 ms ... the manager writes): the practice has a result file, as a real one does
             end = time.time() + 150                                     # the qualifying ends by itself, then the adjusting practice: gridtimes writes the grid in its last seconds
             while time.time() < end and not all(d.session_type == fc.RACE for d in ds):
                 await asyncio.sleep(0.5)
             out["race"] = [d.session_type for d in ds]
             out["grid_list"] = ds[0].grid_list
             out["slots"] = [d.grid_slot for d in ds]
+            out["delivered"] = delivered(rig)
             return out
         finally:
             if client.transport:
@@ -539,4 +557,5 @@ def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_
     assert out["turn_2"] == {"stage": stage, "cars": [0, 1]}, out       # Ana and Beto finished; Carla is out
     assert out["all_done"] == {"stage": stage, "cars": [0, 1, 2]}, out  # everybody ran: all held in the pits
     assert out["race"] == [fc.RACE] * 3, out
-    assert out["grid_list"] == [1, 0, 2] and out["slots"] == [1, 0, 2], out   # Beto 118.0 s, Ana 120.0 s, Carla 122.0 s
+    assert out["grid_list"] == [0, 1, 2] and out["slots"] == [0, 1, 2], out   # by the TOTAL of the timed laps (Ana first), not by acServer's best-lap order (Beto first)
+    assert out["delivered"] == {str(GUIDS[0]): 1, str(GUIDS[1]): 2, str(GUIDS[2]): 3}, out   # the manager wrote 1 ms, 2 ms, 3 ms into the adjusting practice
