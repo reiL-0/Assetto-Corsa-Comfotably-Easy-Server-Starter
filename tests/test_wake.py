@@ -650,6 +650,8 @@ def test_a_running_server_with_a_sequence_says_the_sessions_of_the_sequence_not_
     assert got["sessiontypes"] == [3, 1, 3, 1] and got["durations"] == [2, 180, 2, 600], "the sequence's: laps for a race, then minutes as seconds"
     kept = wake.details(s, json.dumps(real).encode(), session_count=3)   # not installed: acServer plays its own three and what it says stands
     assert kept["sessiontypes"] == [1, 2, 3] and wake.details(s, json.dumps(real).encode())["sessiontypes"] == [1, 2, 3], "no count: nothing is guessed"
+    three = SimpleNamespace(**{**s.__dict__, "session": {"sequence": steps[:3]}})   # (the schema asks for 4 or more; old data with 3 is acServer's own three)
+    assert wake.details(three, json.dumps(real).encode(), session_count=3)["sessiontypes"] == [1, 2, 3]
     info = dict(real); wake.sequence_view(s, info, 4)
     assert info["sessiontypes"] == [3, 1, 3, 1] and info["durations"] == [2, 3, 2, 10], "the lobby's /INFO: minutes as CM converts them itself"
 
