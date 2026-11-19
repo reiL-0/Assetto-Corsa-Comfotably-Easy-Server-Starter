@@ -20,6 +20,8 @@ from app.models import Activity
 
 log = logging.getLogger("acm.singlerunlive")
 
+RUN_STAGE = 9   # the `stage` of this qualifying in `pit_hold`: the hub says «wait for your turn» for it (the knockout's 2 and 3 say «eliminated»)
+
 
 def _release(client, connected: dict[str, int], t0: float, interval: float, now: float) -> dict[str, float]:
     """The unix time each driver is let out, given ONCE and remembered (`client.run_release`, one per session): the first sight of the session gives the slot order (the first at `t0`, one every `interval`); whoever
@@ -45,7 +47,7 @@ def _laps(server_id: int, since: float, order: list[str], t_release: dict[str, f
 
 
 def hold_view(server_id: int, client, now: float | None = None) -> dict | None:
-    """`pit_hold` of race-state ({"stage": 0, "cars": [car ids]}) while a single-run qualifying is played, None otherwise. `client`: the live ACSP client (session, session_t0, cars). Reads the database: not on the event loop."""
+    """`pit_hold` of race-state ({"stage": RUN_STAGE, "cars": [car ids]}) while a single-run qualifying is played, None otherwise. `client`: the live ACSP client (session, session_t0, cars). Reads the database: not on the event loop."""
     from app import sessionpatch   # late: it reads the sequence of the server
     session = client.session
     if not session or not client.session_t0:
@@ -65,7 +67,7 @@ def hold_view(server_id: int, client, now: float | None = None) -> dict | None:
     warmup, laps = step.get("run_warmup", 1), step.get("run_laps", 2)
     finished = {g for g, r in runs.items() if r.done(warmup, laps)}
     held = {g for g in connected if release[g] > now or g in finished}
-    return {"stage": 0, "cars": sorted(cid for g, cid in connected.items() if g in held)}
+    return {"stage": RUN_STAGE, "cars": sorted(cid for g, cid in connected.items() if g in held)}
 
 
 def grid_now(server_id: int, since: float) -> list[str]:

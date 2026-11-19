@@ -41,13 +41,13 @@ def _lap(sid, g, ts, ms=60_000, cuts=0):
 def test_cars_are_released_one_every_interval_and_held_again_when_their_run_is_over():
     sid, t0 = _server(), 1000.0
     c = _client(t0)
-    assert singlerunlive.hold_view(sid, c, now=t0 + 1) == {"stage": 0, "cars": [11, 12, 13]}      # only the first is out
-    assert singlerunlive.hold_view(sid, c, now=t0 + 65) == {"stage": 0, "cars": []}               # all out
+    assert singlerunlive.hold_view(sid, c, now=t0 + 1) == {"stage": singlerunlive.RUN_STAGE, "cars": [11, 12, 13]}      # only the first is out
+    assert singlerunlive.hold_view(sid, c, now=t0 + 65) == {"stage": singlerunlive.RUN_STAGE, "cars": []}               # all out
     _lap(sid, G[0], t0 + 90)                                                                      # out lap
     _lap(sid, G[0], t0 + 150)
     assert 10 not in singlerunlive.hold_view(sid, c, now=t0 + 151)["cars"]                        # 1 of 2 timed laps: still running
     _lap(sid, G[0], t0 + 210)
-    assert singlerunlive.hold_view(sid, c, now=t0 + 211) == {"stage": 0, "cars": [10]}            # run over: back to be held
+    assert singlerunlive.hold_view(sid, c, now=t0 + 211) == {"stage": singlerunlive.RUN_STAGE, "cars": [10]}            # run over: back to be held
 
 
 def test_a_departure_moves_nobodys_turn_and_a_late_driver_goes_after_the_last_never_at_once():
@@ -55,11 +55,11 @@ def test_a_departure_moves_nobodys_turn_and_a_late_driver_goes_after_the_last_ne
     c = _client(t0)
     singlerunlive.hold_view(sid, c, now=t0 + 1)
     del c.cars[10]                                                                                # the first one leaves: the others keep their turns
-    assert singlerunlive.hold_view(sid, c, now=t0 + 25) == {"stage": 0, "cars": [12, 13]}         # 11 was due at +20
+    assert singlerunlive.hold_view(sid, c, now=t0 + 25) == {"stage": singlerunlive.RUN_STAGE, "cars": [12, 13]}         # 11 was due at +20
     c.cars[20] = {"driver_guid": "late1"}
     c.cars[21] = {"driver_guid": "late2"}
-    assert singlerunlive.hold_view(sid, c, now=t0 + 200) == {"stage": 0, "cars": [21]}            # late1 out now (turn passed: +80 -> now), late2 one interval after
-    assert singlerunlive.hold_view(sid, c, now=t0 + 221) == {"stage": 0, "cars": []}
+    assert singlerunlive.hold_view(sid, c, now=t0 + 200) == {"stage": singlerunlive.RUN_STAGE, "cars": [21]}            # late1 out now (turn passed: +80 -> now), late2 one interval after
+    assert singlerunlive.hold_view(sid, c, now=t0 + 221) == {"stage": singlerunlive.RUN_STAGE, "cars": []}
 
 
 def test_a_normal_session_holds_nobody():
