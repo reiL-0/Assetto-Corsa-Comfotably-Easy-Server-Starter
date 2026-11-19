@@ -293,6 +293,27 @@ def test_on_end_takes_the_index_of_the_session_playing_when_the_end_arrives(monk
     assert seen == [("results/x.json", 2)]
 
 
+def test_a_result_file_that_is_not_whole_yet_is_not_written_down(monkeypatch):
+    sid = _server()
+    knockoutlive.save(sid, knockoutlive.new_cycle(CARS[:2], 1.0))
+    folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = "2026_11_18_10_1_QUALIFY.json"
+    (folder / name).write_text('{"Type": "QUALIFY", "Result": [')   # acServer is still writing it
+
+    async def fast(*a, **k):
+        return None
+
+    async def go():
+        monkeypatch.setattr(knockoutlive.asyncio, "sleep", fast)
+        await knockoutlive._end(_client(sid, CARS[:2]), f"results/{name}", 1)
+    asyncio.run(go())
+    assert knockoutlive.load(sid)["stages"] == {}
+    f = _file(sid, 1, CARS[:2])                                     # now it is whole
+    asyncio.run(go())
+    assert knockoutlive.load(sid)["stages"] == {"1": f}
+
+
 def test_a_connection_while_a_file_is_still_being_awaited_is_not_made_late_by_the_wait(monkeypatch):
     sid = _server()
     knockoutlive.save(sid, knockoutlive.new_cycle(CARS[:2], 1.0))

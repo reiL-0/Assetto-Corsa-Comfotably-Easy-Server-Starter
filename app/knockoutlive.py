@@ -14,6 +14,7 @@ are turned into car ids NOW, so a driver who comes back in another slot stays he
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -253,6 +254,15 @@ def _stage_at(server_id: int, idx: int | None) -> int | None:
     return step.get("stage") if step and step.get("kind") == "qualify" else None
 
 
+def _complete(path: Path) -> bool:
+    """The result file is there AND is a whole JSON (acServer may be in the middle of writing it)."""
+    try:
+        json.loads(path.read_text(encoding="utf-8-sig"))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 async def _end(client, filename: str, idx: int | None) -> None:
     try:
         stage = await asyncio.to_thread(_stage_at, client.server_id, idx)
@@ -262,11 +272,11 @@ async def _end(client, filename: str, idx: int | None) -> None:
             return
         path = _folder(client.server_id) / Path(filename).name
         for _ in range(5):   # the file is written when the session ends: a moment may pass before it can be read (the lock is NOT held meanwhile: a connection in those seconds is processed as it comes)
-            if await asyncio.to_thread(path.is_file):
+            if await asyncio.to_thread(_complete, path):
                 break
             await asyncio.sleep(0.5)
         else:
-            log.warning("server %s: %s (stage %s) is not there to be read", client.server_id, filename, stage)
+            log.warning("server %s: %s (stage %s) is not there (whole) to be read", client.server_id, filename, stage)
             return
 
         def go() -> None:
