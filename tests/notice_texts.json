@@ -71,7 +71,9 @@
  "DRIVE-THROUGH: boxes cerrados bajo amarilla",
  "DRS CERRADO POR LLUVIA · VUELTA NO VÁLIDA",
  "Distancia ampliada: sigue la carrera",
+ "El pace car no avanza: vuelve a boxes automáticamente · la verde y el «to go» son del director",
  "El pace car no ha entrado a boxes: la bandera verde es manual",
+ "El pace car no responde: vuelve a boxes automáticamente · la verde y el «to go» son del director",
  "El reagrupado no se completó: la bandera verde es manual",
  "FIN DE LA CARRERA",
  "FIN DEL STAGE ",
@@ -124,6 +126,7 @@
  "limit",
  "pits",
  "seconds",
+ "stuck",
  "text",
  "vuelta",
  "vueltas"

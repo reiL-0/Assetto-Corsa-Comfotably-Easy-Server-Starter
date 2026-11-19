@@ -77,6 +77,10 @@ HOLD_TTL = 3600                   # a `hold` notice (the free pass, the restart 
 CUT_DT_LAPS = 3                 # laps to serve the drive-through of a cuts ladder step 0 (served = the hub reports the car in the pit lane afterwards)
 VIOLATION_LAPS = 3              # laps a car gets to serve the drive-through for passing under a caution
 INVOLVED_FOR = 15.0              # s a contact makes a car 'involved' in a caution that follows
+PACE_STUCK_KMH = 10.0           # the pace car leading a caution slower than this is not leading: stuck, spun, or a bot gone wrong
+PACE_STUCK_S = 20.0             # ... for this long (a hiccup, a brake for a car on the line, is not a fault) and it is sent to the pits by itself
+PACE_LEAVE_S = 60.0             # a pace car called out that has not moved yet (it is in the pits, leaving) gets this long before it counts as stuck
+PACE_SILENT_S = 15.0            # no fresh update of the pace car for this long (the bot died, the client froze, it left) and the same
 PACE_CAR_KMH = 120              # km/h the pace car leads at when nobody says otherwise
 AUTO_MAX_AGE_S = 3.0              # the automatic flags of a screen are not served from a look older than this
 PIT_RECENT = 30.0                # s after its last 'I am in the pit lane' report a car still counts as having been in the pits (caution procedures)
@@ -253,6 +257,8 @@ class RaceControl:
         self.pace_guid = ""                # the SteamID of the pace car's DRIVER: who it is, whatever slot he connects in (the director names a driver, not a car id; see app/racecontrol.py)
         self.pace_car: int | None = None   # the slot where that driver sits now (None while he is not on the server) (a real client with the hub script on autopilot, see static/csp/opr_hub.lua): never judged, never in the order
         self.pace_car_kmh = PACE_CAR_KMH
+        self._pace_bad = None              # (kind, car, since) of the pace car's fault in progress: "stuck" / "silent" (see pace_watch)
+        self._pace_moved = None            # the pace car (slot) that has been seen leading at speed since it came out; the stuck clock is shorter once it has
         self.pace_out = False              # the pace car came out under a yellow: it keeps leading if that yellow turns into a VSC/FCY (a VSC/FCY from green does not bring it out)
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.pace_park = False             # green with the pace car out, without "to go": return only, no restart procedure
@@ -482,6 +488,30 @@ class RaceControl:
             self.audit("pace_to_pits", car=self.pace_car, formation=self.formation, executed=True)
             self._bump()
             return True
+
+    @fieldrec.capture(_lock)
+    def pace_watch(self, samples: dict, speeds: dict[int, float], mono: float) -> str | None:
+        """The safety net of the pace car, whoever drives it (a real client or the bot): leading a caution and stuck (< PACE_STUCK_KMH for PACE_STUCK_S) or silent (no fresh update for PACE_SILENT_S) it is sent to the pits
+        by itself (`pace_to_pits`: no restart armed, the 'to go' stays the director's). -> "stuck" / "silent" the moment it does that, so the adapter can say it; else None. A green is never put automatically."""
+        with _lock:
+            if self.pace_car is None or not self.pace_out or self.pace_car_in or self.pace_park:
+                self._pace_bad = self._pace_moved = None
+                return None
+            v = speeds.get(self.pace_car)   # (the adapter only gives the fresh ones)
+            if v is not None and v >= PACE_STUCK_KMH:
+                self._pace_moved = self.pace_car
+            kind = "silent" if v is None else ("stuck" if v < PACE_STUCK_KMH else None)
+            if kind is None:
+                self._pace_bad = None
+                return None
+            if not self._pace_bad or self._pace_bad[:2] != (kind, self.pace_car):
+                self._pace_bad = (kind, self.pace_car, mono)
+                return None
+            if mono - self._pace_bad[2] < (PACE_SILENT_S if kind == "silent" else (PACE_STUCK_S if self._pace_moved == self.pace_car else PACE_LEAVE_S)):
+                return None
+            self._pace_bad = None
+            self.audit("pace_auto_park", car=self.pace_car, fault=kind, kmh=v, executed=True)
+            return kind if self.pace_to_pits() else None
 
     @fieldrec.capture(_lock)
     def formation_tick(self, samples: dict, speeds: dict[int, float]) -> list[tuple]:
