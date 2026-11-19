@@ -150,6 +150,7 @@ class SequenceStep(BaseModel):
     wait_s: int = Field(default=0, ge=0, le=600)      # the wait before the session starts (any kind: acServer counts it from the moment the session begins)
     over_s: int | None = Field(default=None, ge=0, le=3600)   # RACE ONLY: seconds the race stays open after the winner finishes, for the rest to get in; None = the server's own RACE_OVER_TIME
     result_s: int | None = Field(default=None, ge=0, le=600)  # seconds the results are shown when this session ends, before the next one is set up (every kind); None = the server's own RESULT_SCREEN_TIME
+    stage: int | None = Field(default=None, ge=1, le=3)       # QUALIFY ONLY: this step is stage 1, 2 or 3 of a knockout qualifying like Formula 1's (Q1, Q2, Q3: app/knockout.py): the slowest are cut and held in the pits for the next stage
 
     @model_validator(mode="after")
     def _has_a_length(self) -> SequenceStep:
@@ -159,6 +160,8 @@ class SequenceStep(BaseModel):
             raise ValueError("a race is by laps or by time, one of them")
         if self.kind != "race" and self.over_s is not None:
             raise ValueError("over_s: only a race waits for the others to finish after the winner")
+        if self.stage is not None and self.kind != "qualify":
+            raise ValueError("stage: only a qualifying can be a stage of a knockout")
         return self
 
 
@@ -228,6 +231,15 @@ class SessionIn(BaseModel):
             raise ValueError("sequence: it needs at least one race")
         if self.reversed_grid:
             raise ValueError("sequence: acServer's own reversed grid does not work with a sequence (use grid_from_race)")
+        stage_names = [st.name for st in self.sequence if st.stage is not None]
+        others = [st.name for st in self.sequence if st.stage is None]
+        if len(stage_names) != len(set(stage_names)) or set(stage_names) & set(others):
+            raise ValueError("sequence: the steps of the knockout stages need names no other step has (each result file says which stage it is by that name)")
+        stages = [st.stage for st in self.sequence if st.stage is not None]
+        if stages and stages != list(range(1, len(stages) + 1)):
+            raise ValueError("sequence: the knockout stages are 1, 2, 3 in that order, each once (the steps with a `stage`)")
+        if stages and not any(st.kind == "race" for st in self.sequence[[st.stage for st in self.sequence].index(stages[-1]):]):
+            raise ValueError("sequence: a race must come after the last knockout stage")
         return self
 
     @model_validator(mode="after")

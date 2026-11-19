@@ -490,6 +490,16 @@ class GridOrder(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class KnockoutCycle(SQLModel, table=True):
+    """The knockout qualifying (Q1, Q2, Q3) of a server that is being played (app/knockoutlive.py): who ran Q1, who came in later (in the order they came), and the result file of each stage as it ended.
+    One row per server, replaced when Q1 starts and deleted when the race begins. In the database, not in memory, so a manager restart in the middle of Q2 loses nothing, and a driver who leaves and comes back
+    is still who he was (everything is by Steam ID)."""
+    __tablename__ = "knockout_cycles"
+
+    server_id: int = Field(primary_key=True)
+    data: dict = Field(default_factory=dict, sa_type=JSON)   # {"id": started_at, "entrants": [guid], "late": [guid], "stages": {"1": result filename, ...}}
+
+
 class PitLimit(SQLModel, table=True):
     """The pit-lane speed limit of a track layout (migrated to the server rules by migration 17: app/db.py `_m017_pit_rule_per_server`): set by the director for the track, 0/absent = no rule. A car reported over `limit_kmh + tolerance_kmh` is sanctioned: `penalty_s` 0 = a drive-through,
     N = N seconds on the race result."""

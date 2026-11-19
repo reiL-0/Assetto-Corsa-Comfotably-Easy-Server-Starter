@@ -131,6 +131,8 @@ async def start_unlocked(server_id: int, sess: Session) -> dict:
         integrity.gate(sess, s)   # 409 in «require» mode when the content differs from its seal
     except HTTPException as e:   # ponytail: gate still raises the HTTP type (it is also a route helper of app/integrity.py); translated here, once
         raise ServerError(e.status_code, str(e.detail)) from e
+    from app import knockoutlive
+    knockoutlive.clear(server_id)   # a new start: a knockout cycle of the old one is over
     planned, planned_at = timeline.server_position(s), time.time()   # where the session clock is, read before acServer re-anchors it
     p = ports(s.base_port)
     try:
@@ -270,6 +272,9 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     old_est = timeline.race_est(s)
     est = old_est if body.race_est_min is None else body.race_est_min   # a client that does not know the field (a preset, an old event) must not wipe it
     new_sequence = [st.model_dump() for st in body.sequence] if body.sequence else None
+    if (s.session or {}).get("sequence") != new_sequence:   # (the same sequence applied again, with no restart, leaves a cycle that is being played alone)
+        from app import knockoutlive
+        knockoutlive.clear(server_id)   # another sequence: no knockout cycle carries over
     if body.restart or _clock_key(cfg) != _clock_key(s.config) or est != old_est or (s.session or {}).get("sequence") != new_sequence:
         s.anchor_index = s.anchor_at = None   # a different session set-up (or a real restart, or a race that lasts otherwise): the clock starts over with the next start
     s.config = cfg

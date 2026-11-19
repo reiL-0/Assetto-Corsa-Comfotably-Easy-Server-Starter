@@ -158,6 +158,9 @@ def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
     Both with the stewards' grid penalties applied; [] when none of that. Reads the database and a result file: call it off the event loop."""
     if order := get_order(server_id):
         return order
+    if source == "knockout":   # Q1, Q2, Q3 of a knockout qualifying: app/knockoutlive.py has the grid of the three stages
+        from app import knockoutlive
+        return knockoutlive.grid_now(server_id)
     with Session(engine) as s:
         srv = s.get(Server, server_id)
         session = (srv.session if srv else None) or {}
@@ -218,6 +221,11 @@ async def _guard(client, left: float, idx: int, count: int) -> None:
             return
         # an order from the session before only makes sense right after it IN THIS CYCLE: the opening session of a cycle that ends in a race is not «between two races» (its race is graded by its own times)
         source = {3: "race", 2: "qualify"}.get(await _type_at(client, idx - 1)) if idx > 0 and count else None
+        if source == "qualify":
+            from app import sessionpatch   # late
+            before, _ = await asyncio.to_thread(sessionpatch.step_and_original, client.server_id, idx - 1)
+            if (before or {}).get("stage") == 3:   # the practice that follows Q3: the grid is the knockout's
+                source = "knockout"
         end = time.monotonic() + LEAD_S + LATE_S
         while True:
             err = await _tick(client, idx, source)

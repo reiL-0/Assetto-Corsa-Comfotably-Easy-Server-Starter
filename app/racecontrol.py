@@ -493,6 +493,12 @@ def _say(rc, text: str, kind: str = "info", to: int = -1, hold: str | None = Non
     rc.notify(text, kind, to, hold=hold)
 
 
+def _pit_hold(server_id: int, inst) -> dict | None:
+    """`pit_hold` of the race state: the cars the knockout qualifying holds in the pits (the hub keeps their brakes on). Every route that returns the race state carries it, the same way."""
+    from app import knockoutlive
+    return knockoutlive.hold_view(server_id, inst.acsp.session, inst.acsp.cars) if inst and inst.acsp else None
+
+
 @state_router.get("/race-state")
 def race_state(server_id: int, sess: SessionDep) -> dict:
     _get(sess, server_id)
@@ -504,11 +510,12 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
             refresh_pit_limit(rc, server_id)
         give_back_rule_of(server_id)
     server = _get(sess, server_id)
+    hold = _pit_hold(server_id, inst)
     if rc:
-        return {**rc.snapshot(), "nascar_armed": armed_view(inst, server)}
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, server), "pit_hold": hold}
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
-    return {"nascar_armed": armed_view(inst, server), "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
+    return {"nascar_armed": armed_view(inst, server), "pit_hold": hold, "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
                                      "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
@@ -924,7 +931,7 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
         _remember_nascar(sess, server_id, inst, remembered)
         if (inst.acsp.session or {}).get("session_type") == RACE_TYPE:   # a race began while this was being saved: its engine was armed from the OLD memory, so arm it now
             return configure_nascar(server_id, body, sess)
-        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}   # (the wait after the finish, next_delay_min, is a live engine's: it is set when the race has started)
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None), "pit_hold": _pit_hold(server_id, inst)}   # (the wait after the finish, next_delay_min, is a live engine's: it is set when the race has started)
     try:
         actions = rc.configure_nascar(body.total, body.stages, shares, body.next_delay_min)
     except ValueError as e:
@@ -936,9 +943,9 @@ def configure_nascar(server_id: int, body: NascarIn, sess: SessionDep) -> dict:
     elif not rc.nascar.fixed_ends:
         remembered = {"total": rc.nascar.total, "shares": list(rc.nascar.shares)}
     else:
-        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
+        return {**rc.snapshot(), "nascar_armed": armed_view(inst, None), "pit_hold": _pit_hold(server_id, inst)}
     _remember_nascar(sess, server_id, inst, remembered)
-    return {**rc.snapshot(), "nascar_armed": armed_view(inst, None)}
+    return {**rc.snapshot(), "nascar_armed": armed_view(inst, None), "pit_hold": _pit_hold(server_id, inst)}
 
 
 def disarm_when_stopped(server_id: int, was) -> None:
