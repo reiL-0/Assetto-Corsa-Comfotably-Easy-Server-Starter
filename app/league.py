@@ -420,6 +420,53 @@ def _qualy_grid(sess: Session, c: Championship, server_id: int, filename: str, p
         sess.add(x)
 
 
+def sync_grid_carry(sess: Session, c: Championship, server_id: int | None = None) -> int:
+    """A grid Penalty a steward put on a league RACE carries to the next race of the league: it becomes a grid Penalty (auto_key `carry:<id of the original>`) on the qualifying that comes before that next race,
+    so the grid of the race is the qualifying's with the places lost (app/gridtimes.py and app/knockoutlive.py read the penalties of the qualifying files). Idempotent: call it as often as you like, the caller commits.
+    Which race: the LAST counted race of the league (and the qualifying results counted after it): a race that has another race after it already gave its grid penalties to that one in its own cycle (grid_from_race),
+    and a race whose next one has been counted is over for this: the carried penalty stays on the qualifying it went to, nothing moves any more. The places count from where the driver ended up in that grid
+    (the grid itself stops the count at the back). A driver who does not run that qualifying keeps nothing: it lapses (unlike a league suspension, which waits). A steward who withdraws the carried penalty
+    leaves its row dismissed, so it is not made again; one who deletes the original takes the carried one away (app/penalties.py, also after the next race). Returns how many were made."""
+    with league_lock:
+        if c.archived_at:
+            return 0
+        ces = list(sess.exec(select(ChampionshipEvent).where(ChampionshipEvent.championship_id == c.id, ChampionshipEvent.scores == True,   # noqa: E712
+                                                              ChampionshipEvent.session_type.in_(("Race", "Qualify"))).order_by(ChampionshipEvent.created_at, ChampionshipEvent.id)))
+        races = [i for i, x in enumerate(ces) if x.session_type == "Race"]
+        if not races:
+            return 0
+        race, quals = ces[races[-1]], [x for x in ces[races[-1] + 1:] if x.session_type == "Qualify"]
+        src = list(sess.exec(select(Penalty).where(Penalty.server_id == race.server_id, Penalty.filename == race.filename, Penalty.kind == "grid", Penalty.dismissed == False)))   # noqa: E712
+        keys = {f"carry:{p.id}" for p in src}
+        for x in quals:   # the original is gone (or withdrawn): so is what it carried
+            for q in sess.exec(select(Penalty).where(Penalty.server_id == x.server_id, Penalty.filename == x.filename, Penalty.auto_key.like("carry:%"))):
+                if q.auto_key not in keys:
+                    sess.delete(q)
+        if not quals or not src:
+            return 0
+        nonrun = set(sess.exec(select(LeagueMember.guid).where(LeagueMember.championship_id == c.id, LeagueMember.non_racing)).all())
+        made, ran = 0, {}
+        for p in src:
+            key = f"carry:{p.id}"
+            if p.driver_guid in nonrun or sess.exec(select(Penalty.id).where(Penalty.auto_key == key)).first() is not None:
+                continue   # a car that does not race has no place to lose; or already carried (a dismissed row counts: a steward took it back)
+            for x in quals:   # the first qualifying of the next race the driver ran (a knockout is three files: its grid takes the penalties of all of them, so one is enough)
+                if (x.server_id, x.filename) not in ran:
+                    try:
+                        ran[(x.server_id, x.filename)] = {e["driver_guid"] for e in parse_result_file(Path(settings.data_dir) / "instances" / str(x.server_id) / "results" / x.filename)["classification"]}
+                    except (OSError, ValueError, KeyError):
+                        log.warning("league %s: the qualifying %s cannot be read: its carried grid penalties wait for the next count", c.id, x.filename)
+                        ran[(x.server_id, x.filename)] = None   # not «nobody ran»: unknown, this file is skipped now and the next count tries again
+                if p.driver_guid in (ran[(x.server_id, x.filename)] or ()):
+                    sess.add(Penalty(server_id=x.server_id, filename=x.filename, driver_guid=p.driver_guid, kind="grid", value=p.value, created_by=p.created_by, auto_key=key,
+                                     reason=f"Sanción de la carrera anterior: pierde {p.value} lugares en la parrilla" + (f" ({p.reason})" if p.reason else "")))
+                    discord.announce(f"⛔ **{c.name}**: un piloto sancionado en la carrera anterior pierde {p.value} lugares en la parrilla de la siguiente")
+                    made += 1
+                    break
+        sess.flush()
+        return made
+
+
 def _race_served(sess: Session, c: Championship, finished_at: float) -> None:
     """A league race was counted: one less race for every suspension measured in races (the ones put before it ended)."""
     for x in active_suspensions(sess, c.id, ("races", "qualy"), finished_at):
@@ -477,6 +524,7 @@ def _count_results(sess: Session, sc: Schedule, ev: Event, c: Championship, unti
             last_end = f.stat().st_mtime
         else:
             _qualy_grid(sess, c, sc.server_id, f.name, parsed)
+    sync_grid_carry(sess, c)   # at every count, not only when a qualifying is new: a file that could not be read, or a penalty put since, is brought up to date
     sess.commit()
     for server_id, kind, fields in sess.info.pop("race_audit_proposals", []):
         record(server_id, kind, **fields, executed=True, persistence="committed")
