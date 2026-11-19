@@ -74,8 +74,10 @@ def test_grid_ranks_by_total_time_voids_cuts_and_puts_who_never_ran_last():
     folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
     folder.mkdir(parents=True, exist_ok=True)
     laps = lambda g, times, cuts=None: [{"DriverGuid": g, "LapTime": t, "Cuts": (cuts or [0] * 3)[i]} for i, t in enumerate(times)]
-    doc = {"Type": "QUALIFY", "TrackName": "oval", "TrackConfig": "", "Name": "Indy",
+    doc = {"Type": "QUALIFY", "TrackName": "oval", "TrackConfig": "",
            "Result": [{"DriverName": g[-1], "DriverGuid": g, "CarModel": "c", "BestLap": 59_000, "TotalTime": 1} for g in G],
            "Laps": laps(G[0], [70_000, 60_000, 60_000]) + laps(G[1], [70_000, 59_000, 59_000]) + laps(G[2], [70_000, 50_000, 50_000], [0, 1, 0])}   # G[2]: fastest but a cut; G[3] no laps
     (folder / "2026_11_18_10_0_QUALIFY.json").write_text(json.dumps(doc))
-    assert singlerunlive.grid_now(sid, 0) == [G[1], G[0], G[2], G[3]]
+    assert singlerunlive.grid_now(sid, 0) == [G[1], G[0], G[2], G[3]]                # the only single-run step of the sequence
+    assert singlerunlive.grid_now(sid, 0, 0) == [G[1], G[0], G[2], G[3]]             # the step given by its index (the file says nothing of its session)
+    assert singlerunlive.grid_now(sid, 0, 1) == []                                    # an index that is a practice, not a single-run step

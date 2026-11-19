@@ -151,7 +151,7 @@ def last_result_file(server_id: int, since: float, kind: str = "RACE") -> Path |
     return max(files, key=lambda p: (results.result_start(p.name) or datetime.min.astimezone(), p.name), default=None)
 
 
-def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
+def order_now(server_id: int, since: float, source: str = "race", step_idx: int | None = None) -> list[str]:
     """The order to deliver now: the director's own (GridOrder) if there is one, else the result of the session before it:
     source "race": the race, by the server's `grid_from_race` (0 as finished, N = first N inverted, -1 = all inverted);
     source "qualify": the qualifying as the site classifies it (clean laps), when the server's `grid_from_qualify` is set (a practice after the qualifying to arrange the grid).
@@ -160,7 +160,7 @@ def order_now(server_id: int, since: float, source: str = "race") -> list[str]:
         return order
     if source == "singlerun":   # a qualifying by single runs: app/singlerunlive.py ranks the runs
         from app import singlerunlive
-        return singlerunlive.grid_now(server_id, since)
+        return singlerunlive.grid_now(server_id, since, step_idx)
     if source == "knockout":   # Q1, Q2, Q3 of a knockout qualifying: app/knockoutlive.py has the grid of the three stages
         from app import knockoutlive
         return knockoutlive.grid_now(server_id)
@@ -236,7 +236,8 @@ def preview(server_id: int, client) -> dict:
         if source:
             wait = int((getattr(client, "session", None) or {}).get("wait_time") or 0)
             since = client.session_t0 - 120 - wait
-            order = order_now(server_id, since, source)
+            cur = (getattr(client, "session", None) or {}).get("current_session_index", (getattr(client, "session", None) or {}).get("session_index"))
+            order = order_now(server_id, since, source, int(cur) - 1 if cur is not None else None) if source == "singlerun" else order_now(server_id, since, source)
             if source in ("qualify", "race") and order:   # why each place: where he finished, and what the stewards took
                 kind = "RACE" if source == "race" else "QUALIFY"
                 path = last_result_file(server_id, since, kind)
@@ -357,7 +358,8 @@ async def _tick(client, idx: int, source: str | None = None) -> str | None:
     from app import supervisor   # late, like acsp.py does: supervisor owns the client
     if source:
         wait = int((getattr(client, "session", None) or {}).get("wait_time") or 0)   # the file of the session before is written when this one is SET UP, a start that the wait puts that much after it
-        order = await asyncio.to_thread(order_now, client.server_id, client.session_t0 - 120 - wait, source)
+        extra = (idx - 1,) if source == "singlerun" else ()   # (acServer's file does not say which session it is: the single run's step is the one right before this)
+        order = await asyncio.to_thread(order_now, client.server_id, client.session_t0 - 120 - wait, source, *extra)
     else:
         order = await asyncio.to_thread(get_order, client.server_id)
     inst = supervisor.get(client.server_id)

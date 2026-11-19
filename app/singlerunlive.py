@@ -70,8 +70,8 @@ def hold_view(server_id: int, client, now: float | None = None) -> dict | None:
     return {"stage": RUN_STAGE, "cars": sorted(cid for g, cid in connected.items() if g in held)}
 
 
-def grid_now(server_id: int, since: float) -> list[str]:
-    """The grid of the single-run qualifying that ended at or after `since`, with the stewards' penalties; [] when there is no result file. The release order is the order of the first lap in the file."""
+def grid_now(server_id: int, since: float, step_idx: int | None = None) -> list[str]:
+    """The grid of the single-run qualifying that ended at or after `since`, with the stewards' penalties; [] when there is no result file. The release order is the order of the first lap in the file. `step_idx`: the index of the qualifying in the sequence (acServer's file does not say which session it is); without it the only single-run step of the sequence."""
     from app import gridtimes
     from app.models import Server
     path = gridtimes.last_result_file(server_id, since, "QUALIFY")
@@ -81,7 +81,10 @@ def grid_now(server_id: int, since: float) -> list[str]:
         srv = s.get(Server, server_id)
         steps = ((srv.session if srv else None) or {}).get("sequence") or []
         parsed = results.parse_result_file(path)
-        step = next((st for st in steps if st.get("run_interval_s") and st["name"] == _name(path)), None)
+        runs_steps = [st for st in steps if st.get("run_interval_s")]
+        step = (steps[step_idx] if step_idx is not None and 0 <= step_idx < len(steps) else (runs_steps[0] if len(runs_steps) == 1 else None))
+        if step is not None and not step.get("run_interval_s"):
+            step = None
         if step is None:
             return []
         laps: dict[str, list[int]] = {}
@@ -97,11 +100,3 @@ def grid_now(server_id: int, since: float) -> list[str]:
         pens = results.penalties_for(s, server_id, path.name)
         non_racing = results.non_racing_for(s, server_id, path.name)
     return results.apply_penalties({"type": "Qualify", "laps": [], "classification": rows}, pens, non_racing)["grid"]
-
-
-def _name(path: Path) -> str | None:
-    import json
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig")).get("Name")
-    except (OSError, ValueError):
-        return None

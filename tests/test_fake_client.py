@@ -296,3 +296,247 @@ def test_a_tcp_frame_that_arrives_in_pieces_is_not_torn_by_a_timeout():
     assert d._read_tcp() == b"\x4a123\x07"
     assert d._read_tcp() == b"\x4d"
     a.close(); b.close()
+
+
+# --- the F1 style qualifying (Q1, Q2, Q3) played by the real manager and three fake drivers --------------------------------------------------------------------------
+
+F1_LIVE = [
+    {"kind": "practice", "name": "Practice", "time_min": 1, "laps": 0, "wait_s": 0},
+    {"kind": "qualify", "name": "Q1", "time_min": 1, "laps": 0, "wait_s": 0, "stage": 1, "cut": 1},
+    {"kind": "qualify", "name": "Q2", "time_min": 1, "laps": 0, "wait_s": 0, "stage": 2, "cut": 1},
+    {"kind": "qualify", "name": "Q3", "time_min": 1, "laps": 0, "wait_s": 0, "stage": 3},
+    {"kind": "practice", "name": "Ajuste", "time_min": 1, "laps": 0, "wait_s": 0},
+    {"kind": "race", "name": "Race", "time_min": 0, "laps": 2, "wait_s": 0},
+]
+
+
+def test_f1_qualifying_the_manager_holds_the_cut_cars_and_the_race_grid_is_the_knockouts(tmp_path, monkeypatch):
+    """Q1 cuts the slowest (Ana), Q2 the slower of the two left (Beto), Q3 is Carla's: the manager must say who is held in each stage (pit_hold, what the hub obeys)
+    and the grid of the race must be Carla, Beto, Ana even though the slots go 0, 1, 2. About 3 minutes of real time (the adjusting practice is timed and the stages must end in different minutes, like the real ones)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app import knockoutlive, supervisor
+    from app.config import settings
+    from app.db import engine
+    from app.live import acsp as acsp_mod
+    from app.main import app
+    from app.models import Server
+
+    sid = TestClient(app, headers=ADMIN).post("/api/v1/servers", json={"name": "F1 live"}).json()["id"]
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.session = {"sequence": F1_LIVE}
+        db.add(srv)
+        db.commit()
+    rig = Rig(tmp_path, plugin=False)
+    results_dir = Path(settings.data_dir) / "instances" / str(sid) / "results"       # the folder the manager reads is the one acServer writes
+    results_dir.parent.mkdir(parents=True, exist_ok=True)
+    if results_dir.exists() or results_dir.is_symlink():
+        shutil.rmtree(results_dir, ignore_errors=True) if not results_dir.is_symlink() else results_dir.unlink()
+    results_dir.symlink_to(rig.dir / "results")
+    monkeypatch.setattr(supervisor, "get", lambda s: SimpleNamespace(pid=rig.srv.pid, started_at=None))
+    sender = {}
+
+    async def run():
+        # like the manager at start: the patch goes in before anybody joins, then every step is defined
+        loop = asyncio.get_running_loop()
+
+        def patch():
+            threading.Timer(1.0, lambda: rig.send(acsp.encode_restart_session())).start()
+            assert sessionpatch.grow(rig.srv.pid, sessionpatch.layout_for(F1_LIVE, [1, 2, 3]), 20).startswith("grown to 6 sessions")
+        plug = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)       # a plain socket for the patch commands: the manager's client owns 19602 afterwards
+        rig.plugin = plug
+        plug.bind(("127.0.0.1", 19602))
+        await loop.run_in_executor(None, patch)
+        for i, st in enumerate(F1_LIVE):
+            rig.send(acsp.encode_set_session_info(i, st["name"], sessionpatch.TYPES[st["kind"]], st["laps"], st["time_min"], st["wait_s"]))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(2)
+        plug.close()
+        client = await acsp_mod.connect(sid, remote_port=19601, local_port=19602, car_slots=3)
+        out = {}
+        try:
+            ds = await asyncio.to_thread(rig.join)
+            await asyncio.sleep(2)
+
+            last_end = {"minute": None}
+
+            async def advance(name, ends_a_stage=False):
+                if ends_a_stage:   # acServer names a result file by the MINUTE (2026_11_19_12_21_QUALIFY.json): two stages ending in one minute would be one file (real stages last 13+ minutes)
+                    while last_end["minute"] == time.strftime("%H%M"):
+                        await asyncio.sleep(1)
+                    last_end["minute"] = time.strftime("%H%M")
+                before = [d.new_sessions for d in ds]
+                for _ in range(3):
+                    client.send(acsp.encode_next_session())
+                    end = time.time() + 3
+                    while time.time() < end and any(d.new_sessions == b for d, b in zip(ds, before)):
+                        await asyncio.sleep(0.1)
+                    if all(d.new_sessions > b for d, b in zip(ds, before)):
+                        break
+                assert ds[0].current.name == name, (ds[0].current, name)
+                await asyncio.sleep(1.5)                              # the manager reads the new session and saves the cycle
+
+            def hold():
+                return knockoutlive.hold_view(sid, client.session, client.cars)
+
+            await advance("Q1")
+            assert hold() is None                                       # nobody is held in Q1
+            for slot, ms in {0: 90000, 1: 88000, 2: 89000}.items():
+                ds[slot].lap(ms)
+            await asyncio.sleep(1)
+            await advance("Q2", True)                                   # Q1's file is written now (and the event reaches the manager)
+            await asyncio.sleep(2)
+            out["q2"] = await asyncio.to_thread(hold)
+            for slot, ms in {1: 87000, 2: 86000}.items():              # Ana is held and does not run
+                ds[slot].lap(ms)
+            await asyncio.sleep(1)
+            await advance("Q3", True)
+            await asyncio.sleep(2)
+            out["q3"] = await asyncio.to_thread(hold)
+            ds[2].lap(85000)
+            await asyncio.sleep(1)
+            await advance("Ajuste", True)
+            await asyncio.sleep(2)
+            out["grid_now"] = await asyncio.to_thread(knockoutlive.grid_now, sid)
+            end = time.time() + 90                                      # the adjusting practice ends by itself: gridtimes writes the knockout's grid in its last seconds
+            while time.time() < end and not all(d.session_type == fc.RACE for d in ds):
+                await asyncio.sleep(0.5)
+            out["race"] = [d.session_type for d in ds]
+            out["grid_list"] = ds[0].grid_list
+            out["slots"] = [d.grid_slot for d in ds]
+            return out
+        finally:
+            if client.transport:
+                client.transport.close()
+            for t in (client.grid_task, getattr(client, "_hello", None), getattr(client, "_sweep", None)):
+                if t:
+                    t.cancel()
+    try:
+        out = asyncio.run(run())
+    finally:
+        rig.close()
+        knockoutlive.clear(sid)
+    guid = lambda i: str(GUIDS[i])
+    assert out["q2"] == {"stage": 2, "cars": [0]}, out                    # Ana, the slowest of Q1, is held in Q2
+    assert out["q3"] == {"stage": 3, "cars": [0, 1]}, out                 # Ana (Q1) and Beto (Q2) are held in Q3
+    assert out["grid_now"] == [guid(2), guid(1), guid(0)], out            # Carla, Beto, Ana
+    assert out["race"] == [fc.RACE] * 3, out
+    assert out["grid_list"] == [2, 1, 0] and out["slots"] == [2, 1, 0], out
+
+
+# --- the IndyCar style qualifying (single runs) played by the real manager and three fake drivers --------------------------------------------------------------------
+
+INDY_LIVE = [
+    {"kind": "practice", "name": "Practice", "time_min": 1, "laps": 0, "wait_s": 0},
+    {"kind": "qualify", "name": "Indy", "time_min": 1, "laps": 0, "wait_s": 0, "run_interval_s": 10, "run_warmup": 1, "run_laps": 2},
+    {"kind": "practice", "name": "Ajuste", "time_min": 1, "laps": 0, "wait_s": 0},
+    {"kind": "race", "name": "Race", "time_min": 0, "laps": 2, "wait_s": 0},
+]
+
+
+def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_grid_is_by_total_time(tmp_path, monkeypatch):
+    """Single runs every 10 s: the cars that have not left (and the ones that already ran) are in pit_hold, the ranking is the total of the 2 timed laps (the first lap of a run is the warm-up) and the race grid is that.
+    About 2 minutes of real time (the qualifying and the adjusting practice are timed)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from conftest import ADMIN
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app import singlerunlive, supervisor
+    from app.config import settings
+    from app.db import engine
+    from app.live import acsp as acsp_mod
+    from app.main import app
+    from app.models import Server
+
+    sid = TestClient(app, headers=ADMIN).post("/api/v1/servers", json={"name": "Indy live"}).json()["id"]
+    with Session(engine) as db:
+        srv = db.get(Server, sid)
+        srv.session = {"sequence": INDY_LIVE}
+        db.add(srv)
+        db.commit()
+    rig = Rig(tmp_path, plugin=False)
+    results_dir = Path(settings.data_dir) / "instances" / str(sid) / "results"
+    results_dir.parent.mkdir(parents=True, exist_ok=True)
+    if results_dir.is_symlink():
+        results_dir.unlink()
+    elif results_dir.exists():
+        shutil.rmtree(results_dir, ignore_errors=True)
+    results_dir.symlink_to(rig.dir / "results")
+    monkeypatch.setattr(supervisor, "get", lambda s: SimpleNamespace(pid=rig.srv.pid, started_at=None))
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        plug = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rig.plugin = plug
+        plug.bind(("127.0.0.1", 19602))
+
+        def patch():
+            threading.Timer(1.0, lambda: rig.send(acsp.encode_restart_session())).start()
+            assert sessionpatch.grow(rig.srv.pid, sessionpatch.layout_for(INDY_LIVE, [1, 2, 3]), 20).startswith("grown to 4 sessions")
+        await loop.run_in_executor(None, patch)
+        for i, st in enumerate(INDY_LIVE):
+            rig.send(acsp.encode_set_session_info(i, st["name"], sessionpatch.TYPES[st["kind"]], st["laps"], st["time_min"], st["wait_s"]))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(2)
+        plug.close()
+        client = await acsp_mod.connect(sid, remote_port=19601, local_port=19602, car_slots=3)
+        out = {}
+        try:
+            ds = await asyncio.to_thread(rig.join)
+            await asyncio.sleep(2)
+            before = [d.new_sessions for d in ds]
+            for _ in range(3):
+                client.send(acsp.encode_next_session())
+                end = time.time() + 3
+                while time.time() < end and any(d.new_sessions == b for d, b in zip(ds, before)):
+                    await asyncio.sleep(0.1)
+                if all(d.new_sessions > b for d, b in zip(ds, before)):
+                    break
+            assert ds[0].current.name == "Indy"
+            await asyncio.sleep(1.5)
+            hold = lambda: asyncio.to_thread(singlerunlive.hold_view, sid, client)
+            out["t0"] = await hold()                                    # Ana is out, Beto and Carla wait for their turn
+            runs = {0: [70000, 60000, 60000], 1: [70000, 59000, 59000], 2: [70000, 61000, 61000]}   # warm-up + the 2 timed laps; Beto is the fastest
+            t0 = client.session_t0
+            for slot in (0, 1, 2):
+                await asyncio.sleep(max(0.0, t0 + slot * 10 + 2 - time.time()))   # each one runs after his own release
+                if slot:
+                    out[f"turn_{slot}"] = await hold()                  # the turn of this one has come: he is out, the ones that ran are held, the ones after him wait
+                for ms in runs[slot]:
+                    ds[slot].lap(ms)
+                await asyncio.sleep(1)
+            await asyncio.sleep(1)
+            out["all_done"] = await hold()
+            end = time.time() + 150                                     # the qualifying ends by itself, then the adjusting practice: gridtimes writes the grid in its last seconds
+            while time.time() < end and not all(d.session_type == fc.RACE for d in ds):
+                await asyncio.sleep(0.5)
+            out["race"] = [d.session_type for d in ds]
+            out["grid_list"] = ds[0].grid_list
+            out["slots"] = [d.grid_slot for d in ds]
+            return out
+        finally:
+            if client.transport:
+                client.transport.close()
+            for t in (client.grid_task, getattr(client, "_hello", None), getattr(client, "_sweep", None)):
+                if t:
+                    t.cancel()
+    try:
+        out = asyncio.run(run())
+    finally:
+        rig.close()
+    stage = singlerunlive.RUN_STAGE
+    assert out["t0"] == {"stage": stage, "cars": [1, 2]}, out
+    assert out["turn_1"] == {"stage": stage, "cars": [0, 2]}, out       # Ana finished and is held; Beto's turn has come; Carla's has not
+    assert out["turn_2"] == {"stage": stage, "cars": [0, 1]}, out       # Ana and Beto finished; Carla is out
+    assert out["all_done"] == {"stage": stage, "cars": [0, 1, 2]}, out  # everybody ran: all held in the pits
+    assert out["race"] == [fc.RACE] * 3, out
+    assert out["grid_list"] == [1, 0, 2] and out["slots"] == [1, 0, 2], out   # Beto 118.0 s, Ana 120.0 s, Carla 122.0 s

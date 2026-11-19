@@ -14,7 +14,6 @@ are turned into car ids NOW, so a driver who comes back in another slot stays he
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from pathlib import Path
@@ -190,7 +189,9 @@ def on_connection(client, guid: str, name: str = "") -> None:
 
 
 def on_end(client, filename: str) -> None:
-    _spawn(client, _end(client, filename))
+    session = getattr(client, "session", None) or {}
+    idx = session.get("current_session_index", session.get("session_index"))   # taken NOW: acServer says end_session BEFORE the new_session of the next one (seen on the real acServer), so this is the session that ended
+    _spawn(client, _end(client, filename, idx))
 
 
 def _spawn(client, coro) -> None:
@@ -239,30 +240,33 @@ async def _connection(client, guid: str, name: str = "") -> None:
             log.exception("server %s: the knockout could not follow a connection", client.server_id)
 
 
-def _stage_of(server_id: int, filename: str) -> int | None:
-    """Which stage a result file is, from the session name written in it (the one the sequence gave the step). None while the file is not readable."""
-    try:
-        doc = json.loads((_folder(server_id) / Path(filename).name).read_text(encoding="utf-8-sig"))
-        name = doc.get("Name") if str(doc.get("Type", "")).upper() == "QUALIFY" else None   # (a practice that happens to carry a stage's name is not that stage)
-    except (OSError, ValueError, AttributeError):
+def _stage_at(server_id: int, idx: int | None) -> int | None:
+    """The knockout stage (1..3) the sequence plays at session index `idx`, None for any other session. acServer's result files carry no session name (their keys are TrackName, TrackConfig, Type, DurationSecs, RaceLaps, Cars, Result, Laps, Events:
+    checked on the real server), so the stage is known from WHICH session ended, not from the file."""
+    if idx is None:
         return None
     with Session(engine) as s:
         from app.models import Server
         srv = s.get(Server, server_id)
         seq = ((srv.session if srv else None) or {}).get("sequence") or []
-    return next((st["stage"] for st in seq if st.get("stage") and st["name"] == name), None)
+    step = seq[int(idx)] if 0 <= int(idx) < len(seq) else None
+    return step.get("stage") if step and step.get("kind") == "qualify" else None
 
 
-async def _end(client, filename: str) -> None:
+async def _end(client, filename: str, idx: int | None) -> None:
     try:
-        stage = None
+        stage = await asyncio.to_thread(_stage_at, client.server_id, idx)
+        if not stage:
+            if idx is None:
+                log.warning("server %s: %s ended and the manager does not know which session it was", client.server_id, filename)
+            return
+        path = _folder(client.server_id) / Path(filename).name
         for _ in range(5):   # the file is written when the session ends: a moment may pass before it can be read (the lock is NOT held meanwhile: a connection in those seconds is processed as it comes)
-            stage = await asyncio.to_thread(_stage_of, client.server_id, filename)
-            if stage:
+            if await asyncio.to_thread(path.is_file):
                 break
             await asyncio.sleep(0.5)
-        if not stage:
-            log.warning("server %s: %s is not (or not yet) the result of a knockout stage", client.server_id, filename)
+        else:
+            log.warning("server %s: %s (stage %s) is not there to be read", client.server_id, filename, stage)
             return
 
         def go() -> None:

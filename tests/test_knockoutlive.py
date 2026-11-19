@@ -43,7 +43,7 @@ def _file(sid, stage, order, extra_laps=()):
     folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
     folder.mkdir(parents=True, exist_ok=True)
     name = f"2026_11_18_10_{stage}_QUALIFY.json"
-    (folder / name).write_text(json.dumps({"Type": "QUALIFY", "TrackName": "spa", "TrackConfig": "", "Name": f"Q{stage}", "Result": [
+    (folder / name).write_text(json.dumps({"Type": "QUALIFY", "TrackName": "spa", "TrackConfig": "", "Result": [
         {"DriverName": g[-1], "DriverGuid": g, "CarModel": "c", "BestLap": 100_000 + 100 * i, "TotalTime": 1} for i, g in enumerate(order)],
         "Laps": [{"DriverGuid": g, "LapTime": 100_000 + 100 * i, "Cuts": 0} for i, g in enumerate(order)] + list(extra_laps)}))
     return name
@@ -139,8 +139,7 @@ def test_q1_begins_a_cycle_with_who_is_there_a_late_one_is_noted_and_the_race_en
         await knockoutlive._connection(client, CARS[3])               # joins during Q1: an entrant
         await knockoutlive._connection(client, CARS[0])               # a reconnection: nothing
         f = _file(sid, 1, CARS[:4])
-        client.session = {"current_session_index": 2}                 # (the next session has already been announced: the file's own name still says Q1)
-        await knockoutlive._end(client, f"results/{f}")
+        await knockoutlive._end(client, f"results/{f}", 1)            # the session that ended is Q1 (index 1 of the sequence)
         assert knockoutlive.load(sid)["stages"] == {"1": f} and knockoutlive.load(sid)["entrants"] == CARS[:4]
         await knockoutlive._connection(client, "late-1")              # after Q1: late
         await knockoutlive._connection(client, "late-2")
@@ -212,9 +211,8 @@ def test_a_result_file_that_cannot_be_read_yet_is_never_guessed_to_be_the_stage_
 
     async def go():
         client = _client(sid, CARS)
-        client.session = {"current_session_index": 2}                     # Q2 has been announced already
         monkeypatch.setattr(knockoutlive.asyncio, "sleep", fast)
-        await knockoutlive._end(client, "results/2026_11_18_10_1_QUALIFY.json")   # Q1's file: not there (yet)
+        await knockoutlive._end(client, "results/2026_11_18_10_1_QUALIFY.json", 1)   # Q1's file: not there (yet)
         assert knockoutlive.load(sid)["stages"] == {}                      # nothing written, least of all as Q2
 
     asyncio.run(go())
@@ -268,13 +266,31 @@ def test_a_name_two_drivers_share_matches_nobody_and_one_driver_with_two_rows_ke
     assert CARS[0] not in two and CARS[1] not in two
 
 
-def test_a_practice_that_carries_the_name_of_a_stage_is_not_that_stage():
+def test_the_stage_is_the_one_of_the_session_that_ended_not_anything_written_in_the_file():
+    """acServer's result files have no session name (TrackName, TrackConfig, Type, DurationSecs, RaceLaps, Cars, Result, Laps, Events: seen on the real server): the stage comes from the index."""
     sid = _server()
-    folder = Path(settings.data_dir) / "instances" / str(sid) / "results"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "pr.json").write_text(json.dumps({"Type": "PRACTICE", "TrackName": "spa", "TrackConfig": "", "Name": "Q1", "Result": [], "Laps": []}))
-    assert knockoutlive._stage_of(sid, "pr.json") is None
-    assert knockoutlive._stage_of(sid, _file(sid, 2, CARS)) == 2
+    assert [knockoutlive._stage_at(sid, i) for i in range(6)] == [None, 1, 2, 3, None, None]   # practice, Q1, Q2, Q3, adjusting practice, race
+    assert knockoutlive._stage_at(sid, 9) is None and knockoutlive._stage_at(sid, None) is None
+
+
+def test_on_end_takes_the_index_of_the_session_playing_when_the_end_arrives(monkeypatch):
+    sid = _server()
+    seen = []
+
+    async def fake_end(client, filename, idx):
+        seen.append((filename, idx))
+
+    monkeypatch.setattr(knockoutlive, "_end", fake_end)
+
+    async def go():
+        client = _client(sid, CARS[:2])
+        client.session = {"session_index": 2, "current_session_index": 2}       # Q2 is being played when its end arrives (before the new_session of Q3)
+        knockoutlive.on_end(client, "results/x.json")
+        client.session = {"session_index": 3, "current_session_index": 3}       # Q3 begins: a late reader must not see it
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    assert seen == [("results/x.json", 2)]
 
 
 def test_a_connection_while_a_file_is_still_being_awaited_is_not_made_late_by_the_wait(monkeypatch):
@@ -293,7 +309,7 @@ def test_a_connection_while_a_file_is_still_being_awaited_is_not_made_late_by_th
             _file(sid, 1, CARS[:2])                              # now the file appears
 
         monkeypatch.setattr(knockoutlive.asyncio, "sleep", slow)
-        await knockoutlive._end(client, "results/2026_11_18_10_1_QUALIFY.json")
+        await knockoutlive._end(client, "results/2026_11_18_10_1_QUALIFY.json", 1)
         assert order == ["waiting"]
 
     asyncio.run(go())
