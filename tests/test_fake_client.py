@@ -21,7 +21,6 @@ from app import gridtimes, sessionpatch
 from app.live import acsp
 
 SIM = Path(os.environ.get("ACM_TEST_ACSERVER_SIM", Path.home() / "Documents/acserver-re/sim"))
-pytestmark = pytest.mark.skipif(not (SIM / "acServer").exists(), reason="needs the local acServer simulator (ACM_TEST_ACSERVER_SIM)")
 
 _spec = importlib.util.spec_from_file_location("fake_client", Path(__file__).resolve().parent.parent / "ops" / "fake_client.py")
 fc = importlib.util.module_from_spec(_spec)
@@ -36,30 +35,42 @@ class Rig:
     """A copy of the simulator (guids in the entry list: the server only lets in the ones it knows) + a plugin socket to command it."""
 
     def __init__(self, tmp: Path, plugin: bool = True):
-        self.dir = tmp / "sim"
-        shutil.copytree(SIM, self.dir, ignore=shutil.ignore_patterns("logs", "results", "*.log"))
-        (self.dir / "logs").mkdir(exist_ok=True)
-        (self.dir / "results").mkdir(exist_ok=True)
-        entry = (self.dir / "cfg" / "entry_list.ini")
-        it = iter(GUIDS)
-        entry.write_text(re.sub(r"GUID=.*\n", lambda m: f"GUID={next(it)}\n", entry.read_text()))
-        cfg = self.dir / "cfg" / "server_cfg.ini"      # short sessions and waits: a timed session ends by itself in a minute
-        cfg.write_text(re.sub(r"(?m)^(TIME=)\d+", r"\g<1>1", re.sub(r"(?m)^WAIT_TIME=\d+", "WAIT_TIME=5", re.sub(r"(?m)^RESULT_SCREEN_TIME=\d+", "RESULT_SCREEN_TIME=3", cfg.read_text()))))
-        self.log = open(tmp / "srv.log", "w")
-        self.srv = subprocess.Popen(["./acServer"], cwd=self.dir, stdout=self.log, stderr=subprocess.STDOUT)   # our child: /proc/pid/mem and ptrace work
-        self.plugin = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        if plugin:   # the manager's own ACSPClient takes that port when it is in the test
-            self.plugin.bind(("127.0.0.1", 19602))
+        if not (SIM / "acServer").exists():
+            pytest.skip("needs the local acServer simulator (ACM_TEST_ACSERVER_SIM)")
+        with socket.socket() as probe:                 # never talk to a server that is not ours (the ports are the simulator's fixed ones)
+            if probe.connect_ex(("127.0.0.1", 19600)) == 0:
+                pytest.fail("port 19600 is already taken by another server: stop it first")
         self.drivers: list = []
+        self.srv = None
+        self.plugin = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.log = open(tmp / "srv.log", "w")
         self._stop = threading.Event()
-        end = time.time() + 15
-        while time.time() < end:
-            try:
-                socket.create_connection(("127.0.0.1", 19600), 0.5).close()
-                break
-            except OSError:
-                time.sleep(0.2)
-        time.sleep(1)
+        try:
+            if plugin:   # the manager's own ACSPClient takes that port when it is in the test
+                self.plugin.bind(("127.0.0.1", 19602))
+            self.dir = tmp / "sim"
+            shutil.copytree(SIM, self.dir, ignore=shutil.ignore_patterns("logs", "results", "*.log"))
+            (self.dir / "logs").mkdir(exist_ok=True)
+            (self.dir / "results").mkdir(exist_ok=True)
+            entry = (self.dir / "cfg" / "entry_list.ini")
+            it = iter(GUIDS)
+            entry.write_text(re.sub(r"GUID=.*\n", lambda m: f"GUID={next(it)}\n", entry.read_text()))
+            cfg = self.dir / "cfg" / "server_cfg.ini"      # short sessions and waits: a timed session ends by itself in a minute
+            cfg.write_text(re.sub(r"(?m)^(TIME=)\d+", r"\g<1>1", re.sub(r"(?m)^WAIT_TIME=\d+", "WAIT_TIME=5", re.sub(r"(?m)^RESULT_SCREEN_TIME=\d+", "RESULT_SCREEN_TIME=3", cfg.read_text()))))
+            self.srv = subprocess.Popen(["./acServer"], cwd=self.dir, stdout=self.log, stderr=subprocess.STDOUT)   # our child: /proc/pid/mem and ptrace work
+            end = time.time() + 15
+            while True:
+                assert self.srv.poll() is None, "the simulator's acServer died at start (see srv.log)"
+                try:
+                    socket.create_connection(("127.0.0.1", 19600), 0.5).close()
+                    break
+                except OSError:
+                    assert time.time() < end, "the simulator's acServer never opened its port"
+                    time.sleep(0.2)
+            time.sleep(1)
+        except BaseException:
+            self.close()
+            raise
 
     def send(self, data: bytes):
         self.plugin.sendto(data, ("127.0.0.1", 19601))
@@ -104,9 +115,10 @@ class Rig:
         self._stop.set()
         for d in self.drivers:
             d.disconnect()
-        self.srv.terminate()
-        self.srv.wait(5)
-        time.sleep(1)      # let the ports go before the next test starts its own server
+        if self.srv:
+            self.srv.terminate()
+            self.srv.wait(5)
+            time.sleep(1)      # let the ports go before the next test starts its own server
         self.plugin.close()
         self.log.close()
 
@@ -240,3 +252,47 @@ def test_the_manager_writes_the_saved_grid_by_itself_in_the_last_seconds_of_the_
         assert [d.grid_slot for d in ds] == [1, 2, 0]
     finally:
         rig.close()
+        gridtimes.clear_order(SID)
+
+
+# --- the wire format and the framing of the fake driver itself: no simulator needed -------------------------------------------------------------------------------------
+
+def _s8(t):
+    b = t.encode()
+    return bytes([len(b)]) + b
+
+
+def test_handshake_and_new_session_are_read_the_way_the_wire_format_says():
+    import struct
+    d = fc.FakeDriver("x", 1, guid=1, name="n")
+    hs = (fc._s32("Srv") + struct.pack("<HB", 9600, 18) + _s8("spa") + _s8("") + _s8("car") + _s8("skin") + struct.pack("<f", 0.5)
+          + struct.pack("<hBBBBBB", 2, 1, 1, 1, 1, 0, 0) + struct.pack("<fff", 1, 1, 1) + bytes([1, 255])
+          + struct.pack("<ii", 5000, 3000) + bytes([0, 0]) + struct.pack("<hhh", 0, 0, 0)
+          + bytes([4, 3]) + struct.pack("<BHH", 1, 0, 10) + struct.pack("<BHH", 2, 0, 5) + struct.pack("<BHH", 3, 8, 0)
+          + _s8("Practice") + struct.pack("<BBHH", 0, 1, 10, 0) + struct.pack("<f", 1.0) + bytes([4]) + struct.pack("<q", 1234) + bytes([2]) + _s8("a/b") + _s8("c"))
+    d._parse_handshake(fc._Reader(hs))
+    assert (d.session_id, d.udp_port, d.track, d.car_model) == (4, 9600, "spa", "car")
+    assert [(s.type, s.laps, s.time) for s in d.sessions] == [(1, 0, 10), (2, 0, 5), (3, 8, 0)]
+    assert (d.current.name, d.current.type, d.race_over_ms, d.session_time_ms, d.checksum_paths) == ("Practice", 1, 5000, 1234, ["a/b", "c"])
+    ns = bytes([fc.CURRENT_SESSION]) + _s8("Race") + struct.pack("<BBHH", 2, 3, 0, 8) + struct.pack("<f", 1.0) + bytes([2, 4, 1]) + struct.pack("<q", 99)
+    d._on_tcp(ns)
+    assert (d.current.type, d.spawn, d.grid_list, d.new_sessions) == (3, "START", [2, 4, 1], 1)
+    assert d.grid_slot == 1                                     # my slot (4, from the handshake) is the second of the list
+    d._on_tcp(bytes([fc.CURRENT_SESSION]) + _s8("Q") + struct.pack("<BBHH", 1, 2, 5, 0) + struct.pack("<f", 1.0) + bytes([4, 2, 1]) + struct.pack("<q", 100))
+    assert (d.spawn, d.session_index) == ("PIT", 1)             # a qualifying: the pits; the index is found by TYPE in the handshake list
+
+
+def test_a_tcp_frame_that_arrives_in_pieces_is_not_torn_by_a_timeout():
+    import struct
+    a, b = socket.socketpair()
+    d = fc.FakeDriver("x", 1, guid=1, name="n")
+    d.tcp = a
+    a.settimeout(0.1)
+    frame = struct.pack("<H", 5) + b"\x4a123\x07"
+    b.sendall(frame[:3])                                        # the header and one byte of the body
+    with pytest.raises(socket.timeout):
+        d._read_tcp()
+    b.sendall(frame[3:] + struct.pack("<H", 1) + b"\x4d")      # the rest, and the next frame right behind
+    assert d._read_tcp() == b"\x4a123\x07"
+    assert d._read_tcp() == b"\x4d"
+    a.close(); b.close()

@@ -97,6 +97,7 @@ class FakeDriver:
         self._speed = 0.0                     # m/s
         self._norm = 0.0
         self._t0 = time.monotonic()
+        self._rx = b""
 
     # -- what the real client decides from what it received --------------------------------------------------------
     @property
@@ -123,6 +124,16 @@ class FakeDriver:
 
     # -- connection -----------------------------------------------------------------------------------------------
     def connect(self, timeout: float = 10.0) -> "FakeDriver":
+        try:
+            return self._connect(timeout)
+        except BaseException:
+            self._stop.set()
+            for sock in (self.tcp, self.udp):
+                if sock:
+                    sock.close()
+            raise
+
+    def _connect(self, timeout: float) -> "FakeDriver":
         self.tcp = socket.create_connection((self.host, self.port), timeout=timeout)
         body = (bytes([REQUEST_NEW_CONNECTION]) + struct.pack("<H", PROTOCOL) + _s8(str(self.guid)) + _s32(self.name)
                 + _s8("") + _s8("") + _s8(self.car) + _s8(self.password))
@@ -175,18 +186,18 @@ class FakeDriver:
         with self._lock:
             self.tcp.sendall(struct.pack("<H", len(body)) + body)
 
-    def _recv_exact(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.tcp.recv(n - len(buf))
+    def _read_tcp(self) -> bytes:
+        """One TCP frame. Bytes read before a timeout stay in `_rx`, so a frame that arrives in pieces is never torn."""
+        while True:
+            if len(self._rx) >= 2:
+                (n,) = struct.unpack("<H", self._rx[:2])
+                if len(self._rx) >= 2 + n:
+                    pak, self._rx = self._rx[2:2 + n], self._rx[2 + n:]
+                    return pak
+            chunk = self.tcp.recv(65536)
             if not chunk:
                 raise ConnectionError("closed")
-            buf += chunk
-        return buf
-
-    def _read_tcp(self) -> bytes:
-        (n,) = struct.unpack("<H", self._recv_exact(2))
-        return self._recv_exact(n)
+            self._rx += chunk
 
     def _tcp_loop(self):
         while not self._stop.is_set():
@@ -273,22 +284,11 @@ class FakeDriver:
                 + b"".join(struct.pack("<I", s) for s in splits) + bytes([cuts, self._lap_no & 0xFF]))
         self._send_tcp(body)
 
-    def wait_event(self, kind: str, timeout: float = 10.0, since: float | None = None):
-        """The first event of that kind after `since` (default: now), or None."""
-        since = time.monotonic() if since is None else since
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            for t, k, data in list(self.events):
-                if k == kind and t >= since:
-                    return data
-            time.sleep(0.05)
-        return None
-
     def disconnect(self):
         self._stop.set()
         try:
             self._send_tcp(bytes([CLEAN_EXIT]))
-        except Exception:
+        except OSError:   # already closed by the other side
             pass
         for s in (self.tcp, self.udp):
             try:
