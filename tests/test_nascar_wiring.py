@@ -1001,9 +1001,11 @@ def test_a_rolling_start_runs_one_formation_lap_then_the_one_to_go_and_the_green
     lap(9, 1)
     assert rc.pace_car_in and rc.pace_car_state()['mode'] == 'in', 'the first crossing brings the one to go: it pits at the end of the formation lap'
     lap(3, 1)
+    assert rc.flag == 'yellow' and rc.blocked_crossings == 0, 'the field crossing right behind the pace car closes the same lap: it is not a blocked green'
+    lap(3, 1)
     assert rc.flag == 'yellow', 'the pace car is not in the pits yet'
     lap(3, 1)
-    assert rc.flag == 'yellow' and rc.blocked_crossings == 3, 'two blocked crossings: the director was told (once)'
+    assert rc.flag == 'yellow' and rc.blocked_crossings == 3, 'two blocked crossings of the green lap: the director was told (once)'
     rc.report_pit(9, True)
     lap(9, 1)
     assert rc.flag == 'yellow', 'the pace car crossing is not the green when there are competitors'
@@ -1817,3 +1819,14 @@ def test_applying_a_session_names_the_pace_car_again_only_when_its_id_changes_or
     assert pace_changed(b, None, a, 95) is True and pace_changed(None, None, a, 95) is True, "another driver (or none) is a change"
     assert pace_changed(a, 100, None, None) is True, "a speed where there was none"
 
+
+
+def test_formation_pace_sent_in_by_the_director_mid_lap_keeps_the_first_crossing_counting():
+    rc = live_rc.RaceControl({'session_type': 3})
+    rc.pace_car = 9
+    rc.formation = True
+    assert rc.pace_to_pits() and rc.form_crossed is None
+    assert not rc.formation_green(3, False) and rc.blocked_crossings == 1, 'no lap to skip: the first crossing is already the green lap'
+    rc.report_pit(9, True)
+    rc.pace_car_pitted = True
+    assert rc.formation_green(3, False) and rc.flag == 'green'

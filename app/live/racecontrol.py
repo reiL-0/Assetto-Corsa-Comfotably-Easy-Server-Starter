@@ -267,6 +267,7 @@ class RaceControl:
         self.go_early = 0                  # crossings of the restart leader that came before go_armed (a second one brings the green anyway: if the progress never showed it mid-lap, the green must not wait for ever)
         self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
+        self.form_crossed: set[int] | None = None   # the cars that crossed the line since a crossing ended the formation lap: the field bunched behind the pace car crosses in the seconds after it, and that crossing closes the SAME lap (the green is the next one). None = the director sent the pace car in mid-lap: no lap to skip
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
         self._f1: dict | None = None       # the F1 rolling start: {phase: lap | regroup | count, t, still: {car: since}, warned, go_at}; None in a NASCAR one
         self.pace_live: int | None = None  # the adaptive pace the pace car is told now (None = the configured one)
@@ -451,6 +452,7 @@ class RaceControl:
                 self._hold_id, self._hold_step, self._hold_armed, self._hold_go = self._hold_id + 1, step, self.clock.monotonic(), None
                 self.audit("start_hold_armed", id=self._hold_id, step_s=step, executed=True)
             self.caution_laps, self.pace_car_in, self.pace_car_pitted, self.one_more = -1, False, False, False
+            self.form_crossed = None
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
             return True
 
@@ -468,6 +470,7 @@ class RaceControl:
             if self.caution_laps < FORMATION_LAPS:
                 return False
             self.pace_car_in, self.pace_car_pitted = True, False
+            self.form_crossed = {car}
             self._bump()
             return True
 
@@ -599,6 +602,9 @@ class RaceControl:
                 return False
             if not alone and self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return False
+            if not alone and self.form_crossed is not None and car not in self.form_crossed:
+                self.form_crossed.add(car)
+                return False   # (its crossing of the lap the formation ended in: not a blocked green, the green is a lap later)
             if not self.pace_car_pitted:
                 if not alone:
                     self.blocked_crossings += 1   # (a competitor crossed and the pace car is not in the pits: after two the director is told)
