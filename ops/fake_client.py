@@ -13,6 +13,7 @@ open implementation of the same protocol. Stdlib only. The rules the real client
 """
 from __future__ import annotations
 
+import math
 import socket
 import struct
 import threading
@@ -25,7 +26,8 @@ RACE, PRACTICE, QUALIFY, BOOK = 3, 1, 2, 0   # session Type values of the wire p
 REQUEST_NEW_CONNECTION, NEW_CAR_CONNECTION, CAR_LIST_REQUEST, CAR_LIST = 0x3D, 0x3E, 0x3F, 0x40
 CLEAN_EXIT, CHECKSUM, POSITION_UPDATE, LAP_COMPLETED = 0x43, 0x44, 0x46, 0x49
 CURRENT_SESSION, RACE_OVER, CAR_DISCONNECTED, CAR_CONNECT = 0x4A, 0x4B, 0x4D, 0x4E
-SESSION_REQUEST, WELCOME, PING_PONG = 0x4F, 0x51, 0xF8
+SESSION_REQUEST, TYRE_COMPOUND, WELCOME = 0x4F, 0x50, 0x51
+PING, PONG = 0xF9, 0xF8   # the server's ping [F9][u32 its time][u16 last ping] and the game's answer [F8][the same u32][u32 ms of the game clock] (UDPSocket::receive of acs.exe)
 REFUSALS = {0x3B: "blacklisted", 0x3C: "wrong password", 0x42: "unsupported protocol", 0x45: "no slots available",
             0x6E: "session closed", 0x6F: "auth failed"}
 
@@ -78,7 +80,8 @@ class Refused(Exception):
 
 class FakeDriver:
     def __init__(self, host: str, port: int, *, guid: int, name: str, car: str = "bmw_m3_e30", password: str = "",
-                 checksums=None):
+                 checksums=None, tyre: str = ""):
+        self.tyre = tyre                      # short name of the tyre compound (tyres.ini SHORT_NAME): without it the others see the car with no wheels
         self.host, self.port, self.guid, self.name, self.car, self.password = host, port, guid, name, car, password
         self.checksums = checksums            # callable(paths) -> bytes to send as the checksum packet, or None = don't send
         self.session_id = -1                  # my slot (SessionID)
@@ -158,6 +161,8 @@ class FakeDriver:
         if self.checksums is not None:
             self._send_tcp(bytes([CHECKSUM]) + self.checksums(self.checksum_paths))
         self._send_tcp(bytes([CAR_LIST_REQUEST, 0]))
+        if self.tyre:   # what ACClient::onTyreCompoundChanged sends: the others build the wheels from it
+            self._send_tcp(bytes([TYRE_COMPOUND]) + _s8(self.tyre))
         return self
 
     def _parse_handshake(self, r: _Reader):
@@ -243,9 +248,9 @@ class FakeDriver:
                 continue
             except OSError:
                 return
-            if pak and pak[0] == PING_PONG and len(pak) >= 9:     # answer the pings like the game does
+            if pak and pak[0] == PING and len(pak) >= 5:     # answer the pings like the game does (unanswered, the server's ping of this car is stale and the others extrapolate it far ahead)
                 try:
-                    self.udp.send(pak[:1] + pak[1:5] + struct.pack("<I", int((time.monotonic() - self._t0) * 1000)) + pak[1:5])
+                    self.udp.send(bytes([PONG]) + pak[1:5] + struct.pack("<I", int((time.monotonic() - self._t0) * 1000)))
                 except OSError:
                     return
 
@@ -259,15 +264,29 @@ class FakeDriver:
         if norm is not None:
             self._norm = norm
 
+    def _wheel_bytes(self):
+        """The 4 wheel-speed bytes: the game reads byte b as sign(b-100) * (10 ** (|b-100| * 0.05) - 1) rad/s (onMessage 0x46 of acs.exe), so 100 = still: a 0 there is a wheel spinning backwards at 100 000 rad/s (the car shows with no tyres)."""
+        v = round(math.log10(abs(self._speed) / 0.33 + 1) / 0.05)   # (0.33 m: a wheel radius; only what the others draw)
+        return (int(min(max(100 + math.copysign(v, self._speed), 0), 255)),) * 4   # (below 100 = spinning backwards)
+
+    def _pedals(self):
+        """(status bits, gas byte) like the game's own packet (sendCarPosition of acs.exe): 0x10 = brake pressed, and the gas byte is gas * 255. The others draw the wings (DRS, active aero) from gas, brake and speed: a car with all of it at 0 is not the same as a real one at rest (brake) or cruising (some gas)."""
+        v, last = abs(self._speed), getattr(self, "_last_speed", 0.0)
+        self._last_speed = v
+        if v < 1.0 or v < last - 0.05:   # still, or slowing down
+            return 0x10, 0
+        return 0, 200 if v > last + 0.05 else 70   # accelerating / cruising
+
     def update(self):
         """One car update (what the game sends 18 times a second)."""
         self._seq = (self._seq + 1) & 0xFF
         x, y, z = self._pos
+        st, gas = self._pedals()
         vx, vy, vz = self._vel if getattr(self, "_vel", None) else (0.0, 0.0, self._speed)
         pak = struct.pack("<BI3f3f3f4BBBHB I h B f", self._seq, int((time.monotonic() - self._t0) * 1000),
-                          x, y, z, getattr(self, "_yaw", 0.0), 0.0, 0.0, vx, vy, vz,
-                          0, 0, 0, 0, 127, 127, 3000 if self._speed else 800, 2 if self._speed else 0,
-                          0, 0, 0, self._norm)
+                          x, y, z, -getattr(self, "_yaw", 0.0), 0.0, 0.0, vx, vy, vz,   # (the game turns the car about Y by -rotation.x: createFromEuler)
+                          *self._wheel_bytes(), 127, 127, 3000 if self._speed else 800, 2 if self._speed else 0,
+                          st, 0, gas, self._norm)
         self.udp.send(bytes([POSITION_UPDATE]) + pak)
 
     def drive(self, seconds: float, hz: int = 18):

@@ -256,3 +256,19 @@ def test_the_bot_reads_both_lines_from_one_folder(tmp_path):
         pass
     else:
         raise AssertionError("a track without lines does not start")
+
+
+def test_the_box_is_beside_the_pit_lane_line_on_the_left(tmp_path):
+    """Measured on a real client (Imola): the box is 5.1 m to the LEFT of the pit line, and the line is the street. Parked it sits at the offset; far from the box it is on the line."""
+    bot = make(tmp_path)
+    on_line = bot.pose()
+    bot.box_offset = 5.0
+    x, y, z, yaw, _, _ = bot.pose()
+    dx, dz = x - on_line[0], z - on_line[2]
+    assert abs(math.hypot(dx, dz) - 5.0) < 1e-6
+    assert abs(dx * math.sin(yaw) + dz * math.cos(yaw)) < 1e-6, "sideways, not along the line"
+    assert dx * math.cos(yaw) - dz * math.sin(yaw) < 0, "the left of the direction of travel (x right, z ahead): (-cos yaw, +sin yaw)"
+    bot.s = bot.box + pb.BOX_SLIDE + 1
+    far = bot.pose()
+    bot.box_offset = 0.0
+    assert far[:3] == bot.pose()[:3], "away from the box it is on the line"
