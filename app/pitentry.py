@@ -157,6 +157,26 @@ def write_all(track: Path) -> int:
     return n
 
 
+def report(track: Path) -> list[dict]:
+    """BEFORE the cut: what each layout of an unpacked track brought, to tell the uploader (a silent skip is the worst answer): {layout ("-" = the track itself), ai: "ok" | "missing" | "invalid: why",
+    pit_entry: the fraction or None, models_ini: the layout's models*.ini is in the upload}. Only folders that hold `data/` count as layouts."""
+    out = []
+    for layout in [track, *(d for d in sorted(track.iterdir()) if d.is_dir())]:
+        if not (layout / "data").is_dir():
+            continue
+        ai = "ok"
+        try:
+            for f in LINES:
+                read_ai(layout / "ai" / f)
+        except FileNotFoundError:
+            ai = "missing"
+        except (OSError, ValueError, struct.error) as e:
+            ai = f"invalid: {e}"
+        ini = track / ("models.ini" if layout == track else f"models_{layout.name}.ini")
+        out.append({"layout": "-" if layout == track else layout.name, "ai": ai, "pit_entry": entry_of(layout) if ai == "ok" else None, "models_ini": ini.is_file()})
+    return out
+
+
 def read(track: str, config: str = "") -> float | None:
     """The entry saved for a track of the server (`config` = its layout, "" when it has none), as a fraction of the lap rounded to 4 decimals (the hub reads plain decimals); None when it is not known or the file is not ours."""
     try:

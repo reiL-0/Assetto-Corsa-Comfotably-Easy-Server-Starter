@@ -77,7 +77,7 @@ def test_a_car_sent_as_a_track_and_a_track_sent_as_a_car_are_installed_where_the
     assert r.status_code == 201 and r.json()["track"] == "mix_track" and "installed as a track" in r.json()["note"], r.text
     assert (content._tracks_dir() / "mix_track" / "models.ini").is_file() and not (content._cars_dir() / "mix_track").exists()
     ok = client.post("/api/v1/content/tracks", files={"file": ("ok.zip", _track_zip("right_track"), "application/zip")})
-    assert ok.json() == {"track": "right_track"}                                                          # correct uploads answer as before
+    assert ok.json()["track"] == "right_track" and "note" not in ok.json()                              # correct uploads answer as before (plus the per-layout report)
 
 
 def test_an_uploaded_track_keeps_its_pit_entry_though_its_ai_folder_is_cut(tmp_path):
