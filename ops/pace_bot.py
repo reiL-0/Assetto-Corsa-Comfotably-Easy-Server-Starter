@@ -13,7 +13,7 @@
     python3 ops/pace_bot.py --host 127.0.0.1 --port 9600 --guid 7656119... --name "Pace Car" --server 2 --base https://staging.example --lines /opt/acm-staging/data/pace_lines
 
 ponytail: the box is the middle of the pit lane (not the car's own box); entering/leaving the pit spline is a jump of a few metres; no collision avoidance, other clients see a car they
-cannot push. `YAW`: the heading is atan2(dx, dz) of the line: check on a real client that the car looks forward (flip the sign/offset here if not).
+cannot push. `YAW`: the heading is atan2(dx, dz) of the line (and the speed vector goes the same way); fake_client sends -yaw as the rotation because the game turns the car by -rotation.x (acs.exe createFromEuler). Not yet seen on a real client.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from pathlib import Path
 
 PC_UP, PC_DOWN, PIT_KMH = 5.0, 8.0, 80.0   # the hub's: km/h per second it may speed up / slow down, and the speed it comes into the pits at
 HZ = 18
+BOX_SLIDE = 25.0   # metres before and after the box over which the car moves from the lane line to the box
 
 _spec = importlib.util.spec_from_file_location("fake_client", Path(__file__).resolve().parent / "fake_client.py")
 fc = importlib.util.module_from_spec(_spec)
@@ -94,7 +95,8 @@ def find_ai(content: str, track: str, config: str = "", lines: str = "") -> Path
 class PaceBot:
     """The movement only: `step(dt, mode, kmh)` moves the car along its line; the I/O (server, website) is around it."""
 
-    def __init__(self, fast: Spline, pit: Spline):
+    def __init__(self, fast: Spline, pit: Spline, box_offset: float = 0.0):
+        self.box_offset = box_offset   # metres from the pit lane line to the box, + = to the LEFT of the direction of travel (measured on a real client: Imola rj_imola_2024 = 5.1)
         self.fast, self.pit = fast, pit   # (without a pit lane it could never say it is in the pits, which the green waits for: no pit_lane.ai = not started)
         self.entry = fast.nearest(pit.pts[0])   # where the pit lane leaves the fast line, and where it comes back
         self.exit = fast.nearest(pit.pts[-1])
@@ -149,6 +151,9 @@ class PaceBot:
     def pose(self):
         line = self.pit if self.path == "pit" else self.fast
         x, y, z, yaw = line.at(self.s)
+        if self.path == "pit" and self.box_offset:   # the lane line is the street: it slides sideways into the box over the last BOX_SLIDE m (ponytail: one offset per track, the box of this car is the middle of the pit line)
+            k = self.box_offset * max(0.0, 1 - abs(self.s - self.box) / BOX_SLIDE)
+            x, z = x - k * math.cos(yaw), z + k * math.sin(yaw)
         v = self.top / 3.6
         return x, y, z, yaw, (v * math.sin(yaw), 0.0, v * math.cos(yaw)), (self.s / line.total if line.closed else 0.0)
 
@@ -223,13 +228,13 @@ def drive(d, bot: PaceBot, link: Link):
         time.sleep(max(0.0, 1 / HZ - (time.monotonic() - now)))
 
 
-def load_lines(content: str, track: str, config: str, lines: str, tries: int = 4) -> "PaceBot":
+def load_lines(content: str, track: str, config: str, lines: str, tries: int = 4, box_offset: float = 0.0) -> "PaceBot":
     """Both lines of the track from ONE folder: the manager swaps the whole folder when a track is uploaded again, so if it changed while the two files were read (another inode, or gone) they are read again."""
     for i in range(tries):
         ai = find_ai(content, track, config, lines)
         try:
             before = os.stat(ai).st_ino
-            bot = PaceBot(Spline.load(ai / "fast_lane.ai", True), Spline.load(ai / "pit_lane.ai", False))
+            bot = PaceBot(Spline.load(ai / "fast_lane.ai", True), Spline.load(ai / "pit_lane.ai", False), box_offset)
             if os.stat(ai).st_ino == before:
                 return bot
         except FileNotFoundError:
@@ -254,10 +259,10 @@ def serve(args):
             time.sleep(10)
             continue
         try:
-            d = fc.FakeDriver(args.host, args.port, guid=args.guid, name=args.name, car=args.car, password=args.password).connect()
+            d = fc.FakeDriver(args.host, args.port, guid=args.guid, name=args.name, car=args.car, password=args.password, tyre=args.tyre).connect()
             link = None
             try:
-                bot = load_lines(args.content, d.track, d.track_config, args.lines)
+                bot = load_lines(args.content, d.track, d.track_config, args.lines, box_offset=args.box_offset)
                 link = Link(args.base, args.server, bot, d)
                 threading.Thread(target=link.run, daemon=True).start()
                 print(f"pace bot in slot {d.session_id} on {d.track}/{d.track_config}", flush=True)
@@ -280,6 +285,8 @@ if __name__ == "__main__":
     ap.add_argument("--guid", type=int, required=True, help="the pace car's SteamID (the manager's pace_steam_id; must be in the entry list)")
     ap.add_argument("--name", default="Pace Car")
     ap.add_argument("--car", default="bmw_m3_e30")
+    ap.add_argument("--tyre", default="", help="SHORT_NAME of a tyre compound of the car (data/tyres.ini): without it the other drivers see the car with no wheels")
+    ap.add_argument("--box-offset", type=float, default=0.0, help="metres from the pit lane line to the pit boxes, + = left of the direction of travel (0 = parks on the lane line)")
     ap.add_argument("--password", default="")
     ap.add_argument("--server", type=int, required=True, help="the server id on the website")
     ap.add_argument("--base", required=True, help="the website, e.g. https://www.oppenpaddockracing.site")

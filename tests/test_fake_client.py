@@ -570,3 +570,48 @@ def test_indy_qualifying_cars_leave_one_by_one_are_held_after_their_run_and_the_
     assert out["race"] == [fc.RACE] * 3, out
     assert out["grid_list"] == [0, 1, 2] and out["slots"] == [0, 1, 2], out   # by the TOTAL of the timed laps (Ana first), not by acServer's best-lap order (Beto first)
     assert out["delivered"] == {str(GUIDS[0]): 1, str(GUIDS[1]): 2, str(GUIDS[2]): 3}, out   # the manager wrote 1 ms, 2 ms, 3 ms into the adjusting practice
+
+
+def test_what_the_other_clients_need_from_a_car_that_is_not_a_game(monkeypatch):
+    """Seen on a real client (2026-11-20): the pace bot had no wheels, sat facing the wrong way and flew off the map once it moved. The game (acs.exe) wants: a pong to every
+    server ping [F9] (else the server's ping of the car goes stale), the tyre compound as TCP 0x50, and the heading as rotation.x = -atan2(dx, dz)."""
+    import math
+    import struct
+
+    class Sock:
+        def __init__(self, incoming=()):
+            self.sent, self.incoming = [], list(incoming)
+
+        def send(self, b):
+            self.sent.append(b)
+
+        def sendall(self, b):
+            self.sent.append(b)
+
+        def recv(self, n):
+            if self.incoming:
+                return self.incoming.pop(0)
+            raise OSError("closed")
+
+    d = fc.FakeDriver("x", 1, guid=1, name="n", tyre="S")
+    d.udp = Sock([b"\xf9" + struct.pack("<IH", 123456, 20)])
+    d._udp_loop()
+    pong = d.udp.sent[0]
+    assert pong[0] == 0xF8 and pong[1:5] == struct.pack("<I", 123456) and len(pong) == 9, "the pong echoes the server time and adds the game's own clock"
+    d.tcp = Sock()
+    d._send_tcp(bytes([fc.TYRE_COMPOUND]) + _s8(d.tyre))
+    assert d.tcp.sent[0] == struct.pack("<H", 3) + b"\x50\x01S"
+    d.place(1.0, 2.0, 3.0, 0.5, math.atan2(1.0, 0.0), (10.0, 0.0, 0.0))   # driving along +X
+    d.update()
+    assert struct.unpack_from("<4B", d.udp.sent[1], 1 + 1 + 4 + 36) == (100,) * 4, "a stopped car: the wheel-speed bytes read 0 rad/s at 100 (a 0 is 100 000 rad/s backwards: no tyres)"
+    d.set_speed(120)
+    d.update()
+    off = 1 + 1 + 4 + 36 + 4 + 2 + 2 + 1
+    assert struct.unpack_from("<I", d.udp.sent[1], off)[0] == 0x10 and d.udp.sent[1][off + 6] == 0, "at rest: brake bit, no gas (what the game sends parked)"
+    assert struct.unpack_from("<I", d.udp.sent[2], off)[0] == 0 and d.udp.sent[2][off + 6] == 200, "speeding up: gas, no brake"
+    w = struct.unpack_from("<4B", d.udp.sent[2], 1 + 1 + 4 + 36)
+    assert w[0] == w[3] > 100 and abs((10 ** ((w[0] - 100) * 0.05) - 1) - 120 / 3.6 / 0.33) < 12, "and a moving one spins about speed / radius"
+    d.set_speed(-30)
+    assert d._wheel_bytes()[0] < 100, "reversing: the wheels spin the other way"
+    seq, ts, x, y, z, rot = struct.unpack_from("<BI3ff", d.udp.sent[1], 1)
+    assert rot == pytest.approx(-math.pi / 2), "rotation.x is minus the heading: the game turns the car about Y by -rotation.x"
