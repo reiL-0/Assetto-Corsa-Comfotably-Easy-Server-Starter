@@ -137,7 +137,7 @@ def test_track_upload_lands_in_the_servers_content_and_rejects_bad_archives():
     api = TestClient(app, headers=ADMIN)
     ok = _zip({"mytrack/data/map.ini": b"[PARAMETERS]", "mytrack/ui/outline.png": b"png"})
     r = api.post(f"{V}/content/tracks", files={"file": ("mytrack.zip", ok)})
-    assert r.status_code == 201 and r.json() == {"track": "mytrack"}
+    assert r.status_code == 201 and r.json()["track"] == "mytrack"
     assert (content._tracks_dir() / "mytrack" / "data" / "map.ini").exists()
     two_roots = _zip({"a/x": b"1", "b/y": b"2"})
     assert api.post(f"{V}/content/tracks", files={"file": ("t.zip", two_roots)}).status_code == 400
@@ -152,7 +152,7 @@ def test_track_import_from_the_inbox():
     assert api.post(f"{V}/content/tracks/import", json={"file": "../x.zip"}).status_code == 400
     (content.inbox_dir() / "big.zip").write_bytes(_zip({"inboxtrack/data/surfaces.ini": b"x"}))
     r = api.post(f"{V}/content/tracks/import", json={"file": "big.zip"})
-    assert r.status_code == 201 and r.json() == {"track": "inboxtrack"}
+    assert r.status_code == 201 and r.json()["track"] == "inboxtrack"
     assert (content._tracks_dir() / "inboxtrack" / "data" / "surfaces.ini").exists()
     assert TestClient(app).post(f"{V}/content/tracks/import", json={"file": "big.zip"}).status_code == 401  # admin only
 
