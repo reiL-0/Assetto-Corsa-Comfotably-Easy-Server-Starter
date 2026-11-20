@@ -241,6 +241,7 @@ class Installed(str):
 
     kind: str = ""
     note: str = ""
+    layouts: list = []   # per layout of an uploaded track: what it brought (pitentry.report)
 
 
 def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "", auto: bool = False) -> str:
@@ -255,6 +256,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
     with archive.open("rb") as fh:
         magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
+    layouts = []
     stage = None   # the pace bot's copy of the track's AI lines: made before the cut, kept only if the track is installed
     try:
         fmt = unpack.archive_format(magic)
@@ -294,6 +296,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                     pitentry.write_all(top)   # (before the cut: `ai/` does not stay on the server, the pit entry worked out from it does: in the manager's data folder, never in the track)
                     stage = Path(tempfile.mkdtemp(dir=_scratch()))
                     pitentry.stage_lines(top, stage)
+                    layouts = pitentry.report(top)   # (last: a failure here must not skip the entry or the lines)
                 except Exception:
                     import logging
                     logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
@@ -318,6 +321,7 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                     import logging
                     logging.getLogger("acmanager.content").exception("the pace lines of an uploaded track could not be kept; the upload goes on")
             res = Installed(root)
+            res.layouts = layouts
             if cataloged:
                 res.kind = kind
                 integrity.seal_installed(kind, root)
@@ -376,7 +380,7 @@ def download_car(car: str) -> FileResponse:
 def _installed(name: str, asked: str) -> dict:
     """The upload answer: {asked: name}, or {actual kind: name, "note": ...} when the content was installed as the other kind."""
     kind = getattr(name, "kind", "") or asked
-    return {kind: str(name)} | ({"note": name.note} if getattr(name, "note", "") else {})
+    return {kind: str(name)} | ({"note": name.note} if getattr(name, "note", "") else {}) | ({"layouts": name.layouts} if getattr(name, "layouts", None) else {})
 
 
 @router.post("/cars", status_code=201)
@@ -595,7 +599,7 @@ def _finish(uid: str) -> None:
             u["result"], u["note"], u["kind"] = ", ".join(res["skins"]), "", "skin"
         else:
             res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""), auto=u["requested_kind"] is None)
-            u["result"], u["note"] = str(res), getattr(res, "note", "")
+            u["result"], u["note"], u["layouts"] = str(res), getattr(res, "note", ""), getattr(res, "layouts", None)
             u["kind"] = getattr(res, "kind", "") or u["requested_kind"] or ""
         u["state"] = "done"
     except HTTPException as e:
@@ -671,7 +675,7 @@ def upload_from_link(body: LinkIn) -> dict:
 @router.get("/uploads/{uid}")
 def upload_status(uid: str) -> dict:
     u = _upload(uid)
-    return {k: u.get(k) for k in ("kind", "requested_kind", "size", "total", "state", "result", "note", "error")}
+    return {k: u.get(k) for k in ("kind", "requested_kind", "size", "total", "state", "result", "note", "layouts", "error")}
 
 
 class InboxIn(BaseModel):
@@ -679,6 +683,46 @@ class InboxIn(BaseModel):
     pack: bool = False
     source_url: str = ""
     source_official: bool = False
+
+
+def _set_ai(track: str, layout: str, fast: bytes, pit: bytes) -> dict:
+    """The two AI lines of a layout that is already installed (its `ai/` was cut off at upload): checked, the pit entry worked out, and both kept for the pace bot, through the same functions as an upload."""
+    from app import pitentry
+    base = _tracks_dir() / track
+    lay = base if layout == "-" else base / layout
+    with tempfile.TemporaryDirectory(dir=_scratch()) as tmp:
+        top = Path(tmp) / track   # (the functions below take the name of the track from its folder)
+        lay2 = top if layout == "-" else top / layout
+        (lay2 / "data").mkdir(parents=True)
+        (lay2 / "ai").mkdir()
+        for name, blob in zip(pitentry.LINES, (fast, pit)):
+            (lay2 / "ai" / name).write_bytes(blob)
+        rep = pitentry.report(top)
+        if rep[0]["ai"] != "ok" or rep[0]["pit_entry"] is None:
+            raise HTTPException(400, f"the AI lines are not usable: {rep[0]['ai'] if rep[0]['ai'] != 'ok' else 'no pit entry could be worked out'}")   # (nothing was written: what was kept stays)
+        stage = Path(tempfile.mkdtemp(dir=_scratch()))
+        try:
+            pitentry.stage_lines(top, stage)
+            with catalog.mutation_lock:   # (the check and the writes together: an upload replacing the track cannot slip between them)
+                if not (lay / "data").is_dir():
+                    raise HTTPException(404, "that track/layout is not installed")
+                if pitentry.commit_lines(stage, track) != 1 or pitentry.write_all(top) != 1:   # (both swallow their I/O errors: a 200 only when both were kept)
+                    raise HTTPException(500, "the AI lines could not be saved")
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+    return {"track": track, "layout": layout} | {k: v for k, v in rep[0].items() if k not in ("layout", "models_ini")}   # (models_ini is about an upload's files: not known here)
+
+
+@router.post("/tracks/{track}/layouts/{layout}/ai", dependencies=[Depends(require("admin"))])
+async def upload_track_ai(track: str, layout: str, fast_lane: UploadFile, pit_lane: UploadFile) -> dict:
+    """Gives an installed layout its AI lines without uploading the track again (`layout` "-" = the track is one layout). Both files are needed; a bad pair is a 400 and keeps what was there."""
+    from app import pitentry
+    if pitentry.store_path(track, "" if layout == "-" else layout) is None or pitentry.lines_path(track, "" if layout == "-" else layout) is None:   # (the same rules as where they are kept: «a..b» passes NAME but has no place)
+        raise HTTPException(400, "invalid name")
+    blobs = [await f.read(pitentry.MAX_BYTES + 1) for f in (fast_lane, pit_lane)]
+    if any(len(b) > pitentry.MAX_BYTES for b in blobs):
+        raise HTTPException(400, "an AI file is too big")
+    return await run_in_threadpool(_set_ai, track, layout, *blobs)
 
 
 @router.post("/tracks/import", status_code=201)
