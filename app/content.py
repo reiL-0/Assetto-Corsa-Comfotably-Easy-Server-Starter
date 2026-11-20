@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import catalog, download, integrity, metrics, unpack, uploadguard
+from app import carfamilies, catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
 from app.live.tracklen import DETECTED_KEY, OVALS_KEY, _setting, oval_auto, oval_key, oval_known, update_oval_row
@@ -367,6 +367,19 @@ def get_cars() -> list[dict]:
     return list_cars()
 
 
+@router.get("/car-families")
+def get_car_families() -> dict:
+    """{id: {name, variants: {label: folder}, skins: [...]}}: what the pickers show (skins are those of the first variant: an upload gives every variant the same)."""
+    cars = {c["car"]: c for c in list_cars()}
+    return {fid: {**f, "skins": cars.get(next(iter(f["variants"].values())), {}).get("skins", [])} for fid, f in carfamilies.load().items()}
+
+
+@router.put("/car-families", dependencies=[Depends(require("admin"))])
+def put_car_families(body: dict) -> dict:
+    carfamilies.save(body, _cars_dir())
+    return get_car_families()
+
+
 @router.get("/cars/{car}/checksum")
 def get_car_checksum(car: str) -> dict:
     return car_checksum(_safe(car))
@@ -442,17 +455,18 @@ def _install_skins(archive: Path, car: str | None) -> dict:
         for owner, src in found:
             owner = _skin_folder(owner) if owner else None
             named = owner
-            if owner not in (None, given) and not (_cars_dir() / owner).is_dir():   # the folder above `skins` was not a car we have: the car the uploader named
+            if owner not in (None, given) and not (_cars_dir() / owner).is_dir() and not carfamilies.folders(owner):   # the folder above `skins` was not a car we have: the car the uploader named
                 owner = given
             if not owner:
                 raise HTTPException(400, (f"car not installed: {named}; " if named else "") + "say which car these skins are for (the archive does not name it)")
-            if not (_cars_dir() / owner).is_dir():
-                raise HTTPException(400, f"car not installed: {owner}")
             name = _skin_folder(src.name)
-            if (owner, name) in seen:
-                raise HTTPException(400, f"the skin {owner}/{name} appears twice in the archive")
-            seen.add((owner, name))
-            plan.append((owner, name, src))
+            for target in carfamilies.folders(owner) or [owner]:   # a car FAMILY: the skin goes into every variant's folder
+                if not (_cars_dir() / target).is_dir():
+                    raise HTTPException(400, f"car not installed: {target}")
+                if (target, name) in seen:
+                    raise HTTPException(400, f"the skin {target}/{name} appears twice in the archive")
+                seen.add((target, name))
+                plan.append((target, name, src))
         for owner, name, src in plan:
             dest = _cars_dir() / owner / "skins" / name
             dest.mkdir(parents=True, exist_ok=True)

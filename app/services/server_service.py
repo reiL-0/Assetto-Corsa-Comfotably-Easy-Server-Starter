@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app import content, csp, integrity, practicekeep, supervisor, timeline
+from app import carfamilies, content, csp, integrity, practicekeep, supervisor, timeline
 from app.live import racecontrol as live_rc
 from app.config import settings
 from app.models import Server
@@ -235,6 +235,10 @@ def write_instance(s: Server) -> Path:
 async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -> ApplyResult:
     """`held`: the caller already holds server_lock(s.id) (schedule does, to decide on `loaded` and apply as one step); the lock is not reentrant."""
     server_id = s.id
+    try:
+        body = carfamilies.resolve(body)   # family ids -> the folders of body.variant; from here on everything sees real cars
+    except HTTPException as e:
+        raise ServerError(e.status_code, str(e.detail)) from e
     if not (body.practice_min or body.qualify_min or body.race_laps or body.race_min):
         raise ServerError(400, "enable at least one session (practice, qualify or race)")
     cars = list(dict.fromkeys(e.model for e in body.entries)) if body.entries else body.cars

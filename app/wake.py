@@ -88,8 +88,9 @@ def _preview(s: Server):
             sc = schedule.open_window(db, s.id, time.time())
             if not sc or sc.loaded or not (ev := db.get(Event, sc.event_id)):
                 return None
+            from app import carfamilies
             from app.league import session_for
-            return session_for(db, ev, sc.start_at, notify=False)
+            return carfamilies.resolve(session_for(db, ev, sc.start_at, notify=False))   # (the lobby must list the folders that will run, not a family id; a missing variant is the HTTPException below)
     except HTTPException as exc:
         log.warning("cannot preview pending event for server %s: %s", s.id, exc.detail)
         return None

@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app import catalog, content, requirements
+from app import carfamilies, catalog, content, requirements
 from app.config import settings
 from app.db import SessionDep
 from app.models import Setting
@@ -55,7 +55,7 @@ def _track_name(track: str, config: str) -> str:
 
 
 def _car_names(session: dict) -> str:
-    cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
+    cars = carfamilies.real_cars(session)
     return ", ".join(content._read_json(content._cars_dir() / c / "ui" / "ui_car.json").get("name") or c for c in cars)
 
 
@@ -75,7 +75,7 @@ def weather_name(session: dict) -> str:
 
 
 def _downloads(session: dict) -> str:
-    cars = session.get("cars") or sorted({e["model"] for e in session.get("entries", [])})
+    cars = carfamilies.real_cars(session)
     links = catalog.download_links(session.get("track", ""), cars)
     return ("⬇️ **DESCARGAS**\n" + "\n".join(f"• {'Pista' if x['kind'] == 'track' else 'Auto'} {x['name']}: <{x['url']}>" for x in links)) if links else ""
 

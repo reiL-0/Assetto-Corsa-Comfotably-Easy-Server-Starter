@@ -12,7 +12,7 @@ from sqlmodel import select
 from app.db import SessionDep
 from app.league import session_for, settle_metrics
 from app.leaguelock import serialized
-from app.models import Championship, Event
+from app.models import Championship, Event, Schedule
 from app.rulebook import CutRule, DrsRule
 from app.servers import AppliedOut, SessionIn, _get, apply_to_server
 
@@ -152,6 +152,8 @@ def update_event(event_id: int, body: EventIn, sess: SessionDep) -> EventOut:
             data["drs_rule"] = body.drs_rule.model_dump()
     elif e.data.get("drs_rule"):   # omission keeps the saved DRS rules
         data["drs_rule"] = e.data["drs_rule"]
+    if e.data.get("variant") and data.get("variant", "") != e.data["variant"] and sess.exec(select(Schedule).where(Schedule.event_id == e.id)).first():
+        raise HTTPException(409, "the variant cannot change once the event is scheduled")
     e.title, e.notes, e.data, e.league_id = body.title, body.notes, data, body.league_id
     if "count_only_league_id" in body.model_fields_set:   # an older client does not send it: the saved one stays, unless it names a roster league (then the two cannot both be set)
         e.count_only_league_id = body.count_only_league_id
