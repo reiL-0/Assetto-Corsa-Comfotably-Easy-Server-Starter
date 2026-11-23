@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -23,12 +24,14 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app import carfamilies, content, csp, integrity, practicekeep, supervisor, timeline
+from app import carfamilies, content, csp, integrity, pitentry, practicekeep, supervisor, timeline
 from app.live import racecontrol as live_rc
 from app.config import settings
 from app.models import Server
 from app.schemas.servers import OptionsIn, SessionIn
 from app.services import ini_generator
+
+log = logging.getLogger("acmanager.server_service")
 
 
 class ServerError(Exception):
@@ -105,6 +108,22 @@ def check_content(body: SessionIn, wanted: list[str]) -> dict[str, list[str]]:
     if missing:
         raise ServerError(400, f"cars not installed: {', '.join(missing)}")
     return {c: cars[c]["skins"] for c in wanted}
+
+
+def check_pace_lines(body: SessionIn, held: bool) -> SessionIn:
+    """The pace bot drives on the track's AI lines (kept when the track is uploaded): a session that names it on a layout that has none is refused, and the admin is told to install the track again.
+    `held` = a scheduled event loading itself (nobody there to answer): it must not fail to start for this, so it goes without a pace car (`off`) and says so in the log."""
+    if body.pace_source != "bot" or pitentry.has_lines(body.track, body.track_config):
+        return body
+    if held:
+        log.warning("pace bot: %s/%s has no AI lines kept; the scheduled session starts without a pace car", body.track, body.track_config or "-")
+        return body.model_copy(update={"pace_source": "off"})
+    raise ServerError(409, no_lines_detail(body.track, body.track_config))
+
+
+def no_lines_detail(track: str, config: str = "") -> str:
+    return (f"the pace bot needs the AI lines of {track}{'/' + config if config else ''} (ai/fast_lane.ai and ai/pit_lane.ai) and none are kept: "
+            "install the track again with its ai/ folder (or upload its two lines) to use the bot")
 
 
 def _skin_for(skins: dict[str, list[str]], car: str, rand: bool) -> str:
@@ -245,6 +264,7 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     if (len(body.entries) or body.max_clients) > settings.max_slots:
         raise ServerError(400, f"this plan allows {settings.max_slots} slots per server at most (asked for {len(body.entries) or body.max_clients})")
     skins = check_content(body, cars)
+    body = check_pace_lines(body, held)
     wanted_setups = {e.fixed_setup for e in body.entries if e.fixed_setup} | set(body.car_setups.values())
     missing_setups = sorted(n for n in wanted_setups if not (content.setups_dir() / f"{n}.ini").is_file())
     if missing_setups:

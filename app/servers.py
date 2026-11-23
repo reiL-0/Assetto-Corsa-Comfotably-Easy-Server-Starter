@@ -254,11 +254,23 @@ async def upload_loading_image(server_id: int, request: Request, sess: SessionDe
     return {"uploaded": True}
 
 
+def _bot_keeps_its_lines(s: Server, config: dict) -> None:
+    """A raw config edit moves the track without going through `apply`: while the applied session names the pace bot, the new track must have its lines too (the same refusal as `apply`)."""
+    if (s.session or {}).get("pace_source") != "bot":
+        return
+    from app import pitentry   # (late: like the other helpers of this module that reach the content)
+    srv = (config or {}).get("SERVER") or {}
+    track, layout = csp.clean_track(str(srv.get("TRACK") or "")), str(srv.get("CONFIG_TRACK") or "")
+    if track and not pitentry.has_lines(track, layout):
+        raise HTTPException(409, server_service.no_lines_detail(track, layout))
+
+
 @router.patch("/{server_id}", response_model=ServerOut)
 def update(server_id: int, body: ServerIn, sess: SessionDep) -> ServerOut:
     s = _get(sess, server_id)
     with _http():
         check_slots(body.config, body.entry_list)
+    _bot_keeps_its_lines(s, body.config)
     s.name, s.config, s.entry_list = body.name, body.config, body.entry_list
     s.updated_at = datetime.now(UTC)
     sess.add(s)
@@ -306,6 +318,7 @@ async def upload_server_cfg_ini(server_id: int, request: Request, sess: SessionD
     config = {sec: dict(cp[sec]) for sec in cp.sections()}
     with _http():
         check_slots(config, s.entry_list)
+    _bot_keeps_its_lines(s, config)
     s.config = config
     s.updated_at = datetime.now(UTC)
     sess.add(s)
