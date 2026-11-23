@@ -220,3 +220,14 @@ def test_the_claim_answers_on_every_server_by_default_and_the_selector_can_stop_
     n = len(posted); hello(3); hello(77); assert len(posted) == n + 1   # the brake stops server 3 only
     monkeypatch.setattr(settings, "csp_claim_servers", "")
     n = len(posted); hello(1); assert len(posted) == n                 # empty = nobody
+
+
+def test_a_slot_found_empty_closes_a_car_whose_card_has_no_guid_instead_of_raising():
+    """Production 2026-11-23: `sweep` asked about a slot, acServer said it was empty, and the card the manager had for it had no `driver_guid`:
+    `_asked.pop() == old.get("driver_guid")` was None == None, the synthetic connection_closed had no guid, `_record` raised KeyError, `_apply` stopped
+    halfway and the ghost car stayed (asked again every 10 s)."""
+    client = acsp.ACSPClient(1)
+    client.cars[4] = {"car_id": 4, "driver_name": "Ghost"}   # (a card made from something other than a NEW_CONNECTION: no guid, no model)
+    empty = bytes([acsp.CAR_INFO, 4, 0]) + acsp._write_string("") * 5   # (model, skin, name, team, guid: all empty)
+    client.datagram_received(empty, ("127.0.0.1", 0))
+    assert 4 not in client.cars, "the empty slot closes the ghost: nobody is asked about it again"

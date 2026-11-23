@@ -648,7 +648,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         if t == "new_connection":
             metrics.enqueue(sid, "join", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
         elif t == "connection_closed":
-            metrics.enqueue(sid, "leave", guid=e["driver_guid"], name=e["driver_name"], car=e["car_model"], track=track)
+            metrics.enqueue(sid, "leave", guid=e.get("driver_guid"), name=e.get("driver_name"), car=e.get("car_model"), track=track)   # (.get: a slot found empty by `sweep` closes a car whose card may have no guid)
         elif t == "lap_completed":
             d = self.board._by_car(e["car_id"])
             metrics.enqueue(sid, "lap", guid=d.guid if d else None, name=d.name if d else None, car=d.model if d else None,
