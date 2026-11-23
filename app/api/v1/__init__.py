@@ -15,6 +15,7 @@ from app.championship import router as championship_router
 from app.content import router as content_router
 from app.discord import router as discord_router
 from app.discord_config import router as discord_config_router
+from app.errorlog import router as errors_router
 from app.events import router as events_router
 from app.integrity import router as integrity_router
 from app.schedule import router as schedule_router
@@ -43,6 +44,7 @@ def version() -> dict[str, str]:
 
 
 api_router.include_router(auth_router)
+api_router.include_router(errors_router)  # the last uncaught errors with their traceback: admin only (the panel's error popup asks for it)
 api_router.include_router(storage_router)  # disk used by the hosting client (its own admin guard)
 api_router.include_router(discord_config_router)  # the client's own Discord bot (its own admin guard)
 api_router.include_router(binary_router)  # the acServer program a hosting client brings (its own admin guard)
