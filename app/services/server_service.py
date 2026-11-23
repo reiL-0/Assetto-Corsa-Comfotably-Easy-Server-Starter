@@ -306,6 +306,10 @@ async def apply(sess: Session, s: Server, body: SessionIn, held: bool = False) -
     timed = bool(body.race_min) and not body.race_laps
     if srv.get("RACE_OVER_TIME") in (None, 180):   # (acServer's own default is 30 s when the key is missing: the rest of the grid would not get to cross the line. 10 min in a race by TIME, where the others finish up to a lap behind the winner; 3 min by laps. 180 is the value this manager used to write: it is raised, any other one is somebody's choice)
         srv["RACE_OVER_TIME"] = 600 if timed else 180
+    if any(st.kind == "qualify" and (st.stage is not None or st.run_interval_s is not None) for st in body.sequence or []):
+        srv.pop("QUALIFY_MAX_WAIT_PERC", None)   # (the knockout stages and the single runs are timed to the second by the manager: no extra time unless the admin says so in the options)
+    elif srv.get("QUALIFY_MAX_WAIT_PERC") is None:   # (measured on acServer: with the key missing a qualifying ENDS AT 0 even with cars still on their lap; with it, the session waits up to best lap x this % for the cars that have not crossed the line yet. 120 is Kunos' own default value; 0 = none)
+        srv["QUALIFY_MAX_WAIT_PERC"] = 120
     _apply_options(cfg, srv, body.options)
     if not any(k.startswith("WEATHER_") for k in cfg):
         cfg["WEATHER_0"] = dict(DEFAULT_WEATHER)

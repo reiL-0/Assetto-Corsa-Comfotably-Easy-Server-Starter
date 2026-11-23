@@ -103,7 +103,7 @@ class OptionsIn(BaseModel):
     max_contacts_per_km: int | None = Field(default=None, ge=-1, le=50)  # -1 = off
     race_over_time: int | None = Field(default=None, ge=0, le=3600)  # s the race stays open after the winner
     result_screen_time: int | None = Field(default=None, ge=0, le=600)
-    qualify_max_wait_perc: int | None = Field(default=None, ge=100, le=1000)
+    qualify_max_wait_perc: int | None = Field(default=None, ge=0, le=1000)   # % of the best lap the qualifying waits at 0 for the cars still on their lap (the manager writes 120 when nobody says; 0 = ends at 0)
     race_pit_window_start: int | None = Field(default=None, ge=0, le=720)  # minutes; 0 and 0 = no window
     race_pit_window_end: int | None = Field(default=None, ge=0, le=720)
     kick_quorum: int | None = Field(default=None, ge=0, le=100)  # % of votes
