@@ -391,3 +391,48 @@ def test_the_manager_imports_on_a_database_with_no_tables(tmp_path):
     env = {**os.environ, "ACM_DATA_DIR": str(tmp_path), "ACM_DB_PATH": str(tmp_path / "empty.db"), "ACM_ACSERVER_CMD": ""}
     r = subprocess.run([sys.executable, "-c", "import app.main"], cwd=str(__import__("pathlib").Path(__file__).resolve().parent.parent), env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr[-800:]
+
+
+CH3 = "423456789012345678"
+
+
+def test_who_started_a_vote_goes_only_to_its_own_channel_and_to_none_when_it_has_none(fake):
+    client.put("/api/v1/discord", json={**GOOD, "status_channel_id": CH2})
+    fake.calls.clear()
+    discord.notify_votes("sin canal"); drain()
+    assert not fake.calls, "with no votes channel it must not fall back to the announcements or the status channel"
+    r = client.put("/api/v1/discord", json={"votes_channel_id": CH3})
+    assert r.status_code == 200 and r.json()["votes_channel_id"] == CH3
+    fake.calls.clear()
+    discord.notify_votes("🗳️ Steam 1"); discord.announce("a"); discord.alert("b"); drain()
+    by_channel = {c["path"]: c["body"]["content"] for c in fake.calls}
+    assert by_channel[f"/channels/{CH3}/messages"] == "🗳️ Steam 1" and by_channel[f"/channels/{CH}/messages"] == "a" and by_channel[f"/channels/{CH2}/messages"] == "b"
+    pings = {c["path"]: c["body"].get("allowed_mentions") for c in fake.calls}
+    assert pings[f"/channels/{CH3}/messages"] == {"parse": []}, "the votes message names a driver: Discord may ping nobody"
+    assert pings[f"/channels/{CH}/messages"] is None, "the announcements keep their own mention rules"
+
+
+def test_the_votes_channel_cannot_be_the_announcements_or_the_status_channel(fake):
+    client.put("/api/v1/discord", json={**GOOD, "status_channel_id": CH2})
+    for same in (CH, CH2):
+        r = client.put("/api/v1/discord", json={"votes_channel_id": same})
+        assert r.status_code == 422 and "distinto" in r.json()["detail"], same
+    assert stored().get("votes_channel_id") in (None, "")
+    r = client.put("/api/v1/discord", json={**GOOD, "votes_channel_id": CH})   # no status channel set: it is the announcements one
+    assert r.status_code == 422
+
+
+def test_the_test_message_also_reaches_the_votes_channel(fake):
+    client.put("/api/v1/discord", json={**GOOD, "votes_channel_id": CH3})
+    fake.calls.clear()
+    assert client.post("/api/v1/discord/test").status_code == 200
+    posts = {c["path"]: c["body"]["content"] for c in fake.calls if c["method"] == "POST"}
+    assert "Steam ID" in posts[f"/channels/{CH3}/messages"] and "anuncios del servidor" in posts[f"/channels/{CH}/messages"]
+
+
+def test_a_partial_change_cannot_make_another_channel_equal_to_the_votes_channel(fake):
+    client.put("/api/v1/discord", json={**GOOD, "status_channel_id": CH2, "votes_channel_id": CH3})
+    for body in ({"channel_id": CH3}, {"status_channel_id": CH3}):   # only one field sent: it is merged with what is saved before it is checked
+        r = client.put("/api/v1/discord", json=body)
+        assert r.status_code == 422 and "distinto" in r.json()["detail"], body
+    assert stored()["channel_id"] == CH and stored()["status_channel_id"] == CH2 and stored()["votes_channel_id"] == CH3

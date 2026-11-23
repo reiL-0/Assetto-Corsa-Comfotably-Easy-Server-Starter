@@ -99,7 +99,7 @@ def active() -> dict | None:
     token = _read_token(v.get("token_rev", 0)) if v else None
     if not v or not token or not v.get("channel_id"):
         return None
-    return {"token": token, "channel_id": v["channel_id"], "status_channel_id": v.get("status_channel_id") or v["channel_id"], "role_id": v.get("role_id") or "",
+    return {"token": token, "channel_id": v["channel_id"], "status_channel_id": v.get("status_channel_id") or v["channel_id"], "votes_channel_id": v.get("votes_channel_id") or "", "role_id": v.get("role_id") or "",
             "reminders": v.get("reminders", DEFAULT_REMINDERS), "rsvp_enabled": v.get("rsvp_enabled", True), "announce_enabled": v.get("announce_enabled", True),
             "status_enabled": v.get("status_enabled", True), "bot_rev": v.get("bot_rev", 0)}
 
@@ -124,7 +124,7 @@ def note(error: str | None) -> None:
 def _view(v: dict) -> dict:
     token = _read_token(v.get("token_rev", 0)) if v else None
     return {"configured": bool(v and token and v.get("channel_id")), "bot_name": v.get("bot_name"), "token_last4": v.get("token_last4") if token else None, "channel_id": v.get("channel_id", ""),
-            "channel_name": v.get("channel_name"), "status_channel_id": v.get("status_channel_id", ""), "status_channel_name": v.get("status_channel_name"), "role_id": v.get("role_id", ""),
+            "channel_name": v.get("channel_name"), "status_channel_id": v.get("status_channel_id", ""), "status_channel_name": v.get("status_channel_name"), "votes_channel_id": v.get("votes_channel_id", ""), "votes_channel_name": v.get("votes_channel_name"), "role_id": v.get("role_id", ""),
             "reminders": v.get("reminders", DEFAULT_REMINDERS), "rsvp_enabled": v.get("rsvp_enabled", True), "announce_enabled": v.get("announce_enabled", True),
             "status_enabled": v.get("status_enabled", True), "last_error": v.get("last_error"), "default_reminders": DEFAULT_REMINDERS}
 
@@ -166,6 +166,9 @@ def parse(body: object, current: dict) -> dict:
     new = dict(current)
     new["channel_id"] = _ids({"channel_id": body.get("channel_id", current.get("channel_id"))}, "channel_id", True)
     new["status_channel_id"] = _ids({"v": body.get("status_channel_id", current.get("status_channel_id"))}, "v", False)
+    new["votes_channel_id"] = _ids({"v": body.get("votes_channel_id", current.get("votes_channel_id"))}, "v", False)   # who started a vote: its own channel, empty = not posted to Discord
+    if new["votes_channel_id"] in (new["channel_id"], new["status_channel_id"] or new["channel_id"]):
+        raise HTTPException(422, "El canal de votaciones debe ser distinto del de anuncios y del de estado del servidor.")
     new["role_id"] = _ids({"v": body.get("role_id", current.get("role_id"))}, "v", False)
     rem = body.get("reminders", current.get("reminders", DEFAULT_REMINDERS))
     if (not isinstance(rem, list) or len(rem) > 5 or not all(isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= 1440 for m in rem)):
@@ -210,11 +213,12 @@ async def put(request: Request) -> dict:
         token = token_in.strip() if token_in else (_read_token(current.get("token_rev", 0)) if current else None)
         if not token:
             raise HTTPException(422, "Falta el token del bot.")
-        changed = bool(token_in) or any(new.get(k) != current.get(k) for k in ("channel_id", "status_channel_id"))
+        changed = bool(token_in) or any(new.get(k) != current.get(k) for k in ("channel_id", "status_channel_id", "votes_channel_id"))
         if changed:   # asked of Discord BEFORE anything is stored and with no lock held: a slow Discord never blocks another change
             new["bot_name"] = _discord(token, "/users/@me").get("username") or "bot"
             new["channel_name"] = _discord(token, f"/channels/{new['channel_id']}").get("name")
             new["status_channel_name"] = _discord(token, f"/channels/{new['status_channel_id']}").get("name") if new["status_channel_id"] else None
+            new["votes_channel_name"] = _discord(token, f"/channels/{new['votes_channel_id']}").get("name") if new["votes_channel_id"] else None
         with _write:
             with Session(engine) as sess:
                 latest = _row(sess)
@@ -268,9 +272,12 @@ def test() -> dict:
             raise HTTPException(429, "Espera unos segundos antes de otra prueba.")
         _last_test = time.monotonic()
     sent = []
-    for ch in dict.fromkeys([cfg["channel_id"], cfg["status_channel_id"]]):
+    channels = {cfg["channel_id"]: "✅ Conexión correcta: este canal recibirá los anuncios del servidor.", cfg["status_channel_id"]: "✅ Conexión correcta: este canal recibirá los anuncios del servidor."}
+    if cfg["votes_channel_id"]:
+        channels[cfg["votes_channel_id"]] = "✅ Conexión correcta: este canal recibirá el aviso de quién inicia una votación (solo su Steam ID)."
+    for ch, text in channels.items():
         try:
-            discord._api("POST", f"/channels/{ch}/messages", {"content": "✅ Conexión correcta: este canal recibirá los anuncios del servidor."}, bearer=f"Bot {cfg['token']}")
+            discord._api("POST", f"/channels/{ch}/messages", {"content": text}, bearer=f"Bot {cfg['token']}")
             sent.append(ch)
         except urllib.error.HTTPError as e:
             raise HTTPException(422, "Discord no dejó publicar en el canal: " + {401: "el token ya no vale.", 403: "al bot le falta el permiso de enviar mensajes en él.",

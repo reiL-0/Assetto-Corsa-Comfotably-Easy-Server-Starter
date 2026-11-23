@@ -207,3 +207,34 @@ def test_the_overtime_default_is_not_for_knockout_or_single_run_qualifyings_and_
     assert "QUALIFY_MAX_WAIT_PERC" not in r.json()["config"]["SERVER"], "a knockout qualifying keeps its exact timing: no default overtime"
     sid2 = _setup()
     assert _apply(sid2).json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 120, "a plain qualifying gets it"
+
+
+def test_block_votes_makes_every_vote_fail_and_closes_it_at_once():
+    sid = _setup()
+    srv = _apply(sid, block_votes=True).json()["config"]["SERVER"]
+    assert (srv["KICK_QUORUM"], srv["VOTING_QUORUM"], srv["VOTE_DURATION"]) == (200, 200, 1)   # > 100 %: votes can never exceed the quorum
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text
+    assert "KICK_QUORUM=200" in ini and "VOTING_QUORUM=200" in ini and "VOTE_DURATION=1" in ini and "BLOCK_VOTES" not in ini
+    assert _apply(sid, abs_allowed=1).json()["config"]["SERVER"]["KICK_QUORUM"] == 200   # a later apply that does not mention it keeps the block
+    assert _apply(sid, block_votes=True, kick_quorum=50).json()["config"]["SERVER"]["KICK_QUORUM"] == 200   # the block wins over a hand-set quorum
+
+
+def test_lifting_the_block_restores_defaults_but_never_a_hand_set_quorum():
+    sid = _setup()
+    _apply(sid, block_votes=True)
+    srv = _apply(sid, block_votes=False).json()["config"]["SERVER"]
+    assert (srv["KICK_QUORUM"], srv["VOTING_QUORUM"], srv["VOTE_DURATION"]) == (85, 80, 20)
+    _apply(sid, kick_quorum=70, voting_quorum=60, vote_duration=30)
+    srv = _apply(sid, block_votes=False).json()["config"]["SERVER"]   # not blocked: nothing to lift
+    assert (srv["KICK_QUORUM"], srv["VOTING_QUORUM"], srv["VOTE_DURATION"]) == (70, 60, 30)
+
+
+def test_lifting_the_block_with_a_vote_field_in_the_same_request_and_after_a_raw_ini_upload():
+    sid = _setup()
+    _apply(sid, block_votes=True)
+    srv = _apply(sid, block_votes=False, vote_duration=30).json()["config"]["SERVER"]   # the field sent with the lift must not hide the block
+    assert (srv["KICK_QUORUM"], srv["VOTING_QUORUM"], srv["VOTE_DURATION"]) == (85, 80, 30)
+    ini = api.get(f"{V}/servers/{sid}/server_cfg.ini").text.replace("KICK_QUORUM=85", "KICK_QUORUM=200").replace("VOTING_QUORUM=80", "VOTING_QUORUM=200").replace("VOTE_DURATION=30", "VOTE_DURATION=1")
+    assert api.put(f"{V}/servers/{sid}/server_cfg.ini", content=ini).status_code == 200   # now every value is text, as after an import
+    srv = _apply(sid, block_votes=False).json()["config"]["SERVER"]
+    assert (srv["KICK_QUORUM"], srv["VOTING_QUORUM"], srv["VOTE_DURATION"]) == (85, 80, 20)

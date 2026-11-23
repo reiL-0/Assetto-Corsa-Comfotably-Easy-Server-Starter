@@ -132,10 +132,26 @@ def _skin_for(skins: dict[str, list[str]], car: str, rand: bool) -> str:
     return random.choice(pool) if rand else pool[0]
 
 
+# acServer v1.15 passes a vote when votes > trunc(connected × quorum) (kick: connected - 1); read from the binary (main.GetQuorumForCurrentVote / StepVote),
+# it keeps the quorum as a float with no clamp. 200 % can never be reached, and the shortest duration closes the failed vote at once (0 would mean 10 s).
+BLOCK_VOTES = {"KICK_QUORUM": 200, "VOTING_QUORUM": 200, "VOTE_DURATION": 1}
+# NOT acServer's default: without these keys it reads 0 % (measured), and then one vote passes. These are the values of AC's own server_cfg template, written back when the block is lifted.
+VOTES_OPEN = {"KICK_QUORUM": 85, "VOTING_QUORUM": 80, "VOTE_DURATION": 20}
+
+
+def votes_blocked(srv: dict) -> bool:
+    return all(str(srv.get(k)) == str(v) for k, v in BLOCK_VOTES.items())   # str: an uploaded server_cfg.ini keeps every value as text
+
+
 def _apply_options(cfg: dict, srv: dict, o: OptionsIn) -> None:
     """Write every option the form sent; leave the rest of the file alone."""
-    for field, value in o.model_dump(exclude={"weather", "dynamic_track"}, exclude_none=True).items():
+    was_blocked = votes_blocked(srv)   # before the loop below: a vote field sent in the same request would hide the block
+    for field, value in o.model_dump(exclude={"weather", "dynamic_track", "block_votes"}, exclude_none=True).items():
         srv[field.upper()] = int(value) if isinstance(value, bool) else value
+    if o.block_votes:
+        srv.update(BLOCK_VOTES)
+    elif o.block_votes is False and was_blocked:   # only undo OUR values: a hand-set quorum stays, and so does a field sent with this request
+        srv.update({k: v for k, v in VOTES_OPEN.items() if getattr(o, k.lower()) is None})
     if o.weather is not None:
         for name in [k for k in cfg if k.startswith("WEATHER_")]:
             del cfg[name]

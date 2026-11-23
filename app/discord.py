@@ -59,11 +59,12 @@ def bot() -> dict | None:
     return discord_config.active()
 
 
-def _post_as_bot(cfg: dict, channel: str, text: str) -> None:
-    """One message as the client's bot. A failure is logged WITHOUT the token and remembered for the panel (a short sentence); a success clears it."""
+def _post_as_bot(cfg: dict, channel: str, text: str, quiet: bool = False) -> None:
+    """One message as the client's bot. A failure is logged WITHOUT the token and remembered for the panel (a short sentence); a success clears it.
+    `quiet`: the text carries something a driver typed, so Discord is told it may ping nobody (allowed_mentions.parse = []), whatever the text says."""
     from app import discord_config
     try:
-        _api("POST", f"/channels/{channel}/messages", {"content": text[:2000]}, bearer=f"Bot {cfg['token']}")
+        _api("POST", f"/channels/{channel}/messages", {"content": text[:2000], **({"allowed_mentions": {"parse": []}} if quiet else {})}, bearer=f"Bot {cfg['token']}")
         discord_config.note(None)
     except urllib.error.HTTPError as e:
         log.warning("discord bot post failed (%s)", e.code)
@@ -140,6 +141,13 @@ def announce(text: str) -> None:
         return
     if settings.discord_webhook:
         threading.Thread(target=_send, args=(text, settings.discord_webhook), daemon=True).start()
+
+
+def notify_votes(text: str) -> None:
+    """Who started a vote (app/votes.py): ONLY to the client's own bot and its votes channel, never to the announcements or the server-status channel; nothing if none is set."""
+    cfg = bot()
+    if cfg and cfg["votes_channel_id"]:
+        threading.Thread(target=_post_as_bot, args=(cfg, cfg["votes_channel_id"], text, True), daemon=True).start()   # (it names a driver: nobody may be pinged)
 
 
 def alert(text: str) -> None:

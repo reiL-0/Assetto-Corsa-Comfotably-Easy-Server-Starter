@@ -109,6 +109,7 @@ class OptionsIn(BaseModel):
     kick_quorum: int | None = Field(default=None, ge=0, le=100)  # % of votes
     voting_quorum: int | None = Field(default=None, ge=0, le=100)
     vote_duration: int | None = Field(default=None, ge=1, le=300)
+    block_votes: bool | None = None  # True: no vote (kick / restart / next session) can pass: quorums 200 %, 1 s long (server_service.BLOCK_VOTES); False: lifts OUR block (writes 85/80/20, the AC template's) and leaves a vote field sent in the same request; True wins over the three fields above
     blacklist_mode: int | None = Field(default=None, ge=0, le=2)  # 0 plain kick, 1 until restart, 2 permanent ban
     client_send_interval_hz: int | None = Field(default=None, ge=10, le=60)
     weather: list[WeatherIn] | None = Field(default=None, max_length=10)  # None = keep the current blocks

@@ -23,7 +23,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-from app import integrity, metrics
+from app import integrity, metrics, votes
 from app.config import settings
 from app.live import acsp
 from app.live.logboard import LogBoard
@@ -152,7 +152,7 @@ async def _signal(pid: int, sig: int) -> None:
 
 class Instance:
     def __init__(self, server_id: int, cwd: Path, *, proc: asyncio.subprocess.Process | None = None, pid: int | None = None,
-                 started_at: float | None = None, log_from: int = 0, http_port: int | None = None,
+                 started_at: float | None = None, log_from: int = 0, live_from: int = 0, http_port: int | None = None,
                  nascar_config: dict | None = None, rolling: str = "off", cuts_off: tuple = ()) -> None:
         self.server_id = server_id
         self.nascar_config = nascar_config  # snapshot of Server.session.nascar; replaced on apply, read by ACSP without I/O
@@ -173,6 +173,7 @@ class Instance:
         self.http_port = http_port
         self._stopping = False
         self._log_pos = log_from
+        self._live_from = live_from   # log offset where the lines the manager has not told yet begin: 0 for a process it started, the size of the log at adopt() otherwise
         self._reader = asyncio.create_task(self._watch())
         self._idle = asyncio.create_task(self._idle_watch()) if settings.idle_stop_seconds else None
         self._sampler = asyncio.create_task(self._sample_online())
@@ -210,11 +211,17 @@ class Instance:
         except OSError:
             return
         end = data.rfind(b"\n") + 1
+        cut = max(0, self._live_from - self._log_pos)   # bytes of this chunk that are history: adopt() rereads the last 16 KB, and what was already there is not told again
+        if cut:
+            cut = min(end, data.find(b"\n", cut - 1) + 1 or end)   # on a line boundary: a line is never split between history and news
         self._log_pos += end
-        for line in data[:end].decode(errors="replace").splitlines():
-            self.log.append(line)
-            integrity.on_log_line(self.server_id, line)
-            self.logboard.feed(line)
+        for told, part in ((False, data[:cut]), (True, data[cut:end])):
+            for line in part.decode(errors="replace").splitlines():
+                self.log.append(line)
+                integrity.on_log_line(self.server_id, line)
+                self.logboard.feed(line)
+                if told:
+                    votes.on_log_line(self, line)
 
     async def _watch(self) -> None:
         """Follow the log, and notice when the process ends on its own (not through `stop`)."""
@@ -429,7 +436,7 @@ async def adopt(
         (cwd / "server.pid").unlink(missing_ok=True)  # stale: the process is gone (or the pid belongs to something else now)
         return None
     log_size = (cwd / "server.log").stat().st_size if (cwd / "server.log").exists() else 0
-    inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384), http_port=http_port,
+    inst = Instance(server_id, cwd, pid=pid, started_at=info.get("started_at"), log_from=max(0, log_size - 16384), live_from=log_size, http_port=http_port,
                     nascar_config=nascar_config, rolling=rolling, cuts_off=cuts_off)
     _instances[server_id] = inst
     if acsp_local_port and acsp_remote_port:
