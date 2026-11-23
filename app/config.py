@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     port_range_end: int = 9700
     resource_log_seconds: int = 30    # how often CPU/RAM/steal are written to <data_dir>/logs/resources-*.jsonl (app/resourcelog.py); 0 = off
     resource_log_keep_days: int = 30
+    error_log_keep_days: int = 2      # days of <data_dir>/logs/manager.log kept (app/errorlog.py: WARNING+ and uncaught errors; the handler deletes the older ones). Env: ACM_ERROR_LOG_KEEP_DAYS
     log_lines: int = 500  # per-instance stdout ring buffer
     # Extra hosts content may be fetched from by link, besides MediaFire / Google Drive / Dropbox.
     # Env (JSON): ACM_DOWNLOAD_HOSTS='["files.example.com"]'

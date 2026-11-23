@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
-from app import integrity, metrics, resourcelog, schedule, servers, wake
+from app import errorlog, integrity, metrics, resourcelog, schedule, servers, wake
 from app import racecontrol as race_control
 from app.api.v1 import api_router
 from app.config import settings
@@ -24,6 +24,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 log = logging.getLogger("acmanager")
+errorlog.setup()
 
 
 @asynccontextmanager
@@ -80,6 +81,9 @@ if settings.cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+app.add_exception_handler(Exception, errorlog.on_exception)   # an uncaught error: 500 {detail, error_id}; the traceback stays in the log and behind /api/v1/errors/{id} (admin)
 
 
 @app.middleware("http")
