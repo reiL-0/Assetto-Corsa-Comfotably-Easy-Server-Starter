@@ -23,6 +23,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import struct
 import sys
 import threading
@@ -77,9 +78,16 @@ class Spline:
         return self.cum[i]
 
 
+_CSP_TRACK = re.compile(r"csp/\d+/\.\./(?:[A-Za-z0-9_]+/\.\./)?([^/]+)")   # the same as app/csp.py `clean_track` (this script runs alone, it cannot import the app)
+
+
 def find_ai(content: str, track: str, config: str = "", lines: str = "") -> Path:
     """Where the two lines of the track are: the manager's own copy `<lines>/<track>/<config or ->/` (kept when the track is uploaded: the server's content does not keep `ai/`), else
     `<content>/tracks/<track>[/<config>]/ai` (a content folder that does have them)."""
+    m = _CSP_TRACK.fullmatch(track or "")   # with CSP required the server's TRACK is `csp/<build>/../<track>` and the handshake gives it back like that: the folder is the last part
+    track = m.group(1) if m else track
+    if track in ("", ".", "..") or "/" in track or "\\" in track or "\0" in track:   # (the name is a folder name and nothing else: never a way out of the lines / content folders)
+        raise FileNotFoundError(f"not a track folder name: {track!r}")
     found = []
     if lines:
         found.append(Path(lines) / track / (config or "-"))
