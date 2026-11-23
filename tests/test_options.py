@@ -186,3 +186,24 @@ def test_a_session_can_be_unlimited_in_every_kind_and_nothing_goes_beyond():
 def test_unlimited_fits_acservers_32_bit_millisecond_clock():
     from app.schemas.servers import UNLIMITED_MIN
     assert UNLIMITED_MIN * 60 * 1000 < 2 ** 31, "65535 min measured on a real acServer: timeleft overflowed to a negative number and the session would end at once"
+
+
+def test_a_qualifying_always_gets_its_overtime_unless_the_admin_says_otherwise():
+    """acServer with QUALIFY_MAX_WAIT_PERC missing ends the qualifying the moment the time is up (measured); the manager writes Kunos' 120 and keeps what the admin sets."""
+    sid = _setup()
+    r = _apply(sid)
+    assert r.status_code == 200 and r.json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 120, r.json()["config"]["SERVER"]
+    assert _apply(sid, qualify_max_wait_perc=200).json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 200
+    assert _apply(sid).json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 200, "applying again without saying keeps the admin's value"
+
+
+def test_the_overtime_default_is_not_for_knockout_or_single_run_qualifyings_and_zero_turns_it_off():
+    sid = _setup()
+    assert _apply(sid, qualify_max_wait_perc=0).json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 0, "0 = the admin turns the overtime off"
+    steps = [{"kind": "practice", "name": "P", "time_min": 5}, {"kind": "qualify", "name": "Q1", "time_min": 5, "stage": 1}, {"kind": "qualify", "name": "Q2", "time_min": 5, "stage": 2},
+             {"kind": "qualify", "name": "Q3", "time_min": 5, "stage": 3}, {"kind": "practice", "name": "A", "time_min": 3}, {"kind": "race", "name": "R", "laps": 3}]
+    r = api.post(f"{V}/servers/{sid}/apply", json={**BASE, "qualify_min": 5, "restart": False, "sequence": steps, "options": {}})
+    assert r.status_code == 200, r.text
+    assert "QUALIFY_MAX_WAIT_PERC" not in r.json()["config"]["SERVER"], "a knockout qualifying keeps its exact timing: no default overtime"
+    sid2 = _setup()
+    assert _apply(sid2).json()["config"]["SERVER"]["QUALIFY_MAX_WAIT_PERC"] == 120, "a plain qualifying gets it"
