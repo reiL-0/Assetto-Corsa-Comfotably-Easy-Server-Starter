@@ -407,6 +407,9 @@ def test_who_started_a_vote_goes_only_to_its_own_channel_and_to_none_when_it_has
     discord.notify_votes("🗳️ Steam 1"); discord.announce("a"); discord.alert("b"); drain()
     by_channel = {c["path"]: c["body"]["content"] for c in fake.calls}
     assert by_channel[f"/channels/{CH3}/messages"] == "🗳️ Steam 1" and by_channel[f"/channels/{CH}/messages"] == "a" and by_channel[f"/channels/{CH2}/messages"] == "b"
+    pings = {c["path"]: c["body"].get("allowed_mentions") for c in fake.calls}
+    assert pings[f"/channels/{CH3}/messages"] == {"parse": []}, "the votes message names a driver: Discord may ping nobody"
+    assert pings[f"/channels/{CH}/messages"] is None, "the announcements keep their own mention rules"
 
 
 def test_the_votes_channel_cannot_be_the_announcements_or_the_status_channel(fake):

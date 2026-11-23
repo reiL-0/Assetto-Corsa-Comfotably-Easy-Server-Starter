@@ -52,14 +52,14 @@ def test_the_notice_names_the_voter_the_target_and_the_slot_only_when_it_is_unam
     votes.on_log_line(inst, "Creating vote to KICK USER Bob [] from Alan Montes []")
     assert inst.sent == [acsp.encode_broadcast_chat("Alan Montes ha iniciado una votación para expulsar a Bob.")]
     msg = out["votes"][0]
-    assert "Steam 76561198000000001 inició" in msg and "expulsar a Steam 76561198000000002." in msg and "slot" not in msg
-    assert "Alan" not in msg and "Bob" not in msg and not out["alerts"]   # Discord gets IDs, never a name a driver typed, and never the status channel
+    assert "Alan Montes (Steam 76561198000000001) inició" in msg and "expulsar a Bob (Steam 76561198000000002)." in msg and "slot" not in msg
+    assert not out["alerts"]   # never the server-status channel
     assert out["events"] == [(7, "vote_kick", {"name": "Alan Montes", "car": "Bob"})]
     out["votes"].clear()
     votes._told.clear()   # (the same voter a second time would be spaced out)
     twin = _Inst([alan, Driver(car_id=5, name="Alan Montes", guid="9")])   # two drivers with that name: no identity is guessed
     votes.on_log_line(twin, "Creating vote to NEXT SESSION from Alan Montes []")
-    assert "Steam ID no identificado" in out["votes"][0] and "siguiente sesión" in out["votes"][0]
+    assert "Alan Montes (Steam ID no identificado)" in out["votes"][0] and "siguiente sesión" in out["votes"][0]
 
 
 def test_names_typed_by_a_driver_cannot_ping_or_format_the_stewards_channel(monkeypatch):
@@ -70,9 +70,19 @@ def test_names_typed_by_a_driver_cannot_ping_or_format_the_stewards_channel(monk
     u = lambda t: t.encode("utf-32-le")   # ACSP strings are UTF-32
     assert u("expulsar a @everyone") in chat and u("**Mala [31mIdea** ha") in chat   # in the game's chat an @ is harmless; control characters are gone
     assert u("\x1b") not in chat and u("\x00") not in chat
-    assert "everyone" not in out["votes"][0] and "Mala" not in out["votes"][0]   # nothing a driver typed reaches Discord: no ping, no markdown, no link
+    assert "@everyone" not in out["votes"][0] and "@\u200beveryone" in out["votes"][0]   # the name reaches Discord, but cannot ping...
+    assert "\\*\\*Mala \\[31mIdea\\*\\*" in out["votes"][0] and "\x1b" not in out["votes"][0] and "\x00" not in out["votes"][0]   # ...nor format, and its control characters are gone
     votes.on_log_line(inst, "Creating vote to NEXT SESSION from " + "N" * 500 + " []")
     assert len(inst.sent[1]) < 600   # a long name does not flood the chat (40 characters, 4 bytes each)
+
+
+def test_a_name_cannot_become_a_link_or_a_mention_tag_in_discord(monkeypatch):
+    """A bot's message renders [text](url) as a link and <@id> / <#id> / <https://..> as mentions and autolinks: no character of those survives unescaped."""
+    out = _capture(monkeypatch)
+    votes.on_log_line(_Inst(), "Creating vote to NEXT SESSION from [R](http://m.x) <@123> https://m.x []")   # (the name is cut to 40 characters before it is escaped)
+    msg = out["votes"][0]
+    assert "\\[R\\](http:\u200b//m.x)" in msg and "\\<@\u200b123\\>" in msg and "https:\u200b//m.x" in msg
+    assert "[R]" not in msg and " <@" not in msg and "https://" not in msg and "http://" not in msg
 
 
 def test_a_failing_channel_does_not_silence_the_others_nor_stop_the_log(monkeypatch):

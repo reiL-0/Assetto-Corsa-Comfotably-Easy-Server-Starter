@@ -46,7 +46,7 @@ def _clean(text: str | None, limit: int = 40) -> str | None:
 
 def _md(text: str) -> str:
     """A name inside a Discord message: its markdown escaped and its `@` broken so it cannot ping a role or the whole channel (in the game's chat an `@` is harmless, and acsp encodes the zero-width space as «?»)."""
-    return re.sub(r"([\\*_~`|>])", r"\\\1", text).replace("@", "@\u200b")
+    return re.sub(r"([\\*_~`|>\[\]<])", r"\\\1", text).replace("@", "@\u200b").replace("://", ":\u200b//")   # [ ] < : a bot's message renders [text](url) as a link and <@id> / <#id> / <url> as tags; "://" broken: a bare URL becomes no link and no preview
 
 
 def _what(v: dict) -> str:
@@ -55,12 +55,11 @@ def _what(v: dict) -> str:
 
 
 def _steam(inst, name: str | None) -> str:
-    """What Discord says about a driver: his Steam ID and NOTHING else. Found by name among the connected drivers, and only when exactly one has it:
-    two with the same name are not told apart by a name."""
+    """What Discord says about a driver: his in-game name (cleaned, markdown and `@` escaped: only stewards read it) and his Steam ID.
+    The ID is found by name among the connected drivers, and only when exactly one has it: two with the same name are not told apart by a name."""
     same = [d for d in inst.logboard.board.drivers if d.connected and _clean(d.name) == name] if name else []
-    if len(same) == 1 and re.fullmatch(r"\d{5,20}", same[0].guid or ""):
-        return f"Steam {same[0].guid}"
-    return "Steam ID no identificado"
+    ident = f"Steam {same[0].guid}" if len(same) == 1 and re.fullmatch(r"\d{5,20}", same[0].guid or "") else "Steam ID no identificado"
+    return f"{_md(name)} ({ident})" if name else ident
 
 
 def _tell_stewards(server_id: int, text: str) -> None:
@@ -93,7 +92,7 @@ def on_log_line(inst, line: str) -> None:
 
     def stewards():
         what = {"next": "pasar a la siguiente sesión", "restart": "reiniciar la sesión", "kick": f"expulsar a {_steam(inst, v['target'])}"}.get(v["kind"])
-        text = f"{_steam(inst, v['voter'])} inició una votación para {what}." if known else "votación con un formato que no se reconoce: revisa el log del servidor."   # no name, no raw text: only what the manager knows is a Steam ID
+        text = f"{_steam(inst, v['voter'])} inició una votación para {what}." if known else "votación con un formato que no se reconoce: revisa el log del servidor."   # no raw text for an unknown format
         threading.Thread(target=_tell_stewards, args=(inst.server_id, text), daemon=True).start()
 
     key, now = (inst.server_id, v["voter"] if known else v["raw"]), time.monotonic()
