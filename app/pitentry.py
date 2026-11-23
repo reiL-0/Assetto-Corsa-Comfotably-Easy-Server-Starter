@@ -82,6 +82,12 @@ def lines_path(track: str, config: str) -> Path | None:
     return Path(settings.data_dir) / "pace_lines" / track / (config or "-")
 
 
+def has_lines(track: str, config: str = "") -> bool:
+    """Whether the pace bot has both AI lines kept for this layout (`config` "" = the track itself): without them it cannot drive, so a session cannot name it."""
+    d = lines_path(track, config or "")
+    return bool(d) and all((d / f).is_file() for f in LINES)
+
+
 def stage_lines(track: Path, stage: Path) -> int:
     """BEFORE the cut (`ai/` is not kept): copies the two lines of every layout of an unpacked track whose pair `read_ai` accepts (size, version 7, points) into `stage/<layout or ->/`. Nothing is kept yet: the upload may still
     be refused (a rights claim, the quota), and then the lines of the track already installed must stay. `commit_lines` makes them the kept ones once the track is installed. A layout that is in the upload WITHOUT a

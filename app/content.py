@@ -145,6 +145,7 @@ def list_cars() -> list[dict]:
 
 
 def list_tracks() -> list[dict]:
+    from app import pitentry   # (late, like the upload code below: the lines kept for the pace bot)
     tracks = []
     for d in sorted(_tracks_dir().iterdir()):
         if not d.is_dir():
@@ -169,8 +170,9 @@ def list_tracks() -> list[dict]:
         said, seen = _oval_overrides(OVALS_KEY), _oval_overrides(DETECTED_KEY)
         for c in configs:
             c.update(_oval_fields(d, c["config"], said, seen))
+            c["ai_lines"] = pitentry.has_lines(d.name, c["config"] or "")   # (the pace bot's lines for this layout: the admin panel does not offer the bot without them)
         # (a track with only its base layout, or the base of one that has layouts, has no entry in `configs` unless it has a ui_track.json: its «oval» check lives here)
-        tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts), "base_oval": _oval_fields(d, None, said, seen) if base else None})
+        tracks.append({"track": d.name, "configs": configs, "base": base, "usable": base or bool(layouts), "base_oval": _oval_fields(d, None, said, seen) if base else None, "base_ai_lines": pitentry.has_lines(d.name, "")})
     return tracks
 
 
