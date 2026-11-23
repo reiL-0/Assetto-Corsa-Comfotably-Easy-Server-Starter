@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app import carfamilies, catalog, download, integrity, metrics, unpack, uploadguard
+from app import acd, carfamilies, catalog, download, integrity, metrics, unpack, uploadguard
 from app.auth import require
 from app.config import settings
 from app.live.tracklen import DETECTED_KEY, OVALS_KEY, _setting, oval_auto, oval_key, oval_known, update_oval_row
@@ -303,6 +303,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                     import logging
                     logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
             uploadguard.prune(top, "car" if dest_parent == _cars_dir() else "track")
+            if dest_parent == _cars_dir():
+                acd.pack_folder(top)   # loose `data/` (a car straight from Content Manager's editor) -> data.acd, the key is the installed folder name
         cataloged = dest_parent in (_cars_dir(), _tracks_dir())   # not skins: the checksums cover only physics and track files
         kind = "car" if dest_parent == _cars_dir() else "track"
         with catalog.mutation_lock:   # ponytail: held during copytree/digest (one process, runs in the threadpool); uploads and scans queue up. Staging dir + short swap under the lock if that hurts
@@ -315,6 +317,8 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 catalog.check_not_blocked(digest)   # removed after a rights claim: refused before anything is copied
             dest_parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(top, dest_parent / root, dirs_exist_ok=True)
+            if kind == "car" and (top / "data.acd").is_file():   # a new version of the physics replaces the old one: no stale loose `data/` beside the new data.acd (after the copy, so a failed copy never leaves a car without physics); skins still merge
+                shutil.rmtree(dest_parent / root / "data", ignore_errors=True)
             if stage is not None:
                 try:
                     from app import pitentry

@@ -171,12 +171,13 @@ def test_background_upload_reports_effective_kind_and_prunes_correctly(isolated_
     assert (dest / marker).is_file()
     assert not (content._content_dir() / f"{asked}s" / name).exists()
     assert not (dest / "model.kn5").exists()   # cars and tracks are always cut down, whatever `pack` says
-    assert (dest / "data/physics.ini").is_file()
     if effective == "car":
+        assert (dest / "data.acd").is_file() and not (dest / "data").exists()   # loose data/ is packed
         assert (dest / "ui/ui_car.json").is_file()
         assert (dest / "skins/red").is_dir()
         assert not (dest / "skins/red/body.dds").exists()
     else:
+        assert (dest / "data/physics.ini").is_file()
         assert (dest / "gp/data/surfaces.ini").is_file()
         assert (dest / "ui/gp/ui_track.json").is_file()
     assert isolated_uploads[-1] == ((0, "import_ok"), {"name": name, "track": effective})

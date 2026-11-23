@@ -101,3 +101,36 @@ def test_skin_pack_keeps_a_valid_livery_serves_it_and_drops_it_on_a_bad_resend()
     assert client.get("/api/v1/content/cars/lcar/skins/red/livery.png").status_code == 404, "a whole-car upload's unchecked file is not served"
     assert up(cortana=b"junk").status_code == 201
     assert client.get("/api/v1/content/cars/lcar/skins/cortana/livery.png").status_code == 404, "the pack replaces the skin: the old logo goes"
+
+
+def test_loose_data_is_packed_into_data_acd_and_new_version_replaces_it():
+    from app import acd
+
+    def loose(name, power):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(f"{name}/ui/ui_car.json", '{"name": "x"}')
+            zf.writestr(f"{name}/data/car.ini", f"[HEADER]\nPOWER={power}\n")
+            zf.writestr(f"{name}/data/extra.ini", "[A]\n")
+        return buf.getvalue()
+
+    post = lambda z: client.post("/api/v1/content/cars", files={"file": ("c.zip", z, "application/zip")})
+    assert post(loose("packme", 1)).status_code == 201
+    d = content._cars_dir() / "packme"
+    assert not (d / "data").exists() and (d / "data.acd").is_file()
+    assert acd.unpack((d / "data.acd").read_bytes(), "packme")["car.ini"] == b"[HEADER]\nPOWER=1\n"
+    assert next(c for c in client.get("/api/v1/content/cars").json() if c["car"] == "packme")["usable"]
+
+    (d / "data").mkdir()                                  # an old loose data/ left by an earlier upload
+    (d / "data" / "stale.ini").write_text("old")
+    assert post(loose("packme", 2)).status_code == 201    # new version: the old data/ goes, the new pack replaces data.acd
+    assert not (d / "data").exists()
+    assert acd.unpack((d / "data.acd").read_bytes(), "packme")["car.ini"] == b"[HEADER]\nPOWER=2\n"
+
+
+def test_acd_key_and_format_match_a_real_kunos_file():
+    from app import acd
+    # keys that decrypted the league server's real data.acd of these cars (the long name exercises the int32 overflow of the key)
+    assert acd.key("ks_mazda_787b") == b"177-121-208-61-54-63-8-99"
+    files = {"a.ini": b"[X]\nY=1\n", "b.lut": bytes(range(256))}
+    assert acd.unpack(acd.pack(files, "ks_mazda_787b"), "ks_mazda_787b") == files
