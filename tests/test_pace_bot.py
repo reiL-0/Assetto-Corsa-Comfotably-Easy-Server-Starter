@@ -1,5 +1,6 @@
 """The pace bot (ops/pace_bot.py): the .ai reader and the movement it makes for wait / lead / in, on a made-up circuit (no server, no website)."""
 import importlib.util
+import pytest
 import math
 import struct
 import time
@@ -272,3 +273,16 @@ def test_the_box_is_beside_the_pit_lane_line_on_the_left(tmp_path):
     far = bot.pose()
     bot.box_offset = 0.0
     assert far[:3] == bot.pose()[:3], "away from the box it is on the line"
+
+
+def test_find_ai_with_the_csp_required_track_name(tmp_path):
+    """With CSP required (a hosted client) the acServer says TRACK = csp/<build>/../<track>: the lines are still looked up under the plain folder name."""
+    kept = tmp_path / "lines" / "imola" / "-"
+    kept.mkdir(parents=True)
+    (kept / "fast_lane.ai").write_bytes(b"x")
+    (kept / "pit_lane.ai").write_bytes(b"x")
+    assert pb.find_ai("", "csp/3898/../imola", "", str(tmp_path / "lines")) == kept
+    assert pb.find_ai("", "csp/3898/../opts/../imola", "", str(tmp_path / "lines")) == kept
+    for bad in ("csp/3898/../..", "../../etc", "a/b", "..", ""):
+        with pytest.raises(FileNotFoundError):
+            pb.find_ai("", bad, "", str(tmp_path / "lines"))
