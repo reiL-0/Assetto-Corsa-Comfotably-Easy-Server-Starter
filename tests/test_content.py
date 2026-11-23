@@ -134,3 +134,9 @@ def test_acd_key_and_format_match_a_real_kunos_file():
     assert acd.key("ks_mazda_787b") == b"177-121-208-61-54-63-8-99"
     files = {"a.ini": b"[X]\nY=1\n", "b.lut": bytes(range(256))}
     assert acd.unpack(acd.pack(files, "ks_mazda_787b"), "ks_mazda_787b") == files
+
+
+def test_acd_pack_order_is_content_managers():
+    from app import acd
+    names = ["wing_rear.lut", "__cm_tyre_0.lut", "flame_presets.ini", "flames.ini", "suspension_graphics.ini", "suspensions.ini", "brakes.ini", "brakes - C-pia.ini", "aero.ini"]
+    assert sorted(names, key=acd.order) == ["aero.ini", "brakes - C-pia.ini", "brakes.ini", "flames.ini", "flame_presets.ini", "suspensions.ini", "suspension_graphics.ini", "wing_rear.lut", "__cm_tyre_0.lut"]
