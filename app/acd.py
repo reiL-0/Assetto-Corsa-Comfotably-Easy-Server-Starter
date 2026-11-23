@@ -42,10 +42,11 @@ def key(folder: str) -> bytes:
     return "-".join(str(v & 0xFF) for v in (a, b, c, d, e, f, g, h)).encode()
 
 
-def order(name: str) -> tuple:
-    """Where Content Manager puts a file in the pack (Windows' name order, `__cm_*` last): the same bytes as theirs, so a pilot's own data.acd has the same checksum as the server's.
-    Measured: 127 of the 128 real data.acd of the league's server follow it."""
-    return (name.startswith("__"), name.lower().replace("_", "~"))
+def order(name: str) -> str:
+    """Where Content Manager puts a file in the pack. It does not sort: it writes what `Directory.GetFiles` returns (AcTools/AcdFile/Acd.cs, FromDirectory), and NTFS lists names by their UPPER-CASE code units
+    (so `_` comes after every letter: `flames.ini` before `flame_presets.ini`, `__cm_*` last). Same bytes as theirs = the pilot's own data.acd has the same checksum as the server's.
+    Matches 128 of the 129 real data.acd we hold (the odd one out was packed by something else)."""
+    return name.upper()
 
 
 def pack(files: dict[str, bytes], folder: str) -> bytes:
