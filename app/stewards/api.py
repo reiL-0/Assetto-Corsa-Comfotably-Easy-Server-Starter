@@ -3,9 +3,10 @@ admin writes: the router guard in api/v1)."""
 
 import asyncio
 import time
+from collections import deque
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
@@ -22,6 +23,15 @@ router = APIRouter(prefix="/servers/{server_id}", tags=["stewards"])
 # The website files the drivers' reports with a token that may do THIS and nothing else (role `reporter`, the lowest; stewards and admins pass too, a plain driver does not). It is its own router because
 # the one above is included with the steward guard, whose writes need admin: a leaked website token must not be able to start, kick or read configs.
 report_router = APIRouter(prefix="/servers/{server_id}", tags=["stewards"], dependencies=[Depends(require_any("reporter", "steward", "admin"))])
+
+
+REPORTS_KEPT = 300   # track-limit reports kept per server for the stewards to read (memory only, the race audit keeps the same in order): about three races of cuts
+_recent: dict[int, deque] = {}   # server id -> {t, session_type, car_id, name, guid, decision, report}; `decision` is "counted" or the filter that dropped it
+
+
+def _remember(server_id: int, car_id: int, name: str, guid: str | None, session_type, decision: str, report: dict) -> None:
+    _recent.setdefault(server_id, deque(maxlen=REPORTS_KEPT)).append(
+        {"t": time.time(), "session_type": session_type, "car_id": car_id, "name": name, "guid": guid, "decision": decision, "report": report})
 
 
 class StewardsIn(BaseModel):
@@ -51,6 +61,26 @@ def set_stewards(server_id: int, body: StewardsIn, sess: SessionDep) -> ServerOu
 def get_track_limits(server_id: int, sess: SessionDep) -> TrackLimitsConfig:
     _get(sess, server_id)
     return limits_config.load(server_id)
+
+
+@router.get("/track-limits/reports")
+def recent_limit_reports(server_id: int, sess: SessionDep, guid: str | None = None, decision: str | None = None, all_sessions: bool = False, limit: int = Query(default=200, ge=1, le=REPORTS_KEPT)) -> dict:
+    """What the drivers' games reported as off-track excursions and what the manager decided with each one ("counted", or the filter that dropped it: min_speed, max_cut_s, min_slow_ratio,
+    post_cut_slowdown, between_s, wheels_out, during_caution): for a steward to review the filtered ones by hand and to calibrate the thresholds (speeds in km/h, `ms` the time outside).
+    With the server running: the current session, unless `all_sessions`. Stopped (after the race the server may have idled out): the last reports kept, which is when they are read. `summary` is per driver."""
+    _get(sess, server_id)
+    inst = next((i for i in supervisor.live() if i.server_id == server_id), None)
+    since = 0.0 if all_sessions or inst is None or inst.acsp is None else inst.acsp.session_t0
+    copy = list(_recent.get(server_id, ()))   # (one C-level copy: the event loop appends to the deque while this runs in a worker thread, and iterating it from Python code could raise "deque mutated")
+    rows = [r for r in copy if r["t"] >= since and (guid is None or r["guid"] == guid) and (decision is None or r["decision"] == decision)]
+    per: dict[str, dict] = {}
+    for r in rows:
+        d = per.setdefault(r["guid"] or r["name"], {"guid": r["guid"], "name": r["name"], "counted": 0, "filtered": {}})
+        if r["decision"] == "counted":
+            d["counted"] += 1
+        else:
+            d["filtered"][r["decision"]] = d["filtered"].get(r["decision"], 0) + 1
+    return {"summary": sorted(per.values(), key=lambda d: (-sum(d["filtered"].values()), -d["counted"])), "reports": rows[-limit:]}
 
 
 @router.put("/track-limits", response_model=TrackLimitsConfig, dependencies=[Depends(require_any("admin"))])
@@ -97,10 +127,14 @@ async def report_limits(server_id: int, body: LimitsIn, sess: SessionDep) -> Non
             now = time.monotonic()
             ok, reason = limits_filter.count_cut(cfg, body.model_dump(), now, rc.flag,
                                                 rc._limits_counted.get(body.car_id))
+            report = body.model_dump(exclude={"car_id", "name", "pos"})   # what the driver's game saw (the world position is left out): with the decision it is what a steward needs to say afterwards whether a filter was too strict or too lax
+            _remember(server_id, body.car_id, body.name, car.get("driver_guid"), (inst.acsp.session or {}).get("session_type"),
+                      "counted" if ok else reason, report)   # (the pace car never gets here: record_limits refuses it)
             if ok and body.car_id != rc.pace_car:
                 on_cuts(server_id, inst.acsp.session, body.car_id, 1, True)
                 rc._limits_counted[body.car_id] = now
+                rc.audit("cut_counted", car=body.car_id, report=report, executed=True)
             elif not ok:
-                rc.audit("cut_filtered", car=body.car_id, reason=reason, executed=False)
+                rc.audit("cut_filtered", car=body.car_id, reason=reason, report=report, executed=False)
         from app.live.racecontrol import on_excursion
         on_excursion(server_id, inst.acsp.session, body.car_id, body.ms, body.lap, body.spline)   # (the advantage judge: when the excursion started and how long it lasted)

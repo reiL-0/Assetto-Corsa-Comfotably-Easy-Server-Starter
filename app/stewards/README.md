@@ -27,6 +27,7 @@
 ### `api.py` (router con prefijo `/servers/{server_id}`; el guard de `api/v1` deja leer al comisario y escribir al admin)
 - `GET /incidents?kind=&limit=` → `Incident` más recientes primero (límite 500).
 - `POST /stewards/report` (ahora `async`: lee `cars`/`session` en el event loop; la comprobación del servidor va a un hilo) (`LimitsIn`: `car_id`, `name`, `ms`, `wheels`, `speed`, `lap`, `spline`, `pos`) → 204; 409 si el servidor no corre o ese auto no es ese piloto. Lo llama el **sitio** (`OPR WP/track_limits.py`) con el token del manager; la pide el script `opr_cuts.lua` del piloto.
+- `GET /track-limits/reports?guid=&decision=&all_sessions=&limit=` (comisario) → los últimos 300 reportes de salida de pista del servidor (memoria; `report_limits` los guarda) con la **decisión** de cada uno (`counted` o el filtro que lo descartó: `min_speed`, `max_cut_s`, `min_slow_ratio`, `post_cut_slowdown`, `between_s`, `wheels_out`, `during_caution`) y lo que vio el juego (`ms`, `wheels`, `speed`, `vo`, `vi`, `vp`, `lap`, `spline`; sin la posición), más un `summary` por piloto (contados y filtrados por razón). Con el servidor corriendo, la sesión actual (o todas con `all_sessions`); parado, los últimos guardados. El mismo reporte va al audit de carrera (`cut_filtered` con `report`, y `cut_counted`) para calibrar los umbrales con datos (antes solo se guardaba la razón).
 - `PUT /stewards` `{mode: off|shadow}` → cambia `Server.stewards` y devuelve el `ServerOut`.
 
 ## Datos
