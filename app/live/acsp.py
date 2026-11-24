@@ -59,6 +59,7 @@ COLLISION_WITH_CAR = 10
 COLLISION_WITH_ENV = 11
 
 
+SESSION_LAPS_MAX = 20000   # laps kept per session: 30 cars x 600 laps; a longer session simply stops adding (the result the manager would write is for a race, never this long)
 TRAIL = 50  # position samples kept per car (~10 s at the 5 Hz asked for)
 SWEEP_S = 10  # s between the questions "who is in this slot?" to the cars we think are connected (see `sweep`)
 POS_INTERVAL_MS = 200  # car positions to ask the server for (5 Hz is plenty for a map)
@@ -368,6 +369,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.run_release: dict[str, float] = {}   # guid -> the unix time its single run is let out (app/singlerunlive.py); one per session, kept in memory
         self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
         self.winner_done = False   # the winner of this race has been announced
+        self.session_laps: list[dict] = []   # every lap of the session being played, as it arrived (app/racesave.py writes the result from it when acServer cannot); `completed` is acServer's own has_completed for that car at that crossing
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
         self.oval = False          # the layout being raced is an oval (the admin's word, its tags, or the shape of the laps): no danger warning there
@@ -429,6 +431,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self._length_logged = None
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
+                    self.session_laps = []
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
                 if nascar is not None:
                     try:
@@ -462,6 +465,11 @@ class ACSPClient(asyncio.DatagramProtocol):
             for row in event["leaderboard"]:
                 cid, laps = row["car_id"], row["laps"]
                 self.field.completed_laps[cid] = max(laps, self.field.completed_laps.get(cid, laps))
+            mine = next((r for r in event["leaderboard"] if r["car_id"] == event["car_id"]), None)
+            keep = len(self.session_laps) < SESSION_LAPS_MAX or bool(mine and mine.get("has_completed") and not any(x["completed"] and x["car_id"] == event["car_id"] for x in self.session_laps))   # (past the cap only a car's FIRST finish is kept: without it the race could never be saved, and a car that goes on lapping adds nothing)
+            if keep and (who := self.board._by_car(event["car_id"])):   # (a car nobody is known to drive has no result to give)
+                self.session_laps.append({"car_id": event["car_id"], "guid": who.guid, "name": who.name, "model": who.model, "ms": event["laptime_ms"], "cuts": event.get("cuts") or 0,
+                                          "at": time.time(), "laps": mine["laps"] if mine else None, "completed": bool(mine and mine.get("has_completed"))})
             if (self.session or {}).get("session_type") == 1 and not self.keep_off:   # the practice is kept across an idle stop (app/practicekeep.py)
                 from app import practicekeep
                 practicekeep.save(self.server_id, self.board, event.get("grip_level"))

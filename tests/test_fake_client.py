@@ -271,6 +271,65 @@ def test_the_manager_writes_the_saved_grid_by_itself_in_the_last_seconds_of_the_
         gridtimes.clear_order(SID)
 
 
+def test_a_restart_pressed_after_the_chequered_flag_does_not_lose_the_race(tmp_path, monkeypatch):
+    """The incident of server 3 (2026-11-22) on the real acServer: two drivers finish a 2-lap race, the steward restarts the session, and acServer writes NO result
+    (it only does on the way to the next session). The manager's own copy (app/racesave.py) is there, with the leader first and each driver ending at his completed lap."""
+    import asyncio
+    from app import racesave
+    from app.config import settings
+    from app.live import acsp as acsp_mod
+    from app.results import parse_result_file
+    SID = 7702
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    rig = Rig(tmp_path, plugin=False)
+
+    async def run():
+        client = await acsp_mod.connect(SID, remote_port=19601, local_port=19602, car_slots=3)
+        try:
+            ds = await asyncio.to_thread(rig.join, 2)
+            await asyncio.sleep(1)
+            for _ in range(2):                                                    # practice -> qualify -> race
+                before = [d.new_sessions for d in ds]
+                for _try in range(3):                                             # (the first NEXT_SESSION can be swallowed: it is sent again)
+                    client.send(acsp.encode_next_session())
+                    end = time.time() + 4
+                    while time.time() < end and any(d.new_sessions == b for d, b in zip(ds, before)):
+                        await asyncio.sleep(0.1)
+                    if all(d.new_sessions > b for d, b in zip(ds, before)):
+                        break
+            assert all(d.session_type == fc.RACE for d in ds)
+            await asyncio.sleep(24)                                               # the race countdown of the simulator: laps before it are refused
+            for d in ds:
+                d.set_speed(150.0)
+            for _n in (1, 2):
+                for slot, ms in ((0, 90_000), (1, 90_500)):
+                    ds[slot].lap(ms)
+                    await asyncio.sleep(1.2)
+            end = time.time() + 10
+            while time.time() < end and not any(lap["completed"] for lap in client.session_laps):
+                await asyncio.sleep(0.2)
+            assert any(lap["completed"] for lap in client.session_laps), "acServer never said a car completed the race"
+            saved = racesave.save(SID, client)                                    # what restart_session / stop do first
+            client.send(acsp.encode_restart_session())
+            await asyncio.sleep(2)
+            return saved
+        finally:
+            if client.transport:
+                client.transport.close()
+            for t in (client.grid_task, getattr(client, "_hello", None), getattr(client, "_sweep", None)):
+                if t:
+                    t.cancel()
+    try:
+        saved = asyncio.run(run())
+        assert saved and saved.exists(), "the manager wrote the finished race"
+        assert not list((rig.dir / "results").glob("*_RACE.json")), "acServer itself wrote nothing: that is the loss"
+        classification = parse_result_file(saved)["classification"]
+        assert [e["driver_guid"] for e in classification] == [str(GUIDS[0]), str(GUIDS[1])], classification   # Ana (by Steam ID: the fake driver's name does not reach the board) finished first
+        assert [e["total_time_ms"] for e in classification] == [180_000, 181_000]
+    finally:
+        rig.close()
+
+
 # --- the wire format and the framing of the fake driver itself: no simulator needed -------------------------------------------------------------------------------------
 
 def _s8(t):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import logging
 import threading
 from contextlib import contextmanager
 import time
@@ -20,7 +21,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import func
 from sqlmodel import select
 
-from app import supervisor
+from app import racesave, supervisor
 from app import csp
 from app.live import cspweather
 from app.auth import CurrentUser, require
@@ -56,6 +57,8 @@ from app.schemas.servers import (  # noqa: F401 - re-exported: other modules imp
     GridIn,
     AdminCommandIn,
 )
+
+log = logging.getLogger("acmanager.servers")
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 # Live moderation actions: stewards may use these; everything else on `router` is admin-write.
@@ -651,10 +654,23 @@ def next_session(server_id: int, sess: SessionDep) -> dict:
 
 
 @steward.post("/{server_id}/restart_session")
-def restart_session(server_id: int, sess: SessionDep) -> dict:
+def restart_session(server_id: int, sess: SessionDep, force: bool = False) -> dict:
+    """RESTART_SESSION throws the session away and acServer writes no result on it: a race that already finished is saved first (app/racesave.py).
+    If it cannot be written the restart is refused (500) unless `force`; a NASCAR race that is closing (its result comes with NEXT_SESSION) is refused too (409)."""
     _get(sess, server_id)
-    _acsp(server_id).send(acsp.encode_restart_session())
-    return {"sent": True}
+    client = _acsp(server_id)
+    saved = None
+    try:
+        saved = racesave.save(server_id, client)
+    except OSError as e:
+        log.error("server %s: the finished race could not be saved before the restart: %s", server_id, e)
+        if not force:
+            raise HTTPException(500, "the result of the finished race could not be saved: nothing was restarted (retry, or force=true to lose it)") from e
+    now = time.time()
+    if not force and saved is None and unsaved_race_finish(racesave.results_dir(server_id), now, max_age=max(0.0, now - client.session_t0)):   # (a marker of an earlier session is not this one's)
+        raise HTTPException(409, "a race is closing and its result is not saved yet: use next_session (acServer writes it), or force=true to lose it")
+    client.send(acsp.encode_restart_session())
+    return {"sent": True, "saved": saved.name if saved else None}
 
 
 @steward.post("/{server_id}/session_info")
