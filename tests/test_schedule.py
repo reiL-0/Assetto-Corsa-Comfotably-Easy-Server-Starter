@@ -15,10 +15,11 @@ from app.models import Schedule
 client = TestClient(app, headers=ADMIN)
 
 
-def _setup(start_in: float, reminders=(60, 10), duration=None):
+def _setup(start_in: float, reminders=(60, 10), duration=None, practice_min=None):
     sid = client.post("/api/v1/servers", json={"name": "SchedServer"}).json()["id"]
     client.put(f"/api/v1/servers/{sid}/wake", json={"mode": "window"})   # new servers default to always
-    eid = client.post("/api/v1/events", json={"title": "Endurance R5", "session": {"name": "x", "track": "spa", "cars": ["bmw"]}}).json()["id"]
+    session = {"name": "x", "track": "spa", "cars": ["bmw"], **({"practice_min": practice_min} if practice_min else {})}
+    eid = client.post("/api/v1/events", json={"title": "Endurance R5", "session": session}).json()["id"]
     r = client.post("/api/v1/schedules", json={"event_id": eid, "server_id": sid, "start_at": time.time() + start_in,
                                                "reminders": list(reminders), "duration_min": duration})
     assert r.status_code == 201, r.text
@@ -143,7 +144,7 @@ def test_window_opens_an_hour_before_and_closes_at_the_end(monkeypatch):
 
 
 def test_wake_loads_the_event_once_then_just_starts_the_server(monkeypatch):
-    sid, sc = _setup(1800, reminders=(), duration=60)
+    sid, sc = _setup(1800, reminders=(), duration=60, practice_min=10)   # (an event with no practice is not woken before its hour: tests/test_practice_on_time.py)
     t0, applied, started = sc["start_at"], [], []
     monkeypatch.setattr(schedule.supervisor, "get", lambda _id: None)
 
