@@ -23,7 +23,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-from app import integrity, metrics, votes
+from app import integrity, metrics, racesave, votes
 from app.config import settings
 from app.live import acsp
 from app.live.logboard import LogBoard
@@ -33,6 +33,7 @@ log = logging.getLogger("acmanager.supervisor")
 IDLE_POLL = 15.0  # seconds between idle checks
 SAMPLE_EVERY = 60.0  # how often the number of players on track is recorded
 WATCH_EVERY = 0.25  # how often the process (and the log file) is looked at
+SAVE_BEFORE_STOP_S = 10   # s a stop waits for the manager to write a finished race (app/racesave.py) before it signals the process
 STOP_GRACE = 10.0  # SIGTERM -> SIGKILL
 INFO_EVERY = 60.0  # how often the server's own /INFO answer is copied to info.json (what app/wake.py shows while it is stopped)
 
@@ -276,6 +277,11 @@ class Instance:
 
     async def stop(self, timeout: float = STOP_GRACE, reason: str = "manual") -> None:
         if self.running:
+            if self.acsp:   # a race that finished and acServer has not written yet is lost with the process: the manager writes it first (app/racesave.py); a stop never waits on a failure
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(racesave.save, self.server_id, self.acsp), SAVE_BEFORE_STOP_S)
+                except (OSError, TimeoutError):   # (the write goes on in its thread if it was only slow: the stop does not wait for a disk)
+                    log.exception("server %s: the finished race could not be saved before stopping", self.server_id)
             self._stopping = True
             if self.http_port:
                 await self._snapshot_info()
