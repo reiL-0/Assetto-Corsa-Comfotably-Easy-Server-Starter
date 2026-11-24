@@ -80,16 +80,17 @@ def _downloads(session: dict) -> str:
     return ("⬇️ **DESCARGAS**\n" + "\n".join(f"• {'Pista' if x['kind'] == 'track' else 'Auto'} {x['name']}: <{x['url']}>" for x in links)) if links else ""
 
 
-def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "", league_id: int | None = None) -> dict[str, str]:
-    """Every `{name}` of `VARS` for one event. `start_at` is when the practice opens; qualifying and race follow one after the other."""
+def variables(title: str, server: str, session: dict, start_at: float, counts: dict[str, int], notes: str = "", info: str = "", league_id: int | None = None, result_s: int = 0) -> dict[str, str]:
+    """Every `{name}` of `VARS` for one event. `start_at` is when the practice opens; qualifying and race follow one after the other, each after the results screen of the one before (`result_s`: the
+    server's RESULT_SCREEN_TIME), so the hours are the earliest the session can begin: never before what is said, a few minutes after only when the qualifying runs over."""
     at = int(start_at)
     fmt = []
     if session.get("practice_min"):
         fmt.append(f"🟢 Práctica: {session['practice_min']} min · <t:{at}:t>")
-        at += session["practice_min"] * 60
+        at += session["practice_min"] * 60 + result_s
     if session.get("qualify_min"):
         fmt.append(f"⏱️ Clasificación: {session['qualify_min']} min · <t:{at}:t>")
-        at += session["qualify_min"] * 60
+        at += session["qualify_min"] * 60 + result_s
     race = _plural(session["race_laps"], "vuelta", "vueltas") if session.get("race_laps") else f"{session['race_min']} min" if session.get("race_min") else ""
     if race:
         fmt.append(f"🏁 Carrera: {race} · <t:{at}:t>")

@@ -40,6 +40,7 @@ async def lifespan(_app: FastAPI):
     log.info("store ready at %s", settings.resolved_db_path())
     log.info("serve_ui=%s cors_origins=%s", settings.serve_ui, settings.cors_origins)
     ticker = asyncio.create_task(schedule.run_forever())
+    aligning = asyncio.create_task(schedule.realign_forever())   # a practice that began early is started again ON the hour (once a second: the tick above is every 20 s and does Discord)
     judging = asyncio.create_task(race_control.monitor_forever())   # the virtual safety car: judges the drivers when its grace ends
     waking = asyncio.create_task(wake.run_forever())
     sampling = asyncio.create_task(resourcelog.run_forever())   # a plain log file of CPU/RAM/steal per server, outside the pages
@@ -49,11 +50,12 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         ticker.cancel()
+        aligning.cancel()
         judging.cancel()
         waking.cancel()
         sampling.cancel()
         retention_stop.set()
-        await asyncio.gather(ticker, judging, waking, sampling, return_exceptions=True)
+        await asyncio.gather(ticker, aligning, judging, waking, sampling, return_exceptions=True)
         await retention
         if not await asyncio.to_thread(metrics.flush, 8):
             log.warning("shutting down with %s metric events still queued: they are lost", metrics.stats()["queued"])
