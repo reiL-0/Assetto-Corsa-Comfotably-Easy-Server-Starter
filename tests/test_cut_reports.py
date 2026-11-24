@@ -41,7 +41,7 @@ def _as(role):
 @pytest.fixture
 def world(monkeypatch):
     session = {"session_type": 3}
-    client = SimpleNamespace(cars={1: {"driver_name": "Ana", "driver_guid": "76561190000000001"}, 2: {"driver_name": "Beto", "driver_guid": "76561190000000002"}}, session=session, session_t0=time.time() - 60)
+    client = SimpleNamespace(cars={1: {"driver_name": "Ana", "driver_guid": "76561190000000001"}, 2: {"driver_name": "Beto", "driver_guid": "76561190000000002"}}, session=session, session_t0=time.time() - 60, session_started=time.time() - 80)
     monkeypatch.setattr(api, "_get", lambda *a: None)
     monkeypatch.setattr(api.supervisor, "live", lambda: [SimpleNamespace(server_id=SID, acsp=client)])
     monkeypatch.setattr(store, "load", lambda sid: Config(min_speed_kmh=40, between_s=3))
@@ -102,7 +102,7 @@ def test_stewards_read_a_summary_per_driver_and_can_filter_it(world, monkeypatch
 def test_only_the_current_session_unless_asked_for_all(world, monkeypatch):
     client, _, _ = world
     _report(1, "Ana", 10, monkeypatch)
-    api._recent[SID].append({"t": client.session_t0 - 500, "session_type": 2, "car_id": 1, "name": "Ana", "guid": "76561190000000001", "decision": "min_speed", "report": {}})   # the qualifying before
+    api._recent[SID].append({"t": client.session_started - 500, "session_type": 2, "car_id": 1, "name": "Ana", "guid": "76561190000000001", "decision": "min_speed", "report": {}})   # the qualifying before
     steward = _as("steward")
     assert len(steward.get(f"{V}/servers/{SID}/track-limits/reports").json()["reports"]) == 1
     assert len(steward.get(f"{V}/servers/{SID}/track-limits/reports?all_sessions=true").json()["reports"]) == 2
@@ -129,3 +129,13 @@ def test_with_the_server_stopped_the_last_reports_kept_are_still_read(world, mon
     monkeypatch.setattr(api.supervisor, "live", lambda: [])
     body = _as("steward").get(f"{V}/servers/{SID}/track-limits/reports").json()
     assert [r["decision"] for r in body["reports"]] == ["min_speed"]
+
+
+def test_a_report_during_the_countdown_of_the_race_is_part_of_the_current_session(world, monkeypatch):
+    """session_t0 is the GREEN flag of a race: during the wait (and again after a restart_session) it lies in the future, and filtering by it hid reports that were there (found on the staging VPS)."""
+    client, _, _ = world
+    client.session_t0 = time.time() + 15   # the green is in 15 s
+    client.session_started = time.time() - 5
+    _report(1, "Ana", 10, monkeypatch)
+    body = _as("steward").get(f"{V}/servers/{SID}/track-limits/reports").json()
+    assert [r["name"] for r in body["reports"]] == ["Ana"], "the session began 5 s ago: the report belongs to it"

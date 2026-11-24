@@ -70,7 +70,7 @@ def recent_limit_reports(server_id: int, sess: SessionDep, guid: str | None = No
     With the server running: the current session, unless `all_sessions`. Stopped (after the race the server may have idled out): the last reports kept, which is when they are read. `summary` is per driver."""
     _get(sess, server_id)
     inst = next((i for i in supervisor.live() if i.server_id == server_id), None)
-    since = 0.0 if all_sessions or inst is None or inst.acsp is None else inst.acsp.session_t0
+    since = 0.0 if all_sessions or inst is None or inst.acsp is None else inst.acsp.session_started   # (the session's beginning, not its green flag: a race waits first, and a restart waits again)
     copy = list(_recent.get(server_id, ()))   # (one C-level copy: the event loop appends to the deque while this runs in a worker thread, and iterating it from Python code could raise "deque mutated")
     rows = [r for r in copy if r["t"] >= since and (guid is None or r["guid"] == guid) and (decision is None or r["decision"] == decision)]
     per: dict[str, dict] = {}
