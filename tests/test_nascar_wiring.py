@@ -1330,34 +1330,40 @@ def test_the_director_can_launch_a_fake_winner_notice_to_see_the_banner(live):
     assert _client('steward').post(url, json={'name': ''}).status_code == 422
 
 
-def test_a_race_without_nascar_announces_the_first_car_to_finish_the_laps_or_the_time(live, monkeypatch):
+def test_a_race_without_nascar_announces_the_winner_when_the_leader_completes_the_race(live, monkeypatch):
     sid, client, _ = live
     monkeypatch.setattr(client, '_record', lambda e: None)
     from app.stewards import engine
     monkeypatch.setattr(engine, 'on_event', lambda *args: None)
     _field(client, c3=(0.50, 2), c4=(0.48, 2))
-    lap = lambda car, laps: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps - 1, 'laptime_ms': 1000}] if car == 3 else [{'car_id': 3, 'laps': laps, 'laptime_ms': 1000}, {'car_id': 4, 'laps': laps, 'laptime_ms': 1000}]})
-    winners = lambda: [n['text'] for n in live_rc.state_of(sid, True, client.session, create=True).snapshot()['notices'] if n['text'].startswith('GANADOR')]
-    client.session = {'session_type': 3, 'laps': 3, 'time_min': 0}; client.winner_done = False
+    lap = lambda car, laps, done=(): client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [
+        {'car_id': 3, 'laps': laps, 'laptime_ms': 1000, 'has_completed': 3 in done}, {'car_id': 4, 'laps': laps - 1 if car == 3 else laps, 'laptime_ms': 1000, 'has_completed': 4 in done}]})
+    notices = lambda start: [n['text'] for n in live_rc.state_of(sid, True, client.session, create=True).snapshot()['notices'] if n['text'].startswith(start)]
+    winners, whites, flags = (lambda: notices('GANADOR')), (lambda: notices('BANDERA BLANCA')), (lambda: notices('BANDERA DE CUADROS'))
+    client.session = {'session_type': 3, 'laps': 3, 'time_min': 0}; client.winner_done = False; client.last_lap_shown = False
+    lap(3, 1)
+    assert winners() == [] and whites() == [], 'one lap of three'
     lap(3, 2)
-    assert winners() == [], 'two laps of three'
-    lap(3, 3); lap(4, 3)
-    assert winners() == ['GANADOR: Ana'], 'the first to complete the distance, once'
-    client.session = {'session_type': 3, 'laps': 0, 'time_min': 10}; client.winner_done = False; client.session_t0 = time.time() - 30
+    assert winners() == [] and whites() == ['BANDERA BLANCA: última vuelta'], 'the leader starts the last lap: the white flag, once'
+    lap(4, 2)
+    lap(3, 3)
+    assert winners() == [], 'the distance is done but acServer has not said the leader completed it'
+    lap(3, 3, done=(3,)); lap(4, 3, done=(3, 4))
+    assert winners() == ['GANADOR: Ana'] and flags() == ['BANDERA DE CUADROS'] and whites() == ['BANDERA BLANCA: última vuelta'], 'the leader completed: chequered flag and winner, once'
+    assert live_rc.state_of(sid, True, client.session, create=True).flag == 'checkered', 'the chequered flag is in the state: the hub draws it from there'
+    client.session = {'session_type': 3, 'laps': 0, 'time_min': 10}; client.winner_done = False; client.last_lap_shown = False; client.session_t0 = time.time() - 601
     live_rc._states.clear()
     lap(4, 5)
-    assert winners() == [], 'ten minutes have not passed'
-    client.session_t0 = time.time() - 601
-    client._apply({'type': 'lap_completed', 'car_id': 4, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 6, 'laptime_ms': 1000}, {'car_id': 4, 'laps': 5, 'laptime_ms': 1000}]})
-    assert winners() == ['GANADOR: Ana'], 'a timed race: the leader, even when a lapped car is the first to cross after the time (tests/test_winner_leader.py replays real races)'
+    assert winners() == [], 'the time is over but a car behind crossed first: it is not the leader and acServer did not flag it'
+    lap(3, 6, done=(3,))
+    assert winners() == ['GANADOR: Ana'], 'a timed race: the winner is named when the LEADER completes his last lap (tests/test_winner_leader.py replays real races)'
     client.session = {'session_type': 2, 'laps': 0, 'time_min': 10}; client.winner_done = False; live_rc._states.clear()
-    lap(4, 7)
+    lap(4, 7, done=(3, 4))
     assert winners() == [], 'only a race has a winner'
 
 
 def _break_notices(rc):
     return [n['text'] for n in rc.snapshot()['notices']]
-
 
 def test_a_stage_break_opens_the_pits_and_says_the_lap_where_the_green_comes(live):
     sid, client, _ = live

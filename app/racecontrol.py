@@ -1102,24 +1102,98 @@ def race_leader(event: dict, pace: int | None = None) -> int:
     return tied[0]
 
 
+LEADER_GRACE_S = 120   # s after the first completed car without the leader completing (he retired on his last lap): the best placed completed car is the winner. The wait is the longer of this and 3 of his laps
+
+
+def _flag_out(rc, flag: str) -> bool:
+    """The flag the director's button would show, from the state: the hub draws white and chequered from `rc.flag` and DROPS notices with their text (hl_hub.lua NOTICE_SKIP). Only from green or
+    white, checked and set under the same lock (the director's VSC may arrive from another thread): a VSC, an FCY or a yellow in force is not taken off by a flag that only says the race is ending.
+    True = shown. Like the director's own chequered flag, it ends what only runs under green or white (the automatic blue / danger flags, DRS) for the cars still on their last lap."""
+    with _lock:
+        if rc.flag not in ("green", "white") or rc.flag == flag:
+            return False
+        rc.set_flag(flag, source="finish")
+    _say(rc, SAY[flag], "flag")
+    return True
+
+
+def _declare_winner(client, rc, win: int, crossing: int) -> None:
+    client.winner_done = True
+    name = client.cars.get(win, {}).get("driver_name") or f"#{win}"
+    log.info("winner: car %s (%s) completed the race, crossing car %s", win, name, crossing)
+    client.finish_flag_pending = not _flag_out(rc, "checkered")   # (a caution in force: the flag waits for the green, `plain_finish_tick`)
+    rc.notify(f"GANADOR: {name}", "winner", hold="winner")
+
+
 def plain_winner(client, event: dict) -> None:
-    """A race without NASCAR: the winner is the first car to cross the line after the end (the distance in laps, or the time of a timed race), as AC itself ranks it (laps, then time)."""
+    """A race without NASCAR: the chequered flag and the winner come when acServer says the LEADER completed the race (`has_completed` of his row of the leaderboard), never when the time
+    runs out or when the first car crosses after it. In a timed race the time ends and every car drives the lap it is on: the leader's crossing is the finish, and a car that crosses before him
+    (a lapped one, or one behind) goes on until the next crossing (real race, 15 Nov: Joseph crossed at 1811 s and raced to 1932 s; the leader finished at 1851 s). In a race by laps it is the
+    same moment. The leader = most laps, a tie to the first row (acServer lists them in race order). The white flag of a race by laps is the leader's last lap; of a timed one, `plain_white_tick`.
+    If the leader never completes (he retired on his last lap) `plain_finish_tick` names the best placed car acServer marked completed once the wait has passed."""
     s = client.session
     if s.get("session_type") != 3 or client.winner_done:
-        return
-    row = next((r for r in event["leaderboard"] if r["car_id"] == event["car_id"]), None)
-    goal = s.get("laps") or 0
-    over = (row is not None and row["laps"] >= goal) if goal else (bool(s.get("time_min")) and time.time() - client.session_t0 >= s["time_min"] * 60)
-    if not over:
         return
     rc = state_of(client.server_id, True, s, create=True)
     if event["car_id"] == rc.pace_car:
         return   # (the safety car crossing the line ends nothing)
-    client.winner_done = True
-    win = race_leader(event, rc.pace_car)   # (not the car that crossed: in a timed race a lapped car can be the first over the line after the time)
-    name = client.cars.get(win, {}).get("driver_name") or f"#{win}"
-    log.info("winner: car %s (%s), crossing car %s", win, name, event["car_id"])
-    rc.notify(f"GANADOR: {name}", "winner", hold="winner")
+    win = race_leader(event, rc.pace_car)
+    row = next((r for r in event["leaderboard"] if r["car_id"] == win), None)
+    if row is None:
+        return
+    if row.get("has_completed"):
+        _declare_winner(client, rc, win, event["car_id"])
+        return
+    goal = s.get("laps") or 0
+    if goal and row["laps"] == goal - 1 and not getattr(client, "last_lap_shown", False):   # the leader starts the last lap of a race by laps
+        client.last_lap_shown = True
+        _flag_out(rc, "white")
+    client.done_ids = [r["car_id"] for r in event["leaderboard"] if r.get("has_completed") and r["car_id"] != rc.pace_car]   # (acServer's order: laps, then time)
+    if client.done_ids and not getattr(client, "first_done_at", 0.0):   # somebody finished but the leader has not: the wait for him starts
+        best = next((d.best_ms for d in client.board.drivers if d.car_id == win), 0) if hasattr(client, "board") else 0
+        client.first_done_at, client.finish_grace_s = time.time(), max(LEADER_GRACE_S, 3 * best / 1000)
+
+
+def plain_finish_tick(now: float) -> None:
+    """Two things `plain_winner` cannot do by itself because no lap event may come: name the winner when the leader never completed (the wait is over), and show the chequered flag that waited
+    for a caution to end."""
+    for inst in supervisor.live():
+        client = inst.acsp
+        if client is None or (client.session or {}).get("session_type") != 3:
+            continue
+        rc = state_of(client.server_id, True, client.session)
+        if rc is None or rc.nascar:
+            continue
+        if client.winner_done and client.finish_flag_pending and _flag_out(rc, "checkered"):
+            client.finish_flag_pending = False
+        elif not client.winner_done and client.first_done_at and client.done_ids and now - client.first_done_at >= client.finish_grace_s:
+            _declare_winner(client, rc, client.done_ids[0], client.done_ids[0])
+
+
+WHITE_ASK_FROM_S = 3   # s before the end by the MANAGER's clock from which acServer is asked for ITS clock, once a second
+WHITE_ANSWER_MAX_S = 3   # s an answer of acServer stays valid for the white flag
+
+
+def plain_white_tick(now: float) -> None:
+    """The white flag of a timed race without NASCAR, shown only when acServer ITSELF has said the time is over: the manager's clock (`session_t0`) only says when to start asking (once a second);
+    the flag needs an answer (SESSION_INFO) of the last few seconds whose own `elapsed_ms` is at or past the limit: nothing is extrapolated, so it is never early. It comes at most a second late."""
+    for inst in supervisor.live():
+        client = inst.acsp
+        if client is None:
+            continue
+        s = client.session or {}
+        limit = (s.get("time_min") or 0) * 60
+        if s.get("session_type") != 3 or not limit or s.get("laps") or client.winner_done or client.last_lap_shown or now - client.session_t0 < limit - WHITE_ASK_FROM_S:
+            continue
+        rc = state_of(client.server_id, True, s)
+        if rc is None or rc.nascar:
+            continue
+        if now - client.info_ask >= 1.0:
+            client.info_ask = now
+            client.send(acsp.encode_get_session_info(-1))
+        if now - client.info_at <= WHITE_ANSWER_MAX_S and client.info_elapsed_ms >= limit * 1000:
+            client.last_lap_shown = True   # (also when a caution is out and the flag is not shown: asking stops either way)
+            _flag_out(rc, "white")
 
 
 def auto_green(server_id: int, rc, car: int) -> None:
@@ -1496,6 +1570,8 @@ async def monitor_forever() -> None:
         try:
             now = time.time()
             finish_nascar(now)
+            plain_white_tick(now)
+            plain_finish_tick(now)
             await stop_saved_races(now)
             caution_tick(now)
             from app.league import neutralization_rule, neutralization_rule_stale

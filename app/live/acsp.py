@@ -370,6 +370,14 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
         self.winner_done = False   # the winner of this race has been announced
         self.session_laps: list[dict] = []   # every lap of the session being played, as it arrived (app/racesave.py writes the result from it when acServer cannot); `completed` is acServer's own has_completed for that car at that crossing
+        self.last_lap_shown = False   # the white flag of this race has been shown (app/racecontrol.py plain_white_tick / plain_winner)
+        self.info_at = 0.0   # when acServer last told us ITS session clock (SESSION_INFO), and what it said (`info_elapsed_ms`): the white flag of a timed race is shown from THAT word, never extrapolated
+        self.info_elapsed_ms = 0
+        self.info_ask = 0.0   # when we last asked it
+        self.first_done_at = 0.0   # when the first car of this race was marked completed by acServer while the leader had not been (the winner's fallback wait, app/racecontrol.py plain_finish_tick)
+        self.finish_grace_s = 0.0   # how long to wait for the leader
+        self.done_ids: list[int] = []   # the cars acServer marked completed, in its order, as of the last lap event
+        self.finish_flag_pending = False   # the winner was named under a caution: the chequered flag waits for the green
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
         self.oval = False          # the layout being raced is an oval (the admin's word, its tags, or the shape of the laps): no danger warning there
@@ -421,6 +429,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     if event.get("session_index", event.get("current_session_index")) == event.get("current_session_index"):   # (only the description of the CURRENT session: the answer about another one, e.g. to the redefinition of session 0 the timeline makes when a race starts, must not turn the race into a practice)
                         self.session.update(event)
                         self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
+                        self.info_at, self.info_elapsed_ms = time.time(), event.get("elapsed_ms") or 0
                 else:
                     self.session = event
                     self.run_release = {}   # single-run qualifying: the release times of this session (app/singlerunlive.py)
@@ -432,6 +441,8 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
                     self.session_laps = []
+                    self.last_lap_shown = False
+                    self.info_at, self.info_elapsed_ms, self.first_done_at, self.finish_grace_s, self.done_ids, self.finish_flag_pending = 0.0, 0, 0.0, 0.0, [], False   # (the answers and the finish of the session that ended are not this one's)
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
                 if nascar is not None:
                     try:
