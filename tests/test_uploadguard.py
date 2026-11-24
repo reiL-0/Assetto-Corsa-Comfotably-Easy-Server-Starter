@@ -273,3 +273,19 @@ def test_an_uploaded_track_keeps_its_lines_for_the_pace_bot_only_when_it_is_inst
     refused = client.post("/api/v1/content/tracks", files={"file": ("pl2.zip", _zip(other), "application/zip")})
     assert refused.status_code == 413, refused.text
     assert (kept / "fast_lane.ai").read_bytes() == first, "the refused upload did not touch the kept lines"
+
+
+def test_markers_ignore_the_case_of_names(tmp_path):
+    """Mods made on Windows ship «UI/ui_car.json» or «Data/Surfaces.ini»: they must still be recognised on Linux."""
+    car = tmp_path / "car" / "audi" / "UI"
+    car.mkdir(parents=True)
+    (car / "UI_Car.json").write_text("{}")
+    trk = tmp_path / "trk" / "monza" / "Data"
+    trk.mkdir(parents=True)
+    (trk / "Surfaces.ini").write_text("s")
+    uitrk = tmp_path / "trk2" / "oval" / "UI" / "Oval"
+    uitrk.mkdir(parents=True)
+    (uitrk / "UI_Track.json").write_text("{}")
+    assert uploadguard.find_content_root(tmp_path / "car") == (tmp_path / "car" / "audi", "car")
+    assert uploadguard.find_content_root(tmp_path / "trk")[1] == "track"
+    assert uploadguard.find_content_root(tmp_path / "trk2")[1] == "track"

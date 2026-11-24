@@ -79,11 +79,20 @@ def check_tree(root: Path, *, max_files: int = MAX_FILES, max_total: int = MAX_T
             raise Rejected("the archive unpacks to more files or bytes than allowed")
 
 
+def _ci(top: Path, *parts: str) -> Path | None:
+    """The FILE `top/parts…` ignoring the case of every name (mods made on Windows ship «UI/ui_car.json» or «Data/Surfaces.ini»; Linux would not find them)."""
+    for part in parts:
+        top = next((p for p in top.iterdir() if p.name.lower() == part), None) if top and top.is_dir() else None
+    return top if top and top.is_file() else None
+
+
 def _markers(top: Path) -> tuple[bool, bool]:
-    """(looks like a car, looks like a track) from files directly inside `top`."""
+    """(looks like a car, looks like a track) from files directly inside `top`; names are matched ignoring case."""
     names = {p.name.lower() for p in top.iterdir() if p.is_file()}
-    car = (top / "ui" / "ui_car.json").is_file() or "data.acd" in names or (top / "data" / "car.ini").is_file()
-    track = any(n.startswith("models") and n.endswith(".ini") for n in names) or (top / "data" / "surfaces.ini").is_file() or any(p.is_file() for p in top.glob("ui/**/ui_track.json"))
+    ui = next((p for p in top.iterdir() if p.is_dir() and p.name.lower() == "ui"), None)
+    car = bool(_ci(top, "ui", "ui_car.json")) or "data.acd" in names or bool(_ci(top, "data", "car.ini"))
+    track = (any(n.startswith("models") and n.endswith(".ini") for n in names) or bool(_ci(top, "data", "surfaces.ini"))
+             or bool(ui and any(p.is_file() and p.name.lower() == "ui_track.json" for p in ui.rglob("*"))))
     return car, track
 
 
