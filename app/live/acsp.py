@@ -368,6 +368,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.session: dict = {}
         self.run_release: dict[str, float] = {}   # guid -> the unix time its single run is let out (app/singlerunlive.py); one per session, kept in memory
         self.session_t0 = 0.0   # wall clock of the start of the session being played (from `elapsed_ms`), to know when a timed race is over
+        self.session_started = 0.0   # when the manager saw this session BEGIN (its NEW_SESSION): `session_t0` is the green flag of a race, which comes after the wait and so lies in the future during it
         self.winner_done = False   # the winner of this race has been announced
         self.session_laps: list[dict] = []   # every lap of the session being played, as it arrived (app/racesave.py writes the result from it when acServer cannot); `completed` is acServer's own has_completed for that car at that crossing
         self.last_lap_shown = False   # the white flag of this race has been shown (app/racecontrol.py plain_white_tick / plain_winner)
@@ -441,6 +442,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self._look_up_length(event.get("track"), event.get("track_config") or None)
                     self.winner_done = False
                     self.session_laps = []
+                    self.session_started = time.time()
                     self.last_lap_shown = False
                     self.info_at, self.info_elapsed_ms, self.first_done_at, self.finish_grace_s, self.done_ids, self.finish_flag_pending = 0.0, 0, 0.0, 0.0, [], False   # (the answers and the finish of the session that ended are not this one's)
                 rc = state_of(self.server_id, True, self.session, create=nascar is not None or rolling)
