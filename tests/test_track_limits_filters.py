@@ -102,7 +102,8 @@ def test_filtered_report_keeps_evidence_and_judge_and_only_counts_accepted(monke
         asyncio.run(report_limits(902, LimitsIn(car_id=1, name='Ana', **{**BASE, 'vo': vo}), None))
     assert record.call_count == judge.call_count == 4
     assert cuts.call_count == 2 and state._limits_counted == {1: 14}
-    assert [c.kwargs['reason'] for c in audit.call_args_list] == ['min_speed', 'between_s']
+    assert [c.kwargs['reason'] for c in audit.call_args_list if c.args == ('cut_filtered',)] == ['min_speed', 'between_s']
+    assert all('report' in c.kwargs for c in audit.call_args_list), 'every decision keeps what the game reported'
 
 
 @pytest.mark.parametrize('key,value', [('wheels_out', 2), ('source','server'), ('min_speed_kmh',301), ('max_cut_s',61), ('min_slow_ratio',2.1), ('between_s',61), ('between_s',-1), ('during_caution','false'), ('unknown',1), ('max_cut_s',float('nan'))])
