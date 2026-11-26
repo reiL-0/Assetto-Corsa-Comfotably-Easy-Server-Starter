@@ -4,7 +4,7 @@
   * It asks the website what the race director wants:  GET {base}/api/csp/state?server=ID  ->  {"pacecar": {"car": slot, "kmh": N, "mode": "wait|lead|in"}}
     (it is the pace car only when `car` is its own slot; any other answer = it waits in the pits).
   * wait: parked in the pit lane. lead: leaves the pits, laps the fast line at `kmh` (speeds up 5 km/h per second, slows down 8, like the hub). in: keeps the pace
-    to the pit entry, then 80 km/h along the pit lane and parks at its box (the middle of the pit lane).
+    to the pit entry, then 80 km/h along the pit lane and parks at its box (the middle of the pit lane). tp: panic, it jumps to its box and parks.
   * It says it is in the pit lane the way the hub does:  GET {base}/api/csp/pit?server=ID&slot=S&name=N&pit=0|1  (once a second): that is what lets the manager give the green.
   * The track's two lines (fast_lane.ai + pit_lane.ai) come from the manager's copy kept when the track was uploaded (`--lines`, <data_dir>/pace_lines/<track>/<layout or ->/: the server's content does not keep `ai/`),
     else from `--content`'s tracks/<track>[/<config>]/ai. Read at every connection, so a track change = a restart = a new handshake. A track uploaded before this existed has to be uploaded again (or its two files copied there).
@@ -124,6 +124,11 @@ class PaceBot:
     def step(self, dt: float, mode: str, kmh: float):
         """Moves by `dt` seconds. Returns the lap time in ms when the line was crossed this step, else None."""
         lead = mode == "lead"
+        if mode == "tp":   # panic: in its box at once, parked (what the game's «back to pits» does)
+            if not (self.path == "pit" and self.parked):
+                self.path, self.s = "pit", self.box
+            self.top, self.parked = 0.0, True
+            return None
         if self.parked and not lead:
             self.top = 0.0
             return None

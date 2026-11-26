@@ -26,7 +26,7 @@ def test_nascar_characterization_preserves_clearance_and_audit(speeds, pits, con
     rc.caution = Caution({1: 5.2}, 0)
     rc.caution.pits_open = True
     rc.caution_laps = 1
-    rc.pace_car = 9
+    rc.pace_car, rc.pace_out = 9, True   # (deployed: its crossings count)
     rc._pit_seen = pits
     rc.watch.involved = contacts
     rc.audit = Mock()

@@ -259,7 +259,8 @@ class RaceControl:
         self.pace_car_kmh = PACE_CAR_KMH
         self._pace_bad = None              # (kind, car, since) of the pace car's fault in progress: "stuck" / "silent" (see pace_watch)
         self._pace_moved = None            # the pace car (slot) that has been seen leading at speed since it came out; the stuck clock is shorter once it has
-        self.pace_out = False              # the pace car came out under a yellow: it keeps leading if that yellow turns into a VSC/FCY (a VSC/FCY from green does not bring it out)
+        self.pace_out = False              # the director deployed the pace car (pace_deploy) or a rolling start runs: no yellow brings it out by itself; it keeps leading while the caution lasts (yellow, VSC, FCY)
+        self.pace_tp = False               # panic: the pace car was teleported to the pits (its hub / the bot jump to the box and park) until the next deployment or pace car
         self.pace_car_in = False           # the director called "to go": the pace car goes into the pits
         self.pace_park = False             # green with the pace car out, without "to go": return only, no restart procedure
         self.one_more = False              # "two to go" was called: the pace car does one more lap, and at its next crossing it becomes a "one to go" (pace_car_in)
@@ -268,6 +269,7 @@ class RaceControl:
         self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.form_crossed: set[int] | None = None   # the cars that crossed the line since a crossing ended the formation lap: the field bunched behind the pace car crosses in the seconds after it, and that crossing closes the SAME lap (the green is the next one). None = the director sent the pace car in mid-lap: no lap to skip
+        self.auto_pace = False     # the director's switch: every yellow (the director's, NASCAR's, an incident's) brings the pace car out by itself; off (default) only pace_deploy does
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
         self._f1: dict | None = None       # the F1 rolling start: {phase: lap | regroup | count, t, still: {car: since}, warned, go_at}; None in a NASCAR one
         self.pace_live: int | None = None  # the adaptive pace the pace car is told now (None = the configured one)
@@ -368,11 +370,12 @@ class RaceControl:
                 self._fcy_green_dues(now)   # (before _clear_vsc: the judges still hold what each car gained over the flag)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
-            if flag == "yellow":
-                self.pace_park = False
-            elif flag == "green" and self.pace_out and not self.pace_car_in:
-                self.pace_park = True
-            self.pace_out = flag == "yellow" or (self.pace_out and flag in SLOWING)
+            if flag == "green" and self.pace_out:
+                self.pace_park = True   # (also after "to go": it keeps being told to come in once the caution is over)
+            self.pace_out = self.pace_out and flag in CAUTION
+            if flag == "yellow" and self.auto_pace and self.pace_car is not None and source != "formation" and not self.pace_out:   # (the automatic deployment: as the director's button, without its yellow)
+                self.pace_out, self.pace_tp, self.pace_park = True, False, False
+                self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False   # (a restart called before it went in is over: it leads again)
             if flag not in CAUTION:
                 self.caution = None
                 self.notices = [x for x in self.notices if not x.get("hold") or x.get("hold") == "winner"]   # (the caution is over: what was held on the screen goes with it, but the winner stays until the session restarts)
@@ -406,7 +409,10 @@ class RaceControl:
         """What the pace car's own hub reads: wait in the pits / lead the field / come in."""
         if self.pace_car is None:
             return None
-        mode = "in" if self.pace_car_in or self.pace_park else ("lead" if self.pace_out else "wait")   # only yellow deploys it; green returns it even without "to go", without arming the restart
+        if self.pace_tp:
+            mode = "tp"
+        else:   # only the director deploys it (pace_deploy) or a rolling start; green returns it even without "to go"; a "to go" in a caution it never came out for leaves it waiting
+            mode = "in" if self.pace_park or (self.pace_car_in and self.pace_out) else ("lead" if self.pace_out else "wait")
         return {"car": self.pace_car, "kmh": self.pace_live or self.pace_car_kmh, "mode": mode}
 
     def start_hold_view(self) -> dict | None:
@@ -453,7 +459,9 @@ class RaceControl:
                 self.audit("start_hold_armed", id=self._hold_id, step_s=step, executed=True)
             self.caution_laps, self.pace_car_in, self.pace_car_pitted, self.one_more = -1, False, False, False
             self.form_crossed = None
+            self.pace_tp = False
             self.set_flag("yellow", source="formation")   # (no field: no Caution, no free pass, no order, nobody is judged for passing)
+            self.pace_out, self.pace_park = True, False   # (the rolling start is the one yellow that brings the pace car out by itself)
             return True
 
     @fieldrec.capture(_lock)
@@ -489,6 +497,37 @@ class RaceControl:
             else:
                 return self.pace_car_in or self.pace_park   # (already on its way in: nothing to do; not out: nothing to send)
             self.audit("pace_to_pits", car=self.pace_car, formation=self.formation, executed=True)
+            self._bump()
+            return True
+
+    def _pace_leads(self) -> bool:
+        """The pace car is out leading (not merely named and waiting in the pits): only then do its laps, its pace and its pit report run the caution."""
+        return self.pace_car is not None and self.pace_out and not self.pace_park   # (sent back to the pits: parked, its crossings no longer count)
+
+    @fieldrec.capture(_lock)
+    def pace_deploy(self, field=None) -> list[tuple] | None:
+        """The director deploys the pace car: it leaves the pits and leads. Under green it puts the yellow out first (its actions are returned for the caller, as set_flag's). A deployment after "to go" cancels that
+        restart (the pace car is out again). None = no pace car on the server."""
+        with _lock:
+            if self.pace_car is None:
+                return None
+            actions = [] if self.flag in CAUTION else self.set_flag("yellow", field=field)
+            self.pace_out, self.pace_tp = True, False
+            self.pace_park = self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False
+            self.go_early = self.blocked_crossings = 0
+            self.audit("pace_deploy", car=self.pace_car, flag=self.flag, executed=True)
+            self._bump()
+            return actions
+
+    @fieldrec.capture(_lock)
+    def pace_teleport(self) -> bool:
+        """Panic: the pace car goes to its box NOW (teleported by its hub; the bot jumps there) and parks. It no longer leads: the green does not wait for it to report the pit lane. False = no pace car on the server."""
+        with _lock:
+            if self.pace_car is None:
+                return False
+            self.pace_to_pits()   # (the formation's "one to go" if one runs)
+            self.pace_tp, self.pace_out, self.pace_park, self.pace_car_pitted = True, False, False, True
+            self.audit("pace_teleport", car=self.pace_car, executed=True)
             self._bump()
             return True
 
@@ -625,7 +664,7 @@ class RaceControl:
                 return self._neutralization_green(car, field)
             if not (self.pace_car_in and self.flag in CAUTION and self.caution):
                 return None
-            if car != (self.caution.restart[0] if self.caution.restart else self.pace_car):
+            if car != (self.caution.restart[0] if self.caution.restart else (self.pace_car if self._pace_leads() else None)):
                 return None
             if car != self.pace_car and self.clock.time() - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return None   # A lap through the pit lane cannot start a restart.
@@ -637,7 +676,7 @@ class RaceControl:
                     return None
                 self.audit("green_crossing_fallback", car=car, crossings=self.go_early, executed=False)
                 log.info("green: car %s crossed twice since the \"to go\" without being seen mid-lap", car)
-            if self.pace_car is not None and not self.pace_car_pitted:
+            if self._pace_leads() and not self.pace_car_pitted:
                 if self.caution.restart:
                     self.blocked_crossings += 1
                 self.audit("green_held", car=car, pace_car=self.pace_car, reason="pace_not_pitted", blocked=self.blocked_crossings, executed=False)
@@ -845,7 +884,7 @@ class RaceControl:
                 return None
             if now - self._pit_seen.get(car, -1e9) < PIT_CLEAR:
                 return None   # A pit-lane crossing is not a caution lap on track.
-            if self.pace_car is not None:
+            if self._pace_leads():   # ponytail: deployed mid-caution, the count goes on from the pace car's next crossing (its pit-exit crossing is skipped by PIT_CLEAR)
                 if car != self.pace_car:
                     return None
             elif car != c.leader and (connected is None or c.leader in connected):
@@ -908,7 +947,7 @@ class RaceControl:
                 return None
             self.caution.open_pits()
             self._bump()
-            if self.pace_car is not None:
+            if self._pace_leads():
                 return 0
             counted = self.caution_laps + (1 if pending_crossing else 0)
             return self.nascar.laps + max(CAUTION_MIN_LAPS - counted, 1) + 2
@@ -927,7 +966,7 @@ class RaceControl:
             raise ValueError(f"the pace of the pace car is between {PACE_MIN} and {PACE_MAX} km/h")
         with _lock:
             self.pace_car, self.pace_car_kmh, self.pace_guid = car, kmh, guid   # (a driver named but not connected: no slot yet, the guid stays)
-            self.pace_car_in = self.pace_car_pitted = self.one_more = self.pace_out = False
+            self.pace_car_in = self.pace_car_pitted = self.one_more = self.pace_out = self.pace_tp = False
             self.pace_park = False
             self.blocked_crossings = 0
             if car is None and self.formation:   # the pace car left in the formation: nobody leads the field any more, the green
@@ -1219,7 +1258,7 @@ class RaceControl:
                 return [], {}
             now = self.clock.time()
             order = c.line_up({car for car, t in self._pit_seen.items() if now - t < PIT_CLEAR})
-            pace = progress.get(self.pace_car) if self.pace_car is not None else None
+            pace = progress.get(self.pace_car) if self._pace_leads() else None
             return order, c.early_formers(self.without_pace_car(progress), pace, order)
 
     @fieldrec.capture(_lock)
@@ -1231,12 +1270,12 @@ class RaceControl:
                 return []
             out: list[tuple] = []
             if self.pace_car_in and not self.go_armed:   # (the car that takes the restart seen in the middle of its lap: its next crossing is the one that brings the green)
-                lead = c.restart[0] if c.restart else self.pace_car
+                lead = c.restart[0] if c.restart else (self.pace_car if self._pace_leads() else None)
                 if lead in progress and GO_ARM_FROM <= progress[lead] % 1.0 <= GO_ARM_TO:
                     self.go_armed = True
                     self.audit("restart_armed", leader=lead, progress=progress[lead], executed=True)
             if self._is_race():   # (every server, NASCAR or not: a car that spins or stops on the track goes to the back of the restart line)
-                pace_kmh = speeds.get(self.pace_car) if self.pace_car is not None else max(speeds.values(), default=None)
+                pace_kmh = speeds.get(self.pace_car) if self._pace_leads() else max(speeds.values(), default=None)
                 exempt_now = {car for car, t in self._pit_seen.items() if now - t < PIT_RECENT}
                 for car in c.check_spins(speeds, pace_kmh, exempt_now, self.without_pace_car(progress), now):
                     out.append(("spun", car))
@@ -2080,7 +2119,7 @@ class RaceControl:
             return {"rev": self.rev, "ts": int(self.ts), "running": running, "flag": self.flag, "red_ref": self.red_ref, "pace_kmh": self.pace_kmh, "penalties": list(self.penalties), "notices": notices,
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
-                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
+                    "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "auto_pace": self.auto_pace, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"], **({"entry": self.pit_entry} if self.pit_entry is not None else {})} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
@@ -2354,6 +2393,7 @@ def state_of(server_id: int, running: bool, session_ref: object = None, create: 
                 fresh.server_id = server_id
                 fresh.rev = 1
                 old = _old
+                fresh.auto_pace = old.auto_pace
                 fresh.auto_yellow, fresh.pace_car, fresh.pace_car_kmh, fresh.pace_guid = old.auto_yellow, old.pace_car, old.pace_car_kmh, old.pace_guid
                 fresh.auto_off = set(old.auto_off)   # (the director's choices outlive the session)
                 same = lambda k: old.session_ref.get(k) == session_ref.get(k)

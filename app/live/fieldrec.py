@@ -17,7 +17,7 @@ FORMAT = "acm-field-v1"
 METHODS = frozenset((
     "incident_step", "neutralization_clear_tick", "green_if_due", "pace_tick", "pass_tick",
     "give_back_tick", "give_back_report", "contact", "report_pit", "set_flag",
-    "start_formation", "formation_lap", "formation_green", "formation_tick", "formation_go", "pace_adapt", "pace_watch", "pace_to_pits", "set_pace_car",
+    "start_formation", "formation_lap", "formation_green", "formation_tick", "formation_go", "pace_adapt", "pace_watch", "pace_to_pits", "pace_deploy", "pace_teleport", "set_pace_car",
     "give_back_due_now", "caution_lap", "caution_tick", "restart_plan", "stage_break",
     "autoflags_tick", "pit_exception",
     "follow_pace_driver", "set_pace_config", "lap_done", "yellow_tick", "give_back_forgive", "give_back_restore",

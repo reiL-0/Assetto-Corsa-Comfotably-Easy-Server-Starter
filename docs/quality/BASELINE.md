@@ -92,6 +92,7 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | POST | `/api/v1/servers/{server_id}/next_session` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/race-control/audit` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/auto-pace` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/auto-yellow` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | GET | `/api/v1/servers/{server_id}/race-control/autoflags` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/autoflags` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
@@ -104,7 +105,9 @@ Estado medido el **2026-10-09**. Contrastado con el código por `ops/check_basel
 | PATCH | `/api/v1/servers/{server_id}/race-control/nascar` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/nascar` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/pace-car` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/pace-car/deploy` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/pace-car/pit` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
+| POST | `/api/v1/servers/{server_id}/race-control/pace-car/teleport` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/penalties` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | DELETE | `/api/v1/servers/{server_id}/race-control/penalties/{penalty_id}` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |
 | POST | `/api/v1/servers/{server_id}/race-control/pit` | the site's panels and the calendar (via OPR WP /api/admin/acm/*), the manager's own UI |

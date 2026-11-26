@@ -524,7 +524,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
     return {"pace_source": pace_source, "nascar_armed": armed_view(inst, server), "pit_hold": hold, "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "auto_pace": False, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @control_router.get("/autoflags")
@@ -1291,6 +1291,17 @@ def auto_yellow(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
     return rc.snapshot()
 
 
+@control_router.post("/auto-pace")
+def auto_pace(server_id: int, body: AutoYellowIn, sess: SessionDep) -> dict:
+    """Every yellow brings the pace car out by itself (off, the default: only the director's «Desplegar pace car» does). Memory only, kept across sessions like the automatic yellow."""
+    _, rc = _control(server_id, sess)
+    with _lock:
+        rc.auto_pace = body.enabled
+        rc.audit("auto_pace", enabled=body.enabled, executed=True)
+        rc._bump()
+    return rc.snapshot()
+
+
 class PaceCarIn(BaseModel):
     steam_id: str | None = Field(default=None, pattern=r"^[0-9]{17}$")   # the pace car's driver; null: no pace car
     car_id: int | None = Field(default=None, ge=0, le=255)               # older panels: the car now in that slot, turned into its driver's SteamID; null: no pace car
@@ -1363,6 +1374,32 @@ def pace_car_to_pits(server_id: int, sess: SessionDep) -> dict:
     _, rc = _control(server_id, sess)
     if not rc.pace_to_pits():
         raise HTTPException(409, "no hay pace car en pista")
+    return rc.snapshot()
+
+
+@control_router.post("/pace-car/deploy")
+def pace_car_deploy(server_id: int, sess: SessionDep) -> dict:
+    """The director deploys the pace car (no yellow does it by itself). Under green the yellow goes out first, as the director's own yellow would."""
+    inst, rc = _control(server_id, sess)
+    with _lock:   # (one look: a flag of another request cannot slip between the reading and the deployment)
+        green = rc.flag not in CAUTION
+        actions = rc.pace_deploy(field=inst.acsp.field)
+    if actions is None:
+        raise HTTPException(409, "no hay pace car en el servidor")
+    if green:
+        _say(rc, SAY["yellow"], "flag")
+        with _lock:
+            apply_last_lap(inst, rc, "yellow")
+        nascar_actions(server_id, rc, actions)
+    return rc.snapshot()
+
+
+@control_router.post("/pace-car/teleport")
+def pace_car_teleport(server_id: int, sess: SessionDep) -> dict:
+    """Panic: the pace car is teleported to its box and parks (it drives oddly, it is in the way). The green no longer waits for it."""
+    _, rc = _control(server_id, sess)
+    if not rc.pace_teleport():
+        raise HTTPException(409, "no hay pace car en el servidor")
     return rc.snapshot()
 
 
