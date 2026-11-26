@@ -89,8 +89,12 @@ def _extract_bsdtar(archive: Path, dest: Path, max_total: int, max_files: int) -
     exe = shutil.which("bsdtar")
     if not exe:
         raise uploadguard.Rejected("this server cannot unpack that format (bsdtar is not installed)")
-    with tempfile.TemporaryFile() as err:
-        p = subprocess.Popen([exe, "-x", "-f", str(archive), "-C", str(dest), "--no-same-owner", "--no-same-permissions"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+    # A RAR goes in as a stream (-f -): opened as a file, libarchive also looks for a zip directory at its END and wins it when the rar's last member is a stored .zip
+    # (vrc_mexico.rar 2026-11-26: 3 entries of that inner zip instead of the 175 of the track). A stream can only be judged by its first bytes. 7z needs to seek: it keeps the file.
+    with archive.open("rb") as fh:
+        rar = fh.read(6) == b"Rar!\x1a\x07"
+    with tempfile.TemporaryFile() as err, (archive.open("rb") if rar else open(os.devnull, "rb")) as src:
+        p = subprocess.Popen([exe, "-x", "-f", "-" if rar else str(archive), "-C", str(dest), "--no-same-owner", "--no-same-permissions"], stdin=src, stdout=subprocess.DEVNULL, stderr=err)
         while True:   # ponytail: polled every 0.3 s, so a fast writer overshoots by what the disk writes in that time; it is bounded by the free-disk margin, FSIZE, max_files and the timeout. Poll faster if that is ever too loose
             try:
                 p.wait(timeout=0.3)
