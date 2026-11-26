@@ -516,6 +516,8 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
         if rc:
             refresh_pit_limit(rc, server_id)
         give_back_rule_of(server_id)
+    if rc and inst:
+        refresh_zones(rc)
     server = _get(sess, server_id)
     hold = _pit_hold(server_id, inst)
     pace_source = (server.session or {}).get("pace_source") or "real"   # (the pace bot reads it to know whether it should be on the server at all)
@@ -524,7 +526,7 @@ def race_state(server_id: int, sess: SessionDep) -> dict:
     race = bool(inst) and _sanctioned(inst)   # (nothing has happened yet in this session, but the hub's counter already needs the rule: "CUTS 0/5")
     rule = cut_rule_of(server_id) if race else None
     return {"pace_source": pace_source, "nascar_armed": armed_view(inst, server), "pit_hold": hold, "start_hold": None, "cuts": {}, "cuts_rule": {k: rule[k] for k in ("cap", "max", "per", "step")} if rule else None, "drs": None, "pit_limit": None, "obligations": [], "give_back_reviews": [], "rev": 0, "ts": 0, "running": bool(inst), "flag": "green", "red_ref": None, "pace_kmh": None, "penalties": [], "notices": [], "vsc_id": 0, "grace_left": 0,
-                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "auto_pace": False, "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
+                                     "tolerance_kmh": None, "vsc_penalty": None, "violations": [], "exempt": [], "nascar": None, "caution": None, "caution_eta": None, "proposal": None, "auto_yellow": True, "auto_pace": False, "zones": [], "sector_flags": [], "pacecar": None, "pace_steam_id": "", "nascar_next_delay_min": NEXT_SESSION_DELAY // 60}
 
 
 @control_router.get("/autoflags")
@@ -733,6 +735,33 @@ def refresh_pit_limit(rc, server_id: int) -> None:
         if gen == rc.pit_limit_gen:   # (not when the director saved a new limit while this was reading)
             rc.pit_limit = limit
             rc.pit_entry = entry
+
+
+def refresh_zones(rc) -> None:
+    """The track's zones for the sector flags into the state (a request thread: it reads the track's sections.ini, only when the track changes)."""
+    session = rc.session_ref if isinstance(rc.session_ref, dict) else {}
+    key = (str(session.get("track") or ""), str(session.get("track_config") or ""))
+    if key == rc.zones_key or not key[0]:
+        return
+    from app.live import trackzones
+    rc.set_zones(key, trackzones.zones(*key))
+
+
+class SectorFlagIn(BaseModel):
+    zone: Annotated[int, Field(strict=True, ge=0, le=255)] | None = None   # the zone's index in the state's `zones` (strict: a true/false is no zone)
+    kind: Literal["yellow", "double"] | None = None                     # null takes the flag off (zone and kind null: every sector flag off)
+
+
+@control_router.post("/sector-flag")
+def sector_flag(server_id: int, body: SectorFlagIn, sess: SessionDep) -> dict:
+    """A local flag on one zone of the track (its sections.ini, or a third of the lap): a notice on the screen of whoever drives into it. Nobody is judged for passing."""
+    _, rc = _control(server_id, sess)
+    refresh_zones(rc)
+    try:
+        rc.set_sector_flag(body.zone, body.kind)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return rc.snapshot()
 
 
 class DamageIn(BaseModel):

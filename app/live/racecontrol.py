@@ -210,6 +210,9 @@ class RaceControl:
         self.pit_limit: dict | None = None                   # the pit-lane speed rule of this track ({limit_kmh, tolerance_kmh, penalty_s}, app/pitlimits.py); None = no rule
         self.pit_entry: float | None = None                  # where the pit lane begins on the lap (0..1), from the track's own files (app/pitentry.py); None = not known: the hub learns it
         self.pit_limit_gen = 0                               # moves when the director changes the limit: a database read that began before it must not publish its old value
+        self.zones: list[dict] = []                          # the track's zones for the sector flags ({name, from, to}: app/live/trackzones.py), refreshed by request threads
+        self.zones_key: tuple | None = None                  # (track, layout) the zones were read for: another track clears the flags
+        self.sector_flags: dict[int, str] = {}               # zone index -> "yellow" | "double": the director's local flags, a notice on the hub only (nobody is judged)
         self.pit_limit_at = -1e9                             # when it was last read from the database (request threads refresh it)
         self._laps_of: dict[int, int] = {}                   # car -> its completed laps as the last lap_done said
         self._pitspeed_lap: dict[int, int] = {}              # car -> its completed laps when it was last sanctioned for the pit-lane speed
@@ -499,6 +502,35 @@ class RaceControl:
             self.audit("pace_to_pits", car=self.pace_car, formation=self.formation, executed=True)
             self._bump()
             return True
+
+    def set_zones(self, key: tuple, zones: list[dict]) -> None:
+        """The zones read for (track, layout) (outside the lock: app/racecontrol.py refresh_zones). Another track than the one the flags were put on clears them."""
+        with _lock:
+            session = self.session_ref if isinstance(self.session_ref, dict) else {}
+            if key != (str(session.get("track") or ""), str(session.get("track_config") or "")):
+                return   # (a read that began for a track this session is no longer on: an older one finishing late)
+            if key == self.zones_key and zones == self.zones:
+                return
+            if key != self.zones_key or len(zones) != len(self.zones):
+                self.sector_flags = {}
+            self.zones, self.zones_key = zones, key
+            self._bump()
+
+    def set_sector_flag(self, zone: int | None, kind: str | None) -> None:
+        """The director's sector flag: `kind` "yellow" / "double" on zone `zone`, None takes it off; zone and kind None = every sector flag off. ValueError when the zone does not exist."""
+        with _lock:
+            if zone is None:
+                if kind is not None:
+                    raise ValueError("a flag needs a zone")
+                self.sector_flags = {}
+            elif not 0 <= zone < len(self.zones):
+                raise ValueError(f"no zone {zone} on this track ({len(self.zones)} zones)")
+            elif kind is None:
+                self.sector_flags.pop(zone, None)
+            else:
+                self.sector_flags[zone] = kind
+            self.audit("sector_flag", zone=zone, flag=kind, name=self.zones[zone]["name"] if zone is not None else None, executed=True)
+            self._bump()
 
     def _pace_leads(self) -> bool:
         """The pace car is out leading (not merely named and waiting in the pits): only then do its laps, its pace and its pit report run the caution."""
@@ -2120,7 +2152,8 @@ class RaceControl:
                     "vsc_id": self.vsc_id, "grace_left": self.grace_left(now), "tolerance_kmh": self.tolerance_kmh if self.flag in SLOWING else None,
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "auto_pace": self.auto_pace, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
-                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"], **({"entry": self.pit_entry} if self.pit_entry is not None else {})} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
+                    "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "zones": list(self.zones), "sector_flags": [{**self.zones[i], "kind": k} for i, k in sorted(self.sector_flags.items()) if i < len(self.zones)],
+                    "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"], **({"entry": self.pit_entry} if self.pit_entry is not None else {})} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 
 def cuts_off_peek(server_id: int, session_type: object) -> bool:
