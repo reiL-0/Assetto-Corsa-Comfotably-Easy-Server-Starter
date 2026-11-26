@@ -407,7 +407,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'red_ref', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'pacecar', 'pace_steam_id', 'pace_source', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'auto_pace', 'pacecar', 'pace_steam_id', 'pace_source', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -739,7 +739,8 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     r = steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 9, 'kmh': 110})
     assert r.json()['pacecar'] == {'car': 9, 'kmh': 110, 'mode': 'wait'}
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
-    assert r.json()['pacecar']['mode'] == 'lead'
+    assert r.json()['pacecar']['mode'] == 'wait'
+    rc.pace_deploy(field=client.field)
     assert rc.caution.leader == 3 and 9 not in rc.caution.frozen and rc.caution.free_pass == 5, 'the pace car is not the leader nor in the order'
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
     assert rc.pace_car_state()['mode'] == 'in' and not rc.pace_car_in
@@ -748,6 +749,7 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
         r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': f, 'pace_kmh': 60, 'grace_s': 10, 'tolerance_kmh': 5})
         assert r.json()['pacecar']['mode'] == 'in', f
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
+    rc.pace_deploy(field=client.field)
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'vsc', 'pace_kmh': 60, 'grace_s': 10, 'tolerance_kmh': 5})
     assert r.json()['pacecar']['mode'] == 'lead', 'a yellow turned VSC: the pace car already out keeps leading, it is not left on the track'
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
@@ -836,6 +838,7 @@ def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_lin
     client.board.drivers = [Driver(3), Driver(4)]
     rc.set_pace_car(9, 120, 'g9')
     rc.set_flag('yellow', field=client.field)
+    rc.pace_deploy(field=client.field)
     assert rc.pace_car_state()['mode'] == 'lead'
     lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
     lap(3)
@@ -862,7 +865,8 @@ def test_after_to_go_the_green_comes_out_when_the_restart_leader_crosses_the_lin
     assert rc.flag == 'green', 'the pace car is in the pits and the restart leader crossed the line'
     assert rc.pace_car_state()['mode'] == 'in', 'the green does not stop the pace car parking'
     rc.set_flag('yellow', field=client.field)
-    assert rc.pace_car_state()['mode'] == 'lead', 'a new caution brings it out again'
+    rc.pace_deploy(field=client.field)
+    assert rc.pace_car_state()['mode'] == 'lead', 'the director deployed it again'
 
 
 def test_alone_on_the_track_the_pace_car_arriving_in_the_pits_brings_the_green(live, monkeypatch):
@@ -874,6 +878,7 @@ def test_alone_on_the_track_the_pace_car_arriving_in_the_pits_brings_the_green(l
     _field(client, c9=(0.50, 9))
     rc.set_pace_car(9, 120, 'g9')
     rc.set_flag('yellow', field=client.field)
+    rc.pace_deploy(field=client.field)
     rc.restart_plan(client.field.snapshot())
     rc.go_armed = True
     adapter.auto_green(sid, rc, 9)
@@ -897,6 +902,7 @@ def test_a_caution_ends_by_itself_after_the_pace_cars_third_lap_when_the_track_i
     client.cars[4] = {'driver_name': 'Parado', 'velocity': [0.0, 0.0, 0.0]}
     rc.set_pace_car(9, 120, 'g9')
     rc.set_flag('yellow', field=client.field)
+    rc.pace_deploy(field=client.field)
     lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
     lap(3)
     assert rc.caution_laps == -1, 'only the pace car\'s laps count'
@@ -911,6 +917,7 @@ def test_a_caution_ends_by_itself_after_the_pace_cars_third_lap_when_the_track_i
     lap(9)
     assert rc.caution_laps == 6, 'after the warning the automatic "to go" is out'
     rc.set_flag('green', field=client.field); rc.set_flag('yellow', field=client.field)
+    rc.pace_deploy(field=client.field)
     assert rc.caution_laps == -1 and not rc.caution_notified, 'a new caution starts the count again'
     client.cars[4]['velocity'] = [30.0, 0.0, 0.0]   # moving: the track is clear
     lap(9); lap(9); lap(9)
@@ -933,6 +940,7 @@ def test_two_to_go_keeps_the_pace_car_leading_one_more_lap_then_it_is_a_one_to_g
     client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': 'g9'}
     rc.set_pace_car(9, 120, 'g9')
     rc.set_flag('yellow', field=client.field)
+    rc.pace_deploy(field=client.field)
     lap = lambda car: client._apply({'type': 'lap_completed', 'car_id': car, 'laptime_ms': 1000, 'cuts': 0, 'leaderboard': [{'car_id': 3, 'laps': 4, 'laptime_ms': 1000}]})
     rc.restart_plan(client.field.snapshot(), 2)
     assert rc.pace_car_state()['mode'] == 'lead' and rc.one_more, 'two to go: the pace car keeps leading'
@@ -1404,7 +1412,7 @@ def test_a_stage_break_behind_a_pace_car_opens_the_pits_but_does_not_promise_a_l
     sid, client, _ = live
     rc = live_rc.state_of(sid, True, client.session, create=True)
     rc.configure_nascar(70)
-    rc.pace_car = 9
+    rc.pace_car, rc.pace_out = 9, True   # (deployed by the director)
     _field(client, c3=(0.50, 20), c4=(0.48, 20), c5=(0.30, 18))
     state, actions = live_rc.on_lap(sid, 21, 3)
     adapter.nascar_actions(sid, state, actions, 3)
@@ -1561,6 +1569,7 @@ def test_a_yellow_behind_a_pace_car_without_nascar_runs_the_to_go_and_the_green_
     rc.set_pace_car(5)
     assert rc.nascar is None
     assert rc.set_flag('yellow', field=client.field) == [] and rc.caution and rc.caution.pace_only and rc.caution.free_pass is None and rc.caution.pits_open
+    rc.pace_deploy(field=client.field)
     assert rc.caution_tick(dict(client.field.progress), {3: 60, 4: 60}, 100.0) == []
     steward = _client('steward')
     r = steward.post(f'{V}/servers/{sid}/race-control/restart', json={'to_go': 1})

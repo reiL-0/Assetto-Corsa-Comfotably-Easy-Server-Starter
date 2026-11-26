@@ -506,7 +506,7 @@ def test_severe_reuses_real_pace_car_route(monkeypatch, mode):
         setter.assert_called_once()
         assert setter.call_args.args == ("yellow",)
         assert setter.call_args.kwargs["source"] == "incident"
-        assert rc.caution.pace_only and rc.pace_car_state()["mode"] == "lead"
+        assert rc.caution.pace_only and rc.pace_car_state()["mode"] == "wait"
         for t in range(8, 20):
             feed(t, 0)
         assert setter.call_count == 1
@@ -572,7 +572,7 @@ def test_additional_cars_escalate_same_incident_to_severe(monkeypatch):
         rc.incident_step(speeds, field, 1000 + t)
         if t == 2:
             assert rc.flag == "vsc"
-    assert rc.flag == "yellow" and rc.pace_car_state()["mode"] == "lead"
+    assert rc.flag == "yellow" and rc.pace_car_state()["mode"] == "wait"
 
 
 def test_kill_switch_stops_automatic_sc_restart(monkeypatch):
@@ -587,7 +587,7 @@ def test_kill_switch_stops_automatic_sc_restart(monkeypatch):
     assert rc.flag == "yellow" and not rc.pace_car_in
     rc.set_flag("green")
     assert rc.flag == "green" and rc.caution is None
-    assert rc.pace_car_state()["mode"] == "in" and not rc.pace_car_in
+    assert rc.pace_car_state()["mode"] == "wait" and not rc.pace_car_in
 
 
 @pytest.mark.parametrize("nascar", [False, True])
@@ -600,6 +600,7 @@ def test_manual_green_returns_pace_car_without_restart(nascar, via):
     field = Mock()
     field.snapshot.return_value = {0: .5, 1: .4, 4: .6}
     rc.set_flag("yellow", field=field)
+    rc.pace_deploy(field=field)
     if via != "yellow":
         rc.set_flag(via, 80, field=field)
     laps = rc.caution_laps
@@ -621,10 +622,13 @@ def test_manual_green_return_is_cancelled_by_new_deployment(reset):
     rc = RaceControl()
     rc.set_pace_car(4)
     rc.set_flag("yellow")
+    rc.pace_deploy()
     rc.set_flag("green")
     assert rc.pace_car_state()["mode"] == "in"
     if reset == "yellow":
         rc.set_flag("yellow")
+        assert rc.pace_car_state()["mode"] == "in", "a yellow alone does not cancel the return (it would stop on the track)"
+        rc.pace_deploy()
         assert rc.pace_car_state()["mode"] == "lead"
     else:
         rc.set_pace_car(5)
@@ -637,6 +641,7 @@ def test_manual_green_keeps_pace_car_returning_after_pit_reports(monkeypatch):
     rc = RaceControl()
     rc.set_pace_car(4)
     rc.set_flag("yellow")
+    rc.pace_deploy()
     assert rc.pace_out
     rc.set_flag("green")
     assert rc.pace_car_state()["mode"] == "in"
@@ -648,6 +653,7 @@ def test_manual_green_keeps_pace_car_returning_after_pit_reports(monkeypatch):
     assert rc.pace_car_state()["mode"] == "in"
     assert not rc.pace_car_in and not rc.pace_car_pitted
     rc.set_flag("yellow")
+    rc.pace_deploy()
     assert rc.pace_car_state()["mode"] == "lead"
 
 
@@ -665,6 +671,8 @@ def test_automatic_sc_uses_existing_to_go_and_green(monkeypatch):
     for t in range(1, 8):
         feed(t, 0)
     assert rc.caution.pace_only
+    assert rc.pace_car_state()["mode"] == "wait"
+    rc.pace_deploy()
     assert [rc.caution_lap(4, {}, 1100 + i) for i in range(3)] == [None, None, "two"]
     rc.restart_plan({0: .5, 1: .4, 2: .3, 3: .2, 4: .6}, 2)
     assert rc.caution_lap(4, {}, 1104) == "one"
@@ -700,7 +708,8 @@ def test_escalated_sc_starts_own_caution_and_ignores_virtual_green(monkeypatch, 
     assert rc.caution is not old_caution
     assert rc.caution_laps == -1
     assert not rc.one_more and not rc.pace_car_in and not rc.caution_notified
-    assert rc.pace_car_state()["mode"] == "lead"
+    assert rc.pace_car_state()["mode"] == "wait"
+    rc.pace_deploy()
     assert rc.vsc_id == 0 and rc._green_laps == -1
     for t in range(8, 20):
         feed(t, 80)
@@ -767,3 +776,75 @@ def test_the_automatic_vsc_fcy_runs_with_the_servers_settings(monkeypatch, categ
         feed(t, 0)
     assert rc.flag == flag and rc.pace_kmh == pace != rc.pace_car_kmh
     assert rc.vsc_penalty["kind"] == "none"
+
+
+def test_director_yellow_and_explicit_pace_deployment():
+    rc = RaceControl({"session_type": 3})
+    assert rc.pace_deploy() is None
+    rc.set_pace_car(4)
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    rc.set_flag("yellow", field=field)
+    assert rc.pace_car_state()["mode"] == "wait"
+    rc.set_flag("green", field=field)
+    actions = rc.pace_deploy(field=field)
+    assert isinstance(actions, list)
+    assert rc.flag == "yellow" and rc.pace_car_state()["mode"] == "lead"
+
+
+def test_pace_teleport_releases_green_and_clears_on_reassignment_or_deployment():
+    rc = RaceControl({"session_type": 3})
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 1: .4, 4: .6}
+    rc.set_pace_car(4)
+    rc.pace_deploy(field=field)
+    rc.restart_plan(field.snapshot(), 1)
+    assert rc.pace_teleport()
+    assert rc.pace_car_state()["mode"] == "tp" and not rc.pace_out
+    rc.pace_car_pitted = False
+    rc.go_armed = True
+    assert rc.green_if_due(rc.caution.restart[0]) == []
+    assert rc.flag == "green"
+    rc.set_pace_car(4)
+    assert rc.pace_car_state()["mode"] == "wait"
+    rc.pace_deploy(field=field)
+    rc.pace_teleport()
+    assert rc.pace_car_state()["mode"] == "tp"
+    rc.pace_deploy(field=field)
+    assert rc.pace_car_state()["mode"] == "lead"
+
+
+def test_a_new_yellow_while_the_pace_car_returns_keeps_it_returning_and_out_of_the_count():
+    rc = RaceControl({"session_type": 3})
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    rc.set_pace_car(4)
+    rc.pace_deploy(field=field)
+    rc.set_flag("green", field=field)
+    rc.set_flag("yellow", field=field)
+    assert rc.pace_car_state()["mode"] == "in", "a yellow never leaves it parked on the track"
+    rc.pace_deploy(field=field)
+    assert rc.pace_to_pits() and rc.pace_car_state()["mode"] == "in"
+    assert not rc._pace_leads(), "sent back to the pits: the caution counts the leader again"
+
+
+def test_with_the_automatic_pace_car_every_yellow_brings_it_out_and_without_it_none_does():
+    rc = RaceControl({"session_type": 3})
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    rc.set_pace_car(4)
+    rc.set_flag("yellow", field=field, source="incident")
+    assert rc.pace_car_state()["mode"] == "wait", "off by default"
+    rc.set_flag("green", field=field)
+    rc.auto_pace = True
+    rc.set_flag("yellow", field=field, source="incident")
+    assert rc.pace_car_state()["mode"] == "lead" and rc._pace_leads()
+    rc.set_flag("green", field=field)
+    assert rc.pace_car_state()["mode"] == "in"
+    rc.set_flag("vsc", 80, field=field)
+    assert rc.pace_car_state()["mode"] == "in", "a VSC is no yellow: it does not bring it out"
+    rc.set_flag("yellow", field=field)
+    rc.pace_car_in = True   # ("to go" called, then the panic)
+    rc.pace_teleport()
+    rc.set_flag("yellow", field=field)
+    assert rc.pace_car_state()["mode"] == "lead", "the same caution's yellow again: it leads, not 'in'"

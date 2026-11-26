@@ -136,6 +136,7 @@ def test_periodic_status_and_pace_park(monkeypatch):
     rc.neutralization_rule = Neutralization(mode="live").model_dump()
     rc.set_pace_car(9)
     rc.set_flag("yellow")
+    rc.pace_deploy()
     rc.set_flag("green")
     assert any(e["kind"] == "state_change" and e["state"]["pace_park"] for e in events)
     rc.set_flag("vsc", pace_kmh=120)

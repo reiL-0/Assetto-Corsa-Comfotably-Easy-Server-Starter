@@ -64,7 +64,7 @@ def test_a_car_that_never_moves_brings_the_safety_car(monkeypatch):
     run(feed, 59, {2: 0})
     assert rc.flag == "vsc" and rc.pace_car_state()["mode"] == "wait", "the VSC is out, the safety car is not yet"
     run(feed, 3, {2: 0}, start=60)   # 60 s
-    assert rc.flag == "yellow" and rc.caution.pace_only and rc.pace_car_state()["mode"] == "lead"
+    assert rc.flag == "yellow" and rc.caution.pace_only and rc.pace_car_state()["mode"] == "wait"
     assert rc.autoflags.log[-1]["kind"] == "immobile" and rc.autoflags.log[-1]["decision"] == "SC"
 
 
