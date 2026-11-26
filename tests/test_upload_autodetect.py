@@ -88,7 +88,6 @@ def test_the_folder_may_sit_anywhere_inside_like_a_mod_ships_it(mode):
 
 @pytest.mark.parametrize("files,sentence", [
     ({"only/readme.txt": "x"}, "no car or track folder"),
-    ({"a/" + k: v for k, v in CAR.items()} | {"b/" + k: v for k, v in CAR.items()}, "several cars or tracks"),
     ({k: v for k, v in CAR.items()}, "loose at the root"),
 ])
 def test_what_cannot_be_classified_is_refused_with_a_sentence_and_installs_nothing(mode, files, sentence):
@@ -148,3 +147,13 @@ def test_the_bomb_checks_are_the_same(mode):
     st = upload(bomb)
     assert st["state"] == "error" and "zip bomb" in st["error"], st
     assert not list((mode / "content" / "cars").iterdir())
+
+
+def test_a_pack_through_the_upload_shows_each_one_and_what_was_not_installed(mode):
+    # (in strict-zip autodetect mode too: a .zip with several folders installs each one; the 2026-11-26 decision)
+    st = upload(make_zip({"pk_r1/" + k: v for k, v in CAR.items()} | {"pk_r2/" + k: v for k, v in CAR.items()} | {"pk_t/" + k: v for k, v in TRACK.items()}))
+    assert st["state"] == "done" and st["kind"] == "" and st["failed"] == [], st
+    assert sorted((i["name"], i["kind"]) for i in st["items"]) == [("pk_r1", "car"), ("pk_r2", "car"), ("pk_t", "track")], st["items"]
+    assert (mode / "content" / "cars" / "pk_r2" / "data.acd").exists() and (mode / "content" / "tracks" / "pk_t" / "data" / "surfaces.ini").exists()
+    one = upload(make_zip({"solo/" + k: v for k, v in CAR.items()}))
+    assert one["state"] == "done" and one["result"] == "solo" and one["items"] is None and one["failed"] is None, "a single car keeps the answer it always had"

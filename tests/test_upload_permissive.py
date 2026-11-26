@@ -62,7 +62,6 @@ def test_the_kind_comes_from_the_folder_not_from_where_it_was_sent(permissive, t
 
 @pytest.mark.parametrize("files, why", [
     ({"README.txt": b"hi"}, "no car or track folder"),
-    (_wrapped(TRACK, "a") | _wrapped(TRACK, "b"), "several"),
     (TRACK, "loose at the root"),   # no folder to name it by, and its layout folder must not be taken for a track
 ])
 def test_unclear_archives_are_refused(permissive, tmp_path, files, why):
@@ -144,3 +143,43 @@ def test_check_tree_rejects_special_files(tmp_path):
     os.mkfifo(tmp_path / "pipe")
     with pytest.raises(uploadguard.Rejected, match="unsafe"):
         uploadguard.check_tree(tmp_path)
+
+
+# A pack of several cars and tracks (the owner's decision 2026-11-26): each one is installed with all the checks of a single upload; one that cannot be is reported and the rest go in.
+def test_a_pack_installs_every_car_and_track_it_holds(permissive, tmp_path):
+    files = _wrapped(TRACK, "pack", "tracks", "pk_track_a") | _wrapped(TRACK, "pack", "tracks", "pk_track_b") | _wrapped(CAR, "pack", "cars", "pk_car") | {"pack/README.txt": b"hi"}
+    res = content._extract(_make(tmp_path, files, "7zip"), content._tracks_dir(), auto=True)
+    assert sorted(i["name"] for i in res.items) == ["pk_car", "pk_track_a", "pk_track_b"] and res.failed == [] and res.kind == "" and res.note == "", (res.items, res.failed)
+    assert {i["name"]: i["kind"] for i in res.items} == {"pk_car": "car", "pk_track_a": "track", "pk_track_b": "track"}
+    assert (content._cars_dir() / "pk_car" / "data.acd").is_file() and (content._tracks_dir() / "pk_track_b" / "oval/data/surfaces.ini").is_file()
+    assert content._installed(res, "track")["items"] == res.items and "pack" in content._installed(res, "track"), "the answer of the plain upload route says it was a mixed pack"
+
+
+def test_what_cannot_be_installed_is_reported_and_the_rest_goes_in(permissive, tmp_path):
+    both = CAR | {"models.ini": b"m", "data/surfaces.ini": b"s"}   # looks like a car AND a track: unclear on its own
+    files = _wrapped(CAR, "a", "pk_dup") | _wrapped(CAR, "b", "pk_dup") | _wrapped(both, "c", "pk_both") | _wrapped(TRACK, "d", "pk_good")
+    res = content._extract(_make(tmp_path, files, "tgz"), content._tracks_dir(), auto=True)
+    assert sorted(i["name"] for i in res.items) == ["pk_dup", "pk_good"], res.items
+    why = {f["name"]: f["error"] for f in res.failed}
+    assert set(why) == {"pk_dup", "pk_both"} and "two folders with this name" in why["pk_dup"] and "looks like both" in why["pk_both"], why
+    assert res.note == "2 of 4 not installed" and not (content._cars_dir() / "pk_both").exists() and not (content._tracks_dir() / "pk_both").exists()
+
+
+def test_a_pack_where_nothing_can_be_installed_is_an_error(permissive, tmp_path):
+    both = CAR | {"models.ini": b"m", "data/surfaces.ini": b"s"}
+    with pytest.raises(HTTPException) as e:
+        content._extract(_make(tmp_path, _wrapped(both, "x", "pk_n1") | _wrapped(both, "y", "pk_n2"), "tgz"), content._tracks_dir(), auto=True)
+    assert e.value.status_code == 400 and "nothing in the pack could be installed" in e.value.detail and "pk_n1" in e.value.detail and "pk_n2" in e.value.detail
+
+
+
+def test_a_copy_that_fails_halfway_through_a_pack_is_reported_and_the_next_ones_still_go_in(permissive, tmp_path, monkeypatch):
+    real = shutil.copytree
+    def copy(src, dst, *a, **kw):
+        if Path(dst).name == "pk_c2":
+            raise shutil.Error([(str(src), str(dst), "disk said no")])
+        return real(src, dst, *a, **kw)
+    monkeypatch.setattr(content.shutil, "copytree", copy)
+    files = _wrapped(CAR, "p", "pk_c1") | _wrapped(CAR, "p", "pk_c2") | _wrapped(CAR, "p", "pk_c3")
+    res = content._extract(_make(tmp_path, files, "tgz"), content._cars_dir(), auto=True)
+    assert [i["name"] for i in res.items] == ["pk_c1", "pk_c3"] and [f["name"] for f in res.failed] == ["pk_c2"] and "disk said no" in res.failed[0]["error"], (res.items, res.failed)
