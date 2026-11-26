@@ -548,7 +548,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             self._claim_probe_greet(event["car_id"])   # the script listens now: answer with a private code (the one sent at client_loaded arrives before the script runs)
         elif t == "car_info" and event["is_connected"] and event["driver_guid"]:
             # the answer to GET_CAR_INFO after re-attaching to a running server: someone who joined before us. Not a join (no metric).
-            joined = {**event, "type": "new_connection"}
+            joined = {**event, "type": "new_connection", "answer": True}   # («answer»: not a real connection; the board keeps the state of the same driver still there)
             self.board.apply(joined)
             self.cars[event["car_id"]] = joined
             from app import knockoutlive   # (the same as a connection: a manager that came back during Q1 learns who is there)
