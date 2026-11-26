@@ -407,7 +407,7 @@ def test_http_snapshot_and_configuration(live):
     assert before['nascar'] is None
     assert before['nascar_next_delay_min'] == 10
     assert before.keys() == {'rev', 'ts', 'running', 'flag', 'red_ref', 'pace_kmh', 'penalties', 'vsc_id', 'grace_left',
-                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'auto_pace', 'pacecar', 'pace_steam_id', 'pace_source', 'nascar_next_delay_min'}
+                            'tolerance_kmh', 'vsc_penalty', 'notices', 'violations', 'exempt', 'nascar', 'start_hold', 'pit_hold', 'nascar_armed', 'caution', 'caution_eta', 'cuts', 'cuts_rule', 'drs', 'pit_limit', 'obligations', 'give_back_reviews', 'proposal', 'auto_yellow', 'auto_pace', 'zones', 'sector_flags', 'pacecar', 'pace_steam_id', 'pace_source', 'nascar_next_delay_min'}
     response = api.post(url, json={'total': 70})
     assert response.status_code == 200
     armed = response.json()
@@ -1845,3 +1845,17 @@ def test_formation_pace_sent_in_by_the_director_mid_lap_keeps_the_first_crossing
     rc.report_pit(9, True)
     rc.pace_car_pitted = True
     assert rc.formation_green(3, False) and rc.flag == 'green'
+
+
+def test_the_director_puts_a_sector_flag_over_http(live):
+    sid, client, _ = live
+    client.session['track'] = 'no_sections_track'   # (no sections.ini: the three equal sectors)
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    url, steward = f'{V}/servers/{sid}/race-control/sector-flag', _client('steward')
+    r = steward.post(url, json={'zone': 1, 'kind': 'double'})
+    assert r.status_code == 200 and r.json()['sector_flags'][0]['kind'] == 'double' and len(r.json()['zones']) >= 2
+    assert steward.post(url, json={'zone': True, 'kind': 'yellow'}).status_code == 422, 'a true is no zone'
+    assert steward.post(url, json={'zone': None, 'kind': 'yellow'}).status_code == 422
+    assert steward.post(url, json={'zone': 99, 'kind': 'yellow'}).status_code == 422
+    assert steward.post(url, json={'zone': 0, 'kind': 'red'}).status_code == 422
+    assert steward.post(url, json={'zone': None, 'kind': None}).json()['sector_flags'] == [] and rc.sector_flags == {}
