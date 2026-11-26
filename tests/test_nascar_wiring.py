@@ -739,8 +739,7 @@ def test_the_pace_car_waits_leads_under_a_caution_goes_in_on_to_go_and_is_not_a_
     r = steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 9, 'kmh': 110})
     assert r.json()['pacecar'] == {'car': 9, 'kmh': 110, 'mode': 'wait'}
     r = steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'yellow'})
-    assert r.json()['pacecar']['mode'] == 'wait'
-    rc.pace_deploy(field=client.field)
+    assert r.json()['pacecar']['mode'] == 'lead', 'NASCAR: the yellow brings the pace car out by itself'
     assert rc.caution.leader == 3 and 9 not in rc.caution.frozen and rc.caution.free_pass == 5, 'the pace car is not the leader nor in the order'
     steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'green'})
     assert rc.pace_car_state()['mode'] == 'in' and not rc.pace_car_in

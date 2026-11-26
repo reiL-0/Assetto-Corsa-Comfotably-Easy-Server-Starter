@@ -272,7 +272,7 @@ class RaceControl:
         self.go_armed = False              # after "one to go" the car that takes the restart has been seen in the middle of its lap: only then does its next crossing bring the green (so "one to go" is always a whole lap)
         self.blocked_crossings = 0         # restart-leader crossings that found the pace car not in the pits (after two the director is told: the green is manual)
         self.form_crossed: set[int] | None = None   # the cars that crossed the line since a crossing ended the formation lap: the field bunched behind the pace car crosses in the seconds after it, and that crossing closes the SAME lap (the green is the next one). None = the director sent the pace car in mid-lap: no lap to skip
-        self.auto_pace = False     # the director's switch: every yellow (the director's, NASCAR's, an incident's) brings the pace car out by itself; off (default) only pace_deploy does
+        self.auto_pace = False     # the director's switch: every yellow (the director's, an incident's) brings the pace car out by itself; off (default) only pace_deploy does. A NASCAR race always does (the owner's rule: its caution is the pace car)
         self.auto_yellow = True    # the yellow comes out by itself on a pile-up or a stopped car (the director may turn it off: then it is only proposed)
         self._f1: dict | None = None       # the F1 rolling start: {phase: lap | regroup | count, t, still: {car: since}, warned, go_at}; None in a NASCAR one
         self.pace_live: int | None = None  # the adaptive pace the pace car is told now (None = the configured one)
@@ -376,7 +376,7 @@ class RaceControl:
             if flag == "green" and self.pace_out:
                 self.pace_park = True   # (also after "to go": it keeps being told to come in once the caution is over)
             self.pace_out = self.pace_out and flag in CAUTION
-            if flag == "yellow" and self.auto_pace and self.pace_car is not None and source != "formation" and not self.pace_out:   # (the automatic deployment: as the director's button, without its yellow)
+            if flag == "yellow" and (self.auto_pace or self.nascar is not None) and self.pace_car is not None and source != "formation" and not self.pace_out:   # (the automatic deployment: as the director's button, without its yellow)
                 self.pace_out, self.pace_tp, self.pace_park = True, False, False
                 self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False   # (a restart called before it went in is over: it leads again)
             if flag not in CAUTION:
