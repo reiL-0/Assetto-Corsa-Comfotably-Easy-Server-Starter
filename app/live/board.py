@@ -141,7 +141,10 @@ class LiveBoard:
                     self._lap_invalid.clear()
             self.keep_next = False   # the first session event (new_session or the session_info that finds it) is the one the kept practice belongs to; a later one is another session
         elif t == "new_connection":
-            self._sector_track.pop(e["car_id"], None)
+            here = self._by_car(e["car_id"])
+            same = bool(e.get("answer") and here and e["driver_guid"] and here.guid == e["driver_guid"])   # only acServer's ANSWER (car_info) about the same driver still in the slot: the manager asks every SWEEP_S
+            if not same:   # (it reset his sectors and his invalid lap every 10 s: no lap ever got its sectors, 2026-11-26; a real connection, even of the same driver, starts from nothing)
+                self._sector_track.pop(e["car_id"], None)
             old = next((d for d in self.drivers if e["driver_guid"] and d.guid == e["driver_guid"]), None)
             d = old or Driver(car_id=e["car_id"])
             with self._inv_lock:
@@ -150,7 +153,8 @@ class LiveBoard:
                 d.model, d.skin = e["car_model"], e["car_skin"]
                 if not old:
                     self.drivers.append(d)
-                self._lap_invalid.pop(e["car_id"], None)   # (whoever sat there before leaves nothing behind)
+                if not same:
+                    self._lap_invalid.pop(e["car_id"], None)   # (whoever sat there before leaves nothing behind)
         elif t == "connection_closed":
             self._sector_track.pop(e["car_id"], None)
             with self._inv_lock:

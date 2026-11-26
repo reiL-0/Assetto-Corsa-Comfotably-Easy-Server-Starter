@@ -328,3 +328,45 @@ def test_potential_lap_is_the_sum_of_the_best_sector_of_each_valid_lap():
     assert car()["PotentialLap"] == (28_280 + 40_000 + 30_000) * NS
     lap(90_000, 0.20, 0.40, cuts=1)   # a lap with cuts gives no sector
     assert car()["PotentialLap"] == (28_280 + 40_000 + 30_000) * NS
+
+
+def test_the_sweep_question_every_10_s_does_not_wipe_the_sectors_or_the_invalid_lap():
+    # 2026-11-26: every SWEEP_S the manager asks acServer about each car; the answer comes back as a new_connection of the SAME driver and used to wipe his
+    # sector tracking (and the lap ruled invalid): no lap longer than 10 s ever got its sectors (0 of 77 records in OPR, 0 of 52 in Grid Racing).
+    b, t = LiveBoard(), 1000.0
+    b.apply(_conn(1, "Ana", "7656"), t)
+    lap_s, last = 100.0, []
+    for lap in range(3):
+        start = t
+        while True:
+            t += 0.2
+            frac = (t - start) / lap_s
+            if int((t - 1000.0) * 5) % 50 == 0:   # the sweep's answer, every 10 s
+                b.apply({**_conn(1, "Ana", "7656"), "answer": True}, t)
+            if frac >= 1.0:
+                b.apply({"type": "lap_completed", "car_id": 1, "laptime_ms": 100000, "cuts": 0, "leaderboard": []}, t)
+                b.apply({"type": "car_update", "car_id": 1, "pos": [0, 0, 0], "spline_pos": frac - 1.0, "velocity": [50, 0, 0]}, t)
+                last.append(b._by_car(1).last_splits)
+                break
+            b.apply({"type": "car_update", "car_id": 1, "pos": [0, 0, 0], "spline_pos": frac, "velocity": [50, 0, 0]}, t)
+    assert last[0] is None and last[1] == last[2] == [33333, 33333, 33334], last   # (the first lap has no start crossing; the next ones have their sectors)
+    b._lap_invalid[1] = object()
+    b.apply({**_conn(1, "Ana", "7656"), "answer": True}, t)
+    assert 1 in b._lap_invalid and 1 in b._sector_track, "the same driver asked about: his invalid lap stays invalid, his sectors go on"
+    b.apply(_conn(1, "Ana", "7656"), t)   # a REAL connection of the same driver (back after a kick acServer did not announce): nothing of before
+    assert 1 not in b._lap_invalid and 1 not in b._sector_track, "a real reconnection starts from nothing"
+    b._lap_invalid[1] = object()
+    b.apply({**_conn(1, "Bea", "7657"), "answer": True}, t)
+    assert 1 not in b._lap_invalid, "an answer that finds another driver in the slot starts from nothing"
+    b.apply({"type": "connection_closed", "car_id": 1, "driver_guid": "7657"}, t)
+    b.apply({**_conn(1, "Bea", "7657"), "answer": True}, t)
+    assert 1 not in b._sector_track, "after a CONNECTION_CLOSED nobody is «still there»"
+
+
+def test_the_sweep_answer_through_the_client_keeps_the_sectors_of_the_driver_still_there():
+    c = acsp.ACSPClient(73)
+    c._apply({"type": "new_connection", "car_id": 2, "driver_name": "Ana", "driver_guid": "76561198000000009", "car_model": "bmw", "car_skin": "s"})
+    c._apply({"type": "car_update", "car_id": 2, "pos": [0, 0, 0], "spline_pos": 0.1, "velocity": [50, 0, 0], "gear": 3, "rpm": 5000})
+    assert 2 in c.board._sector_track
+    c._apply({"type": "car_info", "car_id": 2, "is_connected": True, "car_model": "bmw", "car_skin": "s", "driver_name": "Ana", "driver_team": "", "driver_guid": "76561198000000009"})
+    assert 2 in c.board._sector_track, "acServer's answer to the 10 s question is not a new connection"
