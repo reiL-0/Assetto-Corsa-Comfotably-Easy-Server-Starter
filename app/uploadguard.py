@@ -103,9 +103,10 @@ def detect_kind(top: Path) -> str | None:
     return "car" if car and not track else "track" if track and not car else None
 
 
-def find_content_root(base: Path, hint: str | None = None) -> tuple[Path, str]:
-    """The ONE car or track folder somewhere inside an unpacked archive (mods ship `assettocorsa/content/tracks/<name>` and a README): the shallowest folders
-    that look like content, never looking inside one that was found. `hint` ("car"/"track") settles a folder that looks like both. Raises `Rejected` for none, several, or an unclear one."""
+def find_content_roots(base: Path, hint: str | None = None) -> list[tuple[Path, str | None]]:
+    """EVERY car or track folder inside an unpacked archive (a pack of several, or mods that ship `assettocorsa/content/tracks/<name>` and a README): the shallowest folders
+    that look like content, never looking inside one that was found. `hint` ("car"/"track") settles a folder that looks like both; one still unclear comes with kind None
+    (the caller refuses it alone, not the whole pack). Raises `Rejected` for none, or for content loose at the root."""
     found, queue = [], [base]
     while queue:
         d = queue.pop(0)
@@ -113,15 +114,25 @@ def find_content_root(base: Path, hint: str | None = None) -> tuple[Path, str]:
         if car or track:
             if d == base:   # no folder to name it by (and its layout folders would be mistaken for tracks)
                 raise Rejected("the car or track files are loose at the root of the archive: put them inside a folder named after it")
-            kind = "car" if car and not track else "track" if track and not car else hint
-            if not kind:
-                raise Rejected(f"{d.name!r} looks like both a car and a track: say which one it is")
-            found.append((d, kind))
+            found.append((d, "car" if car and not track else "track" if track and not car else hint))
             continue
         queue += sorted(p for p in d.iterdir() if p.is_dir())
+    if not found:
+        raise Rejected("no car or track folder found in the archive (put it in a folder named after it)")
+    return found
+
+
+def unclear(d: Path) -> Rejected:
+    return Rejected(f"{d.name!r} looks like both a car and a track: say which one it is")
+
+
+def find_content_root(base: Path, hint: str | None = None) -> tuple[Path, str]:
+    """The ONE car or track folder inside an unpacked archive (find_content_roots, and exactly one). Raises `Rejected` for none, several, or an unclear one."""
+    found = find_content_roots(base, hint)
     if len(found) != 1:
-        raise Rejected("no car or track folder found in the archive (put it in a folder named after it)" if not found
-                       else "the archive holds several cars or tracks (" + ", ".join(d.name for d, _ in found) + "): upload them one at a time")
+        raise Rejected("the archive holds several cars or tracks (" + ", ".join(d.name for d, _ in found) + "): upload them one at a time")
+    if not found[0][1]:
+        raise unclear(found[0][0])
     return found[0]
 
 

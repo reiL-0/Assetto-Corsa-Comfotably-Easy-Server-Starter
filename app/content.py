@@ -244,6 +244,8 @@ class Installed(str):
     kind: str = ""
     note: str = ""
     layouts: list = []   # per layout of an uploaded track: what it brought (pitentry.report)
+    items: list = []     # a pack of several: [{kind, name, note?, layouts?}] of what was installed
+    failed: list = []    # ...and [{name, error}] of what was not (the rest still went in)
 
 
 def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: str = "", auto: bool = False) -> str:
@@ -258,8 +260,6 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
     with archive.open("rb") as fh:
         magic = fh.read(512)   # a plain .tar only shows «ustar» at byte 257
     scratch = Path(tempfile.mkdtemp(dir=_scratch()))
-    layouts = []
-    stage = None   # the pace bot's copy of the track's AI lines: made before the cut, kept only if the track is installed
     try:
         fmt = unpack.archive_format(magic)
         if fmt == "zip":
@@ -277,12 +277,61 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 raise HTTPException(400, f"unsafe archive entry: {f.relative_to(scratch)}")
         asked = None if dest_parent not in (_cars_dir(), _tracks_dir()) or auto else "car" if dest_parent == _cars_dir() else "track"
         if detect:
-            top, found = uploadguard.find_content_root(scratch, asked)
+            roots = uploadguard.find_content_roots(scratch, asked)
         else:
             tops = [p for p in scratch.iterdir()]
             if len(tops) != 1 or not tops[0].is_dir():
                 raise HTTPException(400, "the .zip must hold exactly one folder at its root (the car's or track's name) and nothing loose beside it")
-            top, found = tops[0], uploadguard.detect_kind(tops[0])
+            roots = [(tops[0], uploadguard.detect_kind(tops[0]))]
+        if len(roots) == 1:   # one car or track: exactly as it always was (a refusal is the upload's error)
+            top, found = roots[0]
+            if detect and not found:
+                raise uploadguard.unclear(top)
+            try:
+                return _install_one(top, found, asked, dest_parent, source_url)
+            finally:
+                from app import storage
+                storage.forget()   # what is on disk changed: the space card and the quota check count again
+        # A pack of several (the owner's decision 2026-11-26: what can be installed is, the rest is reported): one by one, each with all the checks of a single upload
+        items, failed, seen = [], [], set()
+        try:
+            for top, found in roots:
+                try:
+                    name = _safe(top.name)   # (a name that cannot be a folder fails alone, like any other refusal)
+                    if not found:
+                        raise uploadguard.unclear(top)
+                    if (found, name.lower()) in seen:   # (a car and a track may share a name: they go to different folders)
+                        raise uploadguard.Rejected("the pack holds two folders with this name: only the first was installed")
+                    one = _install_one(top, found, asked, dest_parent, source_url)
+                    seen.add((found, name.lower()))   # (reserved only once installed: if the first one failed, the next may still go in)
+                    items.append({"kind": one.kind or found, "name": str(one)} | ({"note": one.note} if one.note else {}) | ({"layouts": one.layouts} if one.layouts else {}))
+                except (HTTPException, uploadguard.Rejected, OSError) as e:   # (blocked by a rights claim, no room left in the plan, unclear, a duplicate…: this one is not installed, the rest go on)
+                    failed.append({"name": top.name, "error": str(e.detail if isinstance(e, HTTPException) else e)})
+        finally:
+            from app import storage
+            storage.forget()
+        if not items:
+            raise HTTPException(400, "nothing in the pack could be installed: " + "; ".join(f"{f['name']}: {f['error']}" for f in failed))
+        kinds = {i["kind"] for i in items}
+        res = Installed(", ".join(i["name"] for i in items))
+        res.kind = kinds.pop() if len(kinds) == 1 else ""   # (cars and tracks together: no single kind)
+        res.items, res.failed = items, failed
+        res.note = f"{len(failed)} of {len(roots)} not installed" if failed else ""
+        return res
+    except uploadguard.Rejected as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+
+
+def _install_one(top: Path, found: str | None, asked: str | None, dest_parent: Path, source_url: str) -> "Installed":
+    """Installs ONE unpacked car or track folder (`top`, of kind `found`) into its content folder: cut down to the server pack, checked against rights claims and the plan's
+    space under the catalog lock, copied, sealed and recorded. Raises HTTPException / uploadguard.Rejected when that one cannot be installed."""
+    stage = None   # the pace bot's copy of the track's AI lines: made before the cut, kept only if the track is installed
+    layouts = []
+    try:
         root = _safe(top.name)
         note = ""
         if dest_parent in (_cars_dir(), _tracks_dir()) and found and found != asked:   # a car sent as a track (or the other way round) goes where it belongs
@@ -332,14 +381,9 @@ def _extract(archive: Path, dest_parent: Path, pack: bool = False, source_url: s
                 res.kind = kind
                 integrity.seal_installed(kind, root)
                 catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
-        from app import storage
-        storage.forget()   # what is on disk changed: the space card and the quota check count again
         res.note = note
         return res
-    except uploadguard.Rejected as e:
-        raise HTTPException(400, str(e)) from e
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
 
@@ -398,8 +442,9 @@ def download_car(car: str) -> FileResponse:
 
 def _installed(name: str, asked: str) -> dict:
     """The upload answer: {asked: name}, or {actual kind: name, "note": ...} when the content was installed as the other kind."""
-    kind = getattr(name, "kind", "") or asked
-    return {kind: str(name)} | ({"note": name.note} if getattr(name, "note", "") else {}) | ({"layouts": name.layouts} if getattr(name, "layouts", None) else {})
+    kind = getattr(name, "kind", "") or ("pack" if getattr(name, "items", None) else asked)   # (cars and tracks together: «pack», never the kind that was asked)
+    return ({kind: str(name)} | ({"note": name.note} if getattr(name, "note", "") else {}) | ({"layouts": name.layouts} if getattr(name, "layouts", None) else {})
+            | ({"items": name.items, "failed": name.failed} if getattr(name, "items", None) else {}))   # (a pack of several)
 
 
 @router.post("/cars", status_code=201)
@@ -620,7 +665,9 @@ def _finish(uid: str) -> None:
         else:
             res = _extract(u["path"], dest, u.get("pack", False), u.get("source", ""), auto=u["requested_kind"] is None)
             u["result"], u["note"], u["layouts"] = str(res), getattr(res, "note", ""), getattr(res, "layouts", None)
-            u["kind"] = getattr(res, "kind", "") or u["requested_kind"] or ""
+            pack = bool(getattr(res, "items", None))   # (a pack of several: each one and what was not installed; a single upload keeps the answer it always had)
+            u["items"], u["failed"] = (res.items, res.failed) if pack else (None, None)
+            u["kind"] = getattr(res, "kind", "") if getattr(res, "items", None) else (getattr(res, "kind", "") or u["requested_kind"] or "")   # (a mixed pack: no kind)
         u["state"] = "done"
     except HTTPException as e:
         u["state"], u["error"] = "error", str(e.detail)
@@ -695,7 +742,7 @@ def upload_from_link(body: LinkIn) -> dict:
 @router.get("/uploads/{uid}")
 def upload_status(uid: str) -> dict:
     u = _upload(uid)
-    return {k: u.get(k) for k in ("kind", "requested_kind", "size", "total", "state", "result", "note", "layouts", "error")}
+    return {k: u.get(k) for k in ("kind", "requested_kind", "size", "total", "state", "result", "note", "layouts", "items", "failed", "error")}
 
 
 class InboxIn(BaseModel):
