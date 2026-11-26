@@ -126,3 +126,51 @@ def test_only_a_zip_with_one_folder_is_accepted_no_rar_and_no_loose_files():
     assert loose.status_code == 400 and "exactly one folder" in loose.text
     only_files = api.post("/api/v1/content/cars", files={"file": ("f.zip", _zip({"data.acd": b"1", "ui_car.json": b"{}"}), "application/zip")})
     assert only_files.status_code == 400 and "exactly one folder" in only_files.text
+
+
+def _rar5(entries: dict[str, bytes]) -> bytes:
+    """A minimal RAR5 archive with stored (uncompressed) members, written by hand: no `rar` program is needed to test the RAR path."""
+    import zlib
+
+    def vint(n: int) -> bytes:
+        out = bytearray()
+        while True:
+            b, n = n & 0x7F, n >> 7
+            out.append(b | (0x80 if n else 0))
+            if not n:
+                return bytes(out)
+
+    def block(body: bytes, data: bytes = b"") -> bytes:
+        head = vint(len(body)) + body
+        return zlib.crc32(head).to_bytes(4, "little") + head + data
+
+    out = b"Rar!\x1a\x07\x01\x00" + block(vint(1) + vint(0) + vint(0))                         # main header: no flags
+    for name, data in entries.items():
+        n = name.encode()
+        body = (vint(2) + vint(0x0002) + vint(len(data))                                         # file header with a data area
+                + vint(0x0004) + vint(len(data)) + vint(0o644) + zlib.crc32(data).to_bytes(4, "little")   # CRC present, size, attributes
+                + vint(0) + vint(1) + vint(len(n)) + n)                                          # stored, unix, name
+        out += block(body, data)
+    return out + block(vint(5) + vint(0) + vint(0))                                              # end of archive
+
+
+@pytest.mark.skipif(not shutil.which("bsdtar"), reason="bsdtar is not installed")
+def test_a_rar_goes_to_bsdtar_as_a_stream(tmp_path, monkeypatch):
+    # vrc_mexico.rar (2026-11-26): opened as a FILE, libarchive also looked for a zip directory at the end, found the one of the rar's last member (a stored .zip)
+    # and unpacked that zip's 3 files instead of the track's 175: «no car or track folder found». Fed as a stream it is judged by its first bytes only.
+    from pathlib import Path
+    real, seen = unpack.subprocess.Popen, []
+    monkeypatch.setattr(unpack.subprocess, "Popen", lambda cmd, **kw: seen.append(cmd) or real(cmd, **kw))
+    inner = _zip({"Config.ini": b"[SPLIT_AO]", "ExtraSamples.data": b"x"})
+    arc, dest = tmp_path / "a.rar", tmp_path / "out"
+    arc.write_bytes(_rar5({"vrc_mexico/models.ini": b"[MODEL_0]", "vrc_mexico/ui/ui_track.json": b"{}", "vrc_mexico/extension/car.zip": inner}))
+    dest.mkdir()
+    unpack._extract_bsdtar(arc, dest, 10**9, 100)
+    assert seen[-1][seen[-1].index("-f") + 1] == "-", seen[-1]
+    assert (dest / "vrc_mexico" / "models.ini").read_bytes() == b"[MODEL_0]" and (dest / "vrc_mexico" / "extension" / "car.zip").read_bytes() == inner
+    assert not (dest / "Config.ini").exists()
+    seven = tmp_path / "b.7z"   # (7z must seek to its headers at the end: it keeps being opened as a file)
+    seven.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\0" * 32)
+    with pytest.raises(uploadguard.Rejected):
+        unpack._extract_bsdtar(seven, dest, 10**9, 100)
+    assert seen[-1][seen[-1].index("-f") + 1] == str(seven)
