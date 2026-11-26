@@ -160,17 +160,32 @@ def test_a_rar_goes_to_bsdtar_as_a_stream(tmp_path, monkeypatch):
     # and unpacked that zip's 3 files instead of the track's 175: «no car or track folder found». Fed as a stream it is judged by its first bytes only.
     from pathlib import Path
     real, seen = unpack.subprocess.Popen, []
-    monkeypatch.setattr(unpack.subprocess, "Popen", lambda cmd, **kw: seen.append(cmd) or real(cmd, **kw))
+    monkeypatch.setattr(unpack.subprocess, "Popen", lambda cmd, **kw: seen.append((cmd, kw.get("stdin"))) or real(cmd, **kw))
     inner = _zip({"Config.ini": b"[SPLIT_AO]", "ExtraSamples.data": b"x"})
     arc, dest = tmp_path / "a.rar", tmp_path / "out"
     arc.write_bytes(_rar5({"vrc_mexico/models.ini": b"[MODEL_0]", "vrc_mexico/ui/ui_track.json": b"{}", "vrc_mexico/extension/car.zip": inner}))
     dest.mkdir()
     unpack._extract_bsdtar(arc, dest, 10**9, 100)
-    assert seen[-1][seen[-1].index("-f") + 1] == "-", seen[-1]
+    cmd, stdin = seen[-1]
+    assert cmd[cmd.index("-f") + 1] == "-" and stdin == unpack.subprocess.PIPE, seen[-1]   # a real pipe: a file handed as stdin can still be seeked (the first fix did that and still failed)
     assert (dest / "vrc_mexico" / "models.ini").read_bytes() == b"[MODEL_0]" and (dest / "vrc_mexico" / "extension" / "car.zip").read_bytes() == inner
     assert not (dest / "Config.ini").exists()
     seven = tmp_path / "b.7z"   # (7z must seek to its headers at the end: it keeps being opened as a file)
     seven.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\0" * 32)
     with pytest.raises(uploadguard.Rejected):
         unpack._extract_bsdtar(seven, dest, 10**9, 100)
-    assert seen[-1][seen[-1].index("-f") + 1] == str(seven)
+    assert seen[-1][0][seen[-1][0].index("-f") + 1] == str(seven)
+
+
+@pytest.mark.skipif(not shutil.which("bsdtar"), reason="bsdtar is not installed")
+def test_a_rar_past_the_limit_stops_and_frees_the_feeding_thread(tmp_path):
+    arc, dest = tmp_path / "big.rar", tmp_path / "out"
+    arc.write_bytes(_rar5({f"t/f{i}.bin": os.urandom(1024 * 1024) for i in range(8)}))   # 8 MB through the pipe
+    dest.mkdir()
+    before = threading.active_count()
+    with pytest.raises(uploadguard.Rejected, match="more files or bytes"):
+        unpack._extract_bsdtar(arc, dest, 2 * 1024 * 1024, 100)
+    deadline = time.time() + 5
+    while threading.active_count() > before and time.time() < deadline:
+        time.sleep(0.05)
+    assert threading.active_count() == before, "the thread feeding the pipe ended"

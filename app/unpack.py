@@ -89,12 +89,31 @@ def _extract_bsdtar(archive: Path, dest: Path, max_total: int, max_files: int) -
     exe = shutil.which("bsdtar")
     if not exe:
         raise uploadguard.Rejected("this server cannot unpack that format (bsdtar is not installed)")
-    # A RAR goes in as a stream (-f -): opened as a file, libarchive also looks for a zip directory at its END and wins it when the rar's last member is a stored .zip
-    # (vrc_mexico.rar 2026-11-26: 3 entries of that inner zip instead of the 175 of the track). A stream can only be judged by its first bytes. 7z needs to seek: it keeps the file.
+    # A RAR goes in through a PIPE (-f -): opened as a file, libarchive also looks for a zip directory at its END and wins it when the rar's last member is a stored .zip
+    # (vrc_mexico.rar 2026-11-26: 3 entries of that inner zip instead of the 175 of the track). It must be a real pipe: a file handed as stdin can still be seeked.
+    # A pipe can only be judged by its first bytes. 7z needs to seek: it keeps the file.
     with archive.open("rb") as fh:
         rar = fh.read(6) == b"Rar!\x1a\x07"
-    with tempfile.TemporaryFile() as err, (archive.open("rb") if rar else open(os.devnull, "rb")) as src:
-        p = subprocess.Popen([exe, "-x", "-f", "-" if rar else str(archive), "-C", str(dest), "--no-same-owner", "--no-same-permissions"], stdin=src, stdout=subprocess.DEVNULL, stderr=err)
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen([exe, "-x", "-f", "-" if rar else str(archive), "-C", str(dest), "--no-same-owner", "--no-same-permissions"],
+                             stdin=subprocess.PIPE if rar else subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+        feeder, broke = None, []
+        if rar:
+            def feed():
+                try:
+                    with archive.open("rb") as src:
+                        shutil.copyfileobj(src, p.stdin, 1024 * 1024)
+                except BrokenPipeError:   # (bsdtar stopped reading: killed at a limit, or it failed; its exit code says which)
+                    pass
+                except OSError as e:      # the archive itself could not be read: never a success, whatever bsdtar made of what it got
+                    broke.append(e)
+                finally:
+                    try:
+                        p.stdin.close()
+                    except OSError:
+                        pass
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
         while True:   # ponytail: polled every 0.3 s, so a fast writer overshoots by what the disk writes in that time; it is bounded by the free-disk margin, FSIZE, max_files and the timeout. Poll faster if that is ever too loose
             try:
                 p.wait(timeout=0.3)
@@ -105,6 +124,10 @@ def _extract_bsdtar(archive: Path, dest: Path, max_total: int, max_files: int) -
                     p.kill()
                     p.wait()
                     raise uploadguard.Rejected("the archive unpacks to more files or bytes than allowed")
+        if feeder:
+            feeder.join(5)
+        if broke:
+            raise uploadguard.Rejected(f"cannot read the archive ({broke[0].strerror or type(broke[0]).__name__})")
         if p.returncode:
             err.seek(0)
             raise uploadguard.Rejected("cannot unpack the archive (damaged, encrypted or unsupported): " + err.read(300).decode("utf-8", "replace").strip())
