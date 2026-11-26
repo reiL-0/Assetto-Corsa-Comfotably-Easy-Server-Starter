@@ -848,3 +848,37 @@ def test_with_the_automatic_pace_car_every_yellow_brings_it_out_and_without_it_n
     rc.pace_teleport()
     rc.set_flag("yellow", field=field)
     assert rc.pace_car_state()["mode"] == "lead", "the same caution's yellow again: it leads, not 'in'"
+
+
+def test_in_a_nascar_race_every_yellow_brings_the_pace_car_out_and_elsewhere_only_the_button_does():
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    nascar = RaceControl({"session_type": 3})
+    nascar.configure_nascar(70)
+    nascar.set_pace_car(4)
+    nascar.set_flag("yellow", field=field, source="incident")
+    assert nascar.pace_car_state()["mode"] == "lead", "NASCAR: the yellow is the pace car"
+    other = RaceControl({"session_type": 3})
+    other.set_pace_car(4)
+    other.set_flag("yellow", field=field)
+    assert other.pace_car_state()["mode"] == "wait", "any other race: it waits for «Desplegar pace car» (or the automatic switch)"
+
+
+@pytest.mark.parametrize("source", ["nascar", "director"])
+def test_a_nascar_stage_yellow_and_the_red_flag_restart_yellow_bring_the_pace_car_out(source):
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    rc = RaceControl({"session_type": 3})
+    rc.configure_nascar(70)
+    rc.set_pace_car(4)
+    if source == "director":   # (the restart after a red flag: app/racecontrol.py puts the yellow when the red is withdrawn)
+        rc.red_ref = {"order": [0], "progress": {0: .5}, "lap": 3}
+    rc.set_flag("yellow", field=field, source=source)
+    assert rc.pace_car_state()["mode"] == "lead" and rc._pace_leads()
+
+
+def test_the_rolling_start_is_not_a_second_deployment_in_nascar():
+    rc = RaceControl({"session_type": 3})
+    rc.configure_nascar(70)
+    rc.set_pace_car(4)
+    assert rc.start_formation() and rc.pace_car_state()["mode"] == "lead" and rc.formation
