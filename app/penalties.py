@@ -87,7 +87,7 @@ def _new_penalty(sess: SessionDep, server_id: int, filename: str, parsed: dict, 
     sess.refresh(p)
     record(server_id, "penalty_created", filename=filename, driver_guid=guid, penalty_kind=kind, value=value, source=who, reason=reason, executed=True)
     out = _out(p)
-    discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, guid), out.kind, out.value, out.reason))
+    discord.staff(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, guid), out.kind, out.value, out.reason))
     return out
 
 
@@ -179,7 +179,7 @@ def remove_penalty(server_id: int, filename: str, penalty_id: int, sess: Session
         if kind == "grid":
             _carry(sess, server_id, filename)
     record(server_id, "penalty_forgiven", filename=filename, penalty_id=penalty_id, driver_guid=p.driver_guid, executed=True)
-    discord.announce(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))
+    discord.staff(discord.penalty_message(_get(sess, server_id).name, parsed, _driver_name(parsed, p.driver_guid), out.kind, out.value))
 
 
 # --- warnings for the race director (app/stewards/auto.py) and closing the result ---
