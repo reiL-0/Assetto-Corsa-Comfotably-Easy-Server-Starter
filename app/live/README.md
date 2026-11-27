@@ -67,7 +67,9 @@ every `car_update`) keeps each car's (spline, x, z) in the lap it drives and put
 `submit` stores it if it is whole (starts and ends at the line, no hole over 3 % of the lap or 1.5 s) and quicker than the stored one: 500 points
 resampled by spline and the corners found on them (`find_corners`: curvature over distance smoothed over ±15 m, tighter than 200 m radius and
 turning ≥ 25° in all, stretches of one hand closer than 30 m merged, numbered from the line). Table `track_shapes` (one row per track/layout,
-new: `create_all`). Served at `GET .../acsm/api/live-timings/track-shape.json` (404 until a lap was traced); the site labels the corners on the map.
+new: `create_all`). Served at `GET .../acsm/api/live-timings/track-shape.json`, with `start` (the start/finish line: x, z and the direction of travel)
+and `pit` (the pit lane every 4 m) from the AI lines kept for the pace bot (`landmarks`, app/pitentry.py `lines_path`); 404 when there is none of it. The site
+labels the corners and draws the line and the pit lane on the map.
 
 ### `logboard.py` — `LogBoard`
 El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACSP. acServer imprime su clasificación tras cada vuelta (`SendLapCompletedMessage` + una línea `N) nombre BEST: … TOTAL: … Laps:n SesID:i HasFinished:b` por plaza), quién ocupa cada plaza (`Dispatching TCP message to <auto> (<plaza>) [<nombre> []]`, con el Steam ID en la línea `Looking for available slot … GUID` anterior) y la sesión (`SENDING session name/type/time/laps`, `NextSession`). `feed(línea)` (lo llama `supervisor.Instance._tail` con cada línea nueva) mantiene un `LiveBoard`, la misma estructura que rellena ACSP, así que `acsm.leaderboard` sirve el mismo JSON de cualquiera de las dos fuentes. Sabe menos que ACSP: sin posición en pista, velocidad punta ni última vuelta. Un bloque completo manda sobre quién está conectado.

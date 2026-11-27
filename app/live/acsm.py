@@ -65,7 +65,8 @@ def track_records(server_id: int) -> dict:
 @router.get("/api/live-timings/track-shape.json")
 def track_shape(server_id: int) -> dict:
     """The line and the corners (T1..Tn) of the layout this server is set up with, learnt from the quickest clean lap driven on it
-    (app/live/trackshape.py). 404 until a clean lap has been traced there. Works for a stopped server, like records.json."""
+    (app/live/trackshape.py), with the start/finish line (`start`: x, z and the direction of travel) and the pit lane (`pit`: points) when
+    the track came with its AI lines. 404 until there is any of it. Works for a stopped server, like records.json."""
     from sqlmodel import Session
 
     from app.db import engine
@@ -76,10 +77,16 @@ def track_shape(server_id: int) -> dict:
     if not srv:
         raise HTTPException(404, "not found")
     conf = (srv.config or {}).get("SERVER", {})
-    shape = trackshape.get(str(conf.get("TRACK", "")), str(conf.get("CONFIG_TRACK", "") or ""))
-    if not shape:
+    track, config = str(conf.get("TRACK", "")), str(conf.get("CONFIG_TRACK", "") or "")
+    shape, marks = trackshape.get(track, config), trackshape.landmarks(track, config)
+    if not shape and not marks:
         raise HTTPException(404, "no shape yet")
-    return shape
+    out = dict(shape or {"track": csp.clean_track(track), "config": config, "lapMs": 0, "points": [], "corners": []})
+    out.update(marks)   # start/finish line and pit lane, from the AI lines (when the track came with them)
+    if "start" not in out and len(out["points"]) > 1:   # no AI lines: the traced lap starts at the line too
+        (x0, z0), (x1, z1) = out["points"][0], out["points"][1]
+        out["start"] = [x0, z0, round(x1 - x0, 2), round(z1 - z0, 2)]
+    return out
 
 
 def _asset(track: str, config: str, rel: str) -> Path:

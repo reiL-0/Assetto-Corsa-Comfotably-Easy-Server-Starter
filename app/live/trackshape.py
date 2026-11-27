@@ -212,6 +212,47 @@ def submit(track: str | None, config: str | None, lap_ms: int, samples: list | N
         return False
 
 
+_marks: dict[tuple[str, str], tuple[float, dict]] = {}
+PIT_STEP_M = 4.0   # the pit lane drawn every few metres: enough for a map, a fraction of the file
+
+
+def landmarks(track: str | None, config: str | None) -> dict:
+    """{start: [x, z, dx, dz], pit: [[x, z], ...]} from the layout's AI lines the manager keeps for the pace bot (app/pitentry.py): the racing line
+    starts at the start/finish line, and pit_lane.ai is the axis of the pit lane. {} when the track came without them. Read at most every CACHE_S."""
+    key = _key(track, config)
+    hit = _marks.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_S:
+        return hit[1]
+    out: dict = {}
+    from app import pitentry
+    d = pitentry.lines_path(*key) if key[0] else None
+    import struct
+
+    def read(name):   # one file at a time: a bad racing line must not hide a good pit lane
+        try:
+            return pitentry.read_ai(d / name)[0] if d and (d / name).is_file() else None
+        except (OSError, ValueError, struct.error) as e:
+            log.warning("AI line %s of %s/%s unreadable for the map: %s", name, key[0], key[1] or "-", e)
+            return None
+
+    line, pit = read("fast_lane.ai"), read("pit_lane.ai")
+    if line:
+        j = next((i for i in range(1, len(line)) if math.dist(line[0], line[i]) > 2.0), None)   # (a few metres on, for the direction of the line)
+        if j:
+            out["start"] = [round(line[0][0], 1), round(line[0][1], 1), round(line[j][0] - line[0][0], 2), round(line[j][1] - line[0][1], 2)]
+    if pit:
+        keep, last = [], None
+        for p in pit:
+            if last is None or math.dist(p, last) >= PIT_STEP_M:
+                keep.append([round(p[0], 1), round(p[1], 1)])
+                last = p
+        if keep[-1] != [round(pit[-1][0], 1), round(pit[-1][1], 1)]:
+            keep.append([round(pit[-1][0], 1), round(pit[-1][1], 1)])
+        out["pit"] = keep
+    _marks[key] = (time.monotonic(), out)
+    return out
+
+
 def get(track: str | None, config: str | None) -> dict | None:
     """The stored shape of a layout (read at most every CACHE_S), or None."""
     key = _key(track, config)
