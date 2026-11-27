@@ -69,7 +69,7 @@ resampled by spline and the corners found on them (`find_corners`: curvature ove
 turning ≥ 25° in all, stretches of one hand closer than 30 m merged, numbered from the line). Table `track_shapes` (one row per track/layout,
 new: `create_all`). Served at `GET .../acsm/api/live-timings/track-shape.json`, with `start` (the start/finish line: x, z and the direction of travel)
 and `pit` (the pit lane every 4 m) from the AI lines kept for the pace bot; a layout nobody has lapped yet takes its `points`
-and corners from the AI racing line itself (`source: ai`, resampled by distance). These come (`landmarks`, app/pitentry.py `lines_path`); 404 when there is none of it. The site
+and corners from the AI racing line itself (`source: ai`, resampled by distance) (`landmarks`, app/pitentry.py `lines_path`); 404 when there is none of it. The site
 labels the corners and draws the line and the pit lane on the map.
 
 ### `logboard.py` — `LogBoard`
