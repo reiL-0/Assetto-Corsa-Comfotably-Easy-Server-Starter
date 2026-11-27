@@ -114,3 +114,46 @@ def test_the_shape_of_the_set_up_track_is_served_404_until_a_lap_was_traced():
     trackshape._cache.clear()
     body = api.get(url).json()
     assert body["track"] == "shape_srv" and len(body["corners"]) == 4 and len(body["points"]) == trackshape.N
+
+
+def _ai(path, pts):
+    import struct
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = struct.pack("<4i", 7, len(pts), 0, 0) + b"".join(struct.pack("<4fi", x, 0.0, z, 0.0, i) for i, (x, z) in enumerate(pts))
+    path.write_bytes(body)
+
+
+def test_start_line_and_pit_lane_come_from_the_kept_ai_lines_even_before_a_lap_is_traced():
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app.config import settings
+    from app.db import engine
+    from app.main import app
+    from app.models import Server
+    d = Path(settings.data_dir) / "pace_lines" / "mark_trk" / "-"
+    _ai(d / "fast_lane.ai", [(100.0, 50.0), (100.5, 50.0), (103.0, 50.0), (110.0, 50.0)])   # the line starts at the start/finish, heading +x
+    _ai(d / "pit_lane.ai", [(float(x), 40.0) for x in range(0, 101)])                        # 100 m of pit lane, one point a metre
+    with Session(engine) as s:
+        s.add(Server(id=961, name="marks", base_port=18961, config={"SERVER": {"TRACK": "mark_trk", "CONFIG_TRACK": ""}}))
+        s.add(Server(id=962, name="none", base_port=18962, config={"SERVER": {"TRACK": "no_lines_trk", "CONFIG_TRACK": ""}}))
+        s.commit()
+    api = TestClient(app)
+    body = api.get("/api/v1/servers/961/acsm/api/live-timings/track-shape.json").json()
+    assert body["start"] == [100.0, 50.0, 3.0, 0.0], "the first point of the racing line, and the way the cars go"
+    assert body["pit"][0] == [0.0, 40.0] and body["pit"][-1] == [100.0, 40.0] and 20 <= len(body["pit"]) <= 30, "every ~4 m, both ends kept"
+    assert body["points"] == [] and body["corners"] == []
+    assert api.get("/api/v1/servers/962/acsm/api/live-timings/track-shape.json").status_code == 404
+
+
+def test_a_broken_racing_line_does_not_hide_a_good_pit_lane():
+    from pathlib import Path
+
+    from app.config import settings
+    d = Path(settings.data_dir) / "pace_lines" / "half_trk" / "-"
+    _ai(d / "pit_lane.ai", [(float(x), 0.0) for x in range(0, 21)])
+    (d / "fast_lane.ai").write_bytes(b"\x07\x00")   # truncated
+    marks = trackshape.landmarks("half_trk", "")
+    assert "start" not in marks and marks["pit"][0] == [0.0, 0.0]
