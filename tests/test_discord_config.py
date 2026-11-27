@@ -401,12 +401,20 @@ def test_who_started_a_vote_goes_only_to_its_own_channel_and_to_none_when_it_has
     fake.calls.clear()
     discord.notify_votes("sin canal"); drain()
     assert not fake.calls, "with no votes channel it must not fall back to the announcements or the status channel"
+    discord.staff("⚖️ sanción"); discord.alert("⚠️ comisarios"); drain()   # no administrative channel: each goes where it went before there was one
+    assert sorted((c["path"], c["body"]["content"]) for c in fake.calls) == [(f"/channels/{CH}/messages", "⚖️ sanción"), (f"/channels/{CH2}/messages", "⚠️ comisarios")], fake.calls
     r = client.put("/api/v1/discord", json={"votes_channel_id": CH3})
     assert r.status_code == 200 and r.json()["votes_channel_id"] == CH3
     fake.calls.clear()
-    discord.notify_votes("🗳️ Steam 1"); discord.announce("a"); discord.alert("b"); drain()
+    discord.notify_votes("🗳️ Steam 1"); discord.announce("a"); discord.on_event(999999, "server_start", None, None); drain()
     by_channel = {c["path"]: c["body"]["content"] for c in fake.calls}
-    assert by_channel[f"/channels/{CH3}/messages"] == "🗳️ Steam 1" and by_channel[f"/channels/{CH}/messages"] == "a" and by_channel[f"/channels/{CH2}/messages"] == "b"
+    assert by_channel[f"/channels/{CH3}/messages"] == "🗳️ Steam 1" and by_channel[f"/channels/{CH}/messages"] == "a" and f"/channels/{CH2}/messages" in by_channel
+    fake.calls.clear()   # the administrative channel (stored as votes_channel_id): penalties, sanctions and stewards' warnings go there, and only there
+    discord.staff("⚖️ sanción"); discord.alert("⚠️ comisarios"); drain()
+    assert sorted((c["path"], c["body"]["content"]) for c in fake.calls) == [(f"/channels/{CH3}/messages", "⚖️ sanción"), (f"/channels/{CH3}/messages", "⚠️ comisarios")], fake.calls
+    assert all(c["body"].get("allowed_mentions") == {"parse": []} for c in fake.calls), "an administrative message names drivers: Discord may ping nobody"
+    fake.calls.clear()
+    discord.notify_votes("🗳️ Steam 1"); discord.announce("a"); drain()
     pings = {c["path"]: c["body"].get("allowed_mentions") for c in fake.calls}
     assert pings[f"/channels/{CH3}/messages"] == {"parse": []}, "the votes message names a driver: Discord may ping nobody"
     assert pings[f"/channels/{CH}/messages"] is None, "the announcements keep their own mention rules"
@@ -427,7 +435,7 @@ def test_the_test_message_also_reaches_the_votes_channel(fake):
     fake.calls.clear()
     assert client.post("/api/v1/discord/test").status_code == 200
     posts = {c["path"]: c["body"]["content"] for c in fake.calls if c["method"] == "POST"}
-    assert "Steam ID" in posts[f"/channels/{CH3}/messages"] and "anuncios del servidor" in posts[f"/channels/{CH}/messages"]
+    assert "canal administrativo" in posts[f"/channels/{CH3}/messages"] and "anuncios del servidor" in posts[f"/channels/{CH}/messages"]
 
 
 def test_a_partial_change_cannot_make_another_channel_equal_to_the_votes_channel(fake):

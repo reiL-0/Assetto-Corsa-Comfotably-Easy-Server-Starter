@@ -366,7 +366,7 @@ async def _tick_pending(sess: Session, sc: Schedule, ev: Event, srv: Server, now
         discord.announce(f"🏁 **{ev.title}** ya está en marcha en {srv.name}" + _extra(sc))
     except ServerError as e:
         sc.state, sc.result = "failed", str(e.detail)
-        discord.announce(f"⚠️ **{ev.title}** no pudo iniciarse en {srv.name}: {e.detail}")
+        discord.staff(f"⚠️ **{ev.title}** no pudo iniciarse en {srv.name}: {e.detail}")
 
 
 async def _realign(sess: Session, sc: Schedule, now: float) -> None:

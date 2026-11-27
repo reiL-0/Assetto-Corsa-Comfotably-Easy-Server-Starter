@@ -143,15 +143,34 @@ def announce(text: str) -> None:
         threading.Thread(target=_send, args=(text, settings.discord_webhook), daemon=True).start()
 
 
-def notify_votes(text: str) -> None:
-    """Who started a vote (app/votes.py): ONLY to the client's own bot and its votes channel, never to the announcements or the server-status channel; nothing if none is set."""
+def _admin(text: str, fallback) -> bool:
+    """The ADMINISTRATIVE channel of the panel's bot (stored as `votes_channel_id`, its first use): votes, penalties, stewards' warnings, an event that could not start. Nobody is pinged
+    (they name drivers). Without that channel, `fallback(text)` = where the message went before there was one (nothing is lost on a site that never chose it)."""
     cfg = bot()
     if cfg and cfg["votes_channel_id"]:
-        threading.Thread(target=_post_as_bot, args=(cfg, cfg["votes_channel_id"], text, True), daemon=True).start()   # (it names a driver: nobody may be pinged)
+        threading.Thread(target=_post_as_bot, args=(cfg, cfg["votes_channel_id"], text, True), daemon=True).start()
+        return True
+    if fallback:
+        fallback(text)
+    return False
+
+
+def notify_votes(text: str) -> None:
+    """Who started a vote (app/votes.py): only to the administrative channel; nothing if none is set (never to the announcements or the server status)."""
+    _admin(text, None)
+
+
+def staff(text: str) -> None:
+    """Penalties, league sanctions, an event that could not start (app/penalties.py, app/league.py, app/schedule.py): the administrative channel, else the announcements as before."""
+    _admin(text, announce)
 
 
 def alert(text: str) -> None:
-    """A warning for the stewards on the server-status channel; nothing if it is not set."""
+    """A warning for the stewards (integrity, drivers left off a list): the administrative channel, else the server-status channel as before; nothing if neither is set."""
+    _admin(text, _status_alert)
+
+
+def _status_alert(text: str) -> None:
     cfg = bot()
     if cfg:
         if cfg["status_enabled"]:

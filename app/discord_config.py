@@ -168,7 +168,7 @@ def parse(body: object, current: dict) -> dict:
     new["status_channel_id"] = _ids({"v": body.get("status_channel_id", current.get("status_channel_id"))}, "v", False)
     new["votes_channel_id"] = _ids({"v": body.get("votes_channel_id", current.get("votes_channel_id"))}, "v", False)   # who started a vote: its own channel, empty = not posted to Discord
     if new["votes_channel_id"] in (new["channel_id"], new["status_channel_id"] or new["channel_id"]):
-        raise HTTPException(422, "El canal de votaciones debe ser distinto del de anuncios y del de estado del servidor.")
+        raise HTTPException(422, "El canal administrativo debe ser distinto del de anuncios de eventos y del de estado de servidores.")
     new["role_id"] = _ids({"v": body.get("role_id", current.get("role_id"))}, "v", False)
     rem = body.get("reminders", current.get("reminders", DEFAULT_REMINDERS))
     if (not isinstance(rem, list) or len(rem) > 5 or not all(isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= 1440 for m in rem)):
@@ -274,7 +274,7 @@ def test() -> dict:
     sent = []
     channels = {cfg["channel_id"]: "✅ Conexión correcta: este canal recibirá los anuncios del servidor.", cfg["status_channel_id"]: "✅ Conexión correcta: este canal recibirá los anuncios del servidor."}
     if cfg["votes_channel_id"]:
-        channels[cfg["votes_channel_id"]] = "✅ Conexión correcta: este canal recibirá el aviso de quién inicia una votación (solo su Steam ID)."
+        channels[cfg["votes_channel_id"]] = "✅ Conexión correcta: este es el canal administrativo (votaciones, sanciones y avisos para comisarios)."
     for ch, text in channels.items():
         try:
             discord._api("POST", f"/channels/{ch}/messages", {"content": text}, bearer=f"Bot {cfg['token']}")

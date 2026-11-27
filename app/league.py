@@ -416,7 +416,7 @@ def _qualy_grid(sess: Session, c: Championship, server_id: int, filename: str, p
         if moved:
             sess.add(Penalty(server_id=server_id, filename=filename, driver_guid=x.guid, kind="grid", value=moved, created_by=x.created_by,
                              reason=f"Suspensión de liga: pierde {moved} lugares en la parrilla" + (f" (le quedan {x.places_left} para la siguiente)" if x.places_left else "")))
-            discord.announce(f"⛔ **{c.name}**: {x.name or x.guid} pierde {moved} lugares en la parrilla" + (f"; {x.places_left} más en la siguiente carrera" if x.places_left else ""))
+            discord.staff(f"⛔ **{c.name}**: {x.name or x.guid} pierde {moved} lugares en la parrilla" + (f"; {x.places_left} más en la siguiente carrera" if x.places_left else ""))
         sess.add(x)
 
 
@@ -460,7 +460,7 @@ def sync_grid_carry(sess: Session, c: Championship, server_id: int | None = None
                 if p.driver_guid in (ran[(x.server_id, x.filename)] or ()):
                     sess.add(Penalty(server_id=x.server_id, filename=x.filename, driver_guid=p.driver_guid, kind="grid", value=p.value, created_by=p.created_by, auto_key=key,
                                      reason=f"Sanción de la carrera anterior: pierde {p.value} lugares en la parrilla" + (f" ({p.reason})" if p.reason else "")))
-                    discord.announce(f"⛔ **{c.name}**: un piloto sancionado en la carrera anterior pierde {p.value} lugares en la parrilla de la siguiente")
+                    discord.staff(f"⛔ **{c.name}**: un piloto sancionado en la carrera anterior pierde {p.value} lugares en la parrilla de la siguiente")
                     made += 1
                     break
         sess.flush()
@@ -584,7 +584,7 @@ def add_suspension(championship_id: int, body: SuspensionIn, sess: SessionDep, u
     sess.add(x)
     sess.commit()
     sess.refresh(x)
-    discord.announce(f"⛔ **{c.name}**: {m.name or m.guid} — {_describe(x)}. Motivo: {x.reason}")
+    discord.staff(f"⛔ **{c.name}**: {m.name or m.guid} — {_describe(x)}. Motivo: {x.reason}")
     return {"id": x.id, "detail": _describe(x)}
 
 
