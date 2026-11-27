@@ -538,12 +538,12 @@ class RaceControl:
 
     @fieldrec.capture(_lock)
     def pace_deploy(self, field=None) -> list[tuple] | None:
-        """The director deploys the pace car: it leaves the pits and leads. Under green it puts the yellow out first (its actions are returned for the caller, as set_flag's). A deployment after "to go" cancels that
+        """The director deploys the pace car: it leaves the pits and leads. Under green it puts the yellow out first, and a VSC / FCY out becomes that yellow (its actions are returned for the caller, as set_flag's). A deployment after "to go" cancels that
         restart (the pace car is out again). None = no pace car on the server."""
         with _lock:
             if self.pace_car is None:
                 return None
-            actions = [] if self.flag in CAUTION else self.set_flag("yellow", field=field)
+            actions = [] if self.flag == "yellow" else self.set_flag("yellow", field=field)   # (under green it puts the yellow out; a VSC / FCY ends: the pace car leads the field, nobody keeps a delta of their own)
             self.pace_out, self.pace_tp = True, False
             self.pace_park = self.pace_car_in = self.pace_car_pitted = self.one_more = self.go_armed = False
             self.go_early = self.blocked_crossings = 0

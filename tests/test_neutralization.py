@@ -882,3 +882,17 @@ def test_the_rolling_start_is_not_a_second_deployment_in_nascar():
     rc.configure_nascar(70)
     rc.set_pace_car(4)
     assert rc.start_formation() and rc.pace_car_state()["mode"] == "lead" and rc.formation
+
+
+
+@pytest.mark.parametrize("flag", ["vsc", "fcy"])
+def test_deploying_the_pace_car_ends_a_vsc_or_fcy(flag):
+    field = Mock()
+    field.snapshot.return_value = {0: .5, 4: .6}
+    rc = RaceControl({"session_type": 3})
+    rc.set_pace_car(4)
+    rc.set_flag(flag, 80, field=field)
+    assert rc.flag == flag and rc.pace_kmh == 80
+    assert isinstance(rc.pace_deploy(field=field), list)
+    assert rc.flag == "yellow" and rc.pace_kmh is None and rc.vsc_start == 0.0, "the VSC / FCY is over: nobody is judged on its pace or delta"
+    assert rc.pace_car_state()["mode"] == "lead"
