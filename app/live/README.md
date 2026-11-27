@@ -61,6 +61,14 @@ Foundations of the AUTOMATIC flags (the blue flag, the danger ahead), which deci
 - **`tracklen.py`**: `TrackLength.metres()` = the `length` of `ui_track.json` (layout, then track) when the content has it (the server pack usually has no `ui/`), else an ESTIMATE: `LapLength` integrates the speed of a car over a lap driven without a re-anchoring and without a gap > 1 s, and answers the median once at least 3 laps agree within 4 %.
   Until then it is None and whoever needs it stays off (nothing is guessed). `ACSPClient.length` is fed by every `car_update` (unless a length is configured), reset on `new_session`, and the length is logged once.
 
+### `trackshape.py` — the line of a layout and its corners (T1..Tn)
+stracker keeps a position trace of every lap (LapBinBlob); we keep ONE per layout: the quickest clean lap. `Tracer` (one per `ACSPClient`, fed by
+every `car_update`) keeps each car's (spline, x, z) in the lap it drives and puts it aside when the spline wraps; on `lap_completed` without cuts
+`submit` stores it if it is whole (starts and ends at the line, no hole over 3 % of the lap or 1.5 s) and quicker than the stored one: 500 points
+resampled by spline and the corners found on them (`find_corners`: curvature over distance smoothed over ±15 m, tighter than 200 m radius and
+turning ≥ 25° in all, stretches of one hand closer than 30 m merged, numbered from the line). Table `track_shapes` (one row per track/layout,
+new: `create_all`). Served at `GET .../acsm/api/live-timings/track-shape.json` (404 until a lap was traced); the site labels the corners on the map.
+
 ### `logboard.py` — `LogBoard`
 El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACSP. acServer imprime su clasificación tras cada vuelta (`SendLapCompletedMessage` + una línea `N) nombre BEST: … TOTAL: … Laps:n SesID:i HasFinished:b` por plaza), quién ocupa cada plaza (`Dispatching TCP message to <auto> (<plaza>) [<nombre> []]`, con el Steam ID en la línea `Looking for available slot … GUID` anterior) y la sesión (`SENDING session name/type/time/laps`, `NextSession`). `feed(línea)` (lo llama `supervisor.Instance._tail` con cada línea nueva) mantiene un `LiveBoard`, la misma estructura que rellena ACSP, así que `acsm.leaderboard` sirve el mismo JSON de cualquiera de las dos fuentes. Sabe menos que ACSP: sin posición en pista, velocidad punta ni última vuelta. Un bloque completo manda sobre quién está conectado.
 
