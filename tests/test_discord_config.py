@@ -444,3 +444,21 @@ def test_a_partial_change_cannot_make_another_channel_equal_to_the_votes_channel
         r = client.put("/api/v1/discord", json=body)
         assert r.status_code == 422 and "distinto" in r.json()["detail"], body
     assert stored()["channel_id"] == CH and stored()["status_channel_id"] == CH2 and stored()["votes_channel_id"] == CH3
+
+
+def test_without_the_panels_bot_the_administrative_messages_keep_the_environments_webhooks(fake, monkeypatch):
+    """The league's setup (ACM_DISCORD_WEBHOOK / ACM_DISCORD_STATUS_WEBHOOK, no bot in the panel): penalties still reach the announcements webhook, stewards' warnings the status one, votes nowhere."""
+    sent = []
+    monkeypatch.setattr(discord, "_send", lambda text, url=None: sent.append((text, url)))
+    monkeypatch.setattr(settings, "discord_webhook", "https://hook/announce")
+    monkeypatch.setattr(settings, "discord_status_webhook", "https://hook/status")
+    discord.staff("⚖️ sanción"); discord.alert("⚠️ comisarios"); discord.notify_votes("🗳️"); drain()
+    assert sorted(sent, key=str) == sorted([("⚖️ sanción", "https://hook/announce"), ("⚠️ comisarios", None)], key=str), sent   # (_send with no url = the status webhook)
+    assert not fake.calls
+
+
+def test_the_switches_still_hold_when_there_is_no_administrative_channel(fake):
+    client.put("/api/v1/discord", json={**GOOD, "status_channel_id": CH2, "announce_enabled": False, "status_enabled": False})
+    fake.calls.clear()
+    discord.staff("⚖️ sanción"); discord.alert("⚠️ comisarios"); drain()
+    assert not fake.calls, "a switched-off channel got the administrative fallback"
