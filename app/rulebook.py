@@ -190,6 +190,26 @@ class PitCfg(_Strict):
     penalty_s: int = Field(default=0, ge=0, le=60)
 
 
+class MandatoryPitRule(_Strict):
+    """The mandatory pit stop of a race (a server's or a league's choice, None = no rule): ONE stop in the pit box, with the car standing still, between `from_lap` and `to_lap` (the lap the car is on; 0 = to the
+    end), in which it did what this rule asks: new tyres, fuel (at least `min_fuel_l` litres), and over the race two different compounds (F1). What the stop did comes from the driver's own hub (client
+    evidence); that it STOPPED is the manager's own reading. Who has not made it when the window closes gets a drive-through (`unserved_s` on the result if he never serves it); a window that lasts to the
+    flag ends in `unserved_s` on the result (there is no lap left to serve a drive-through)."""
+    from_lap: int = Field(default=1, ge=1, le=1000)
+    to_lap: int = Field(default=0, ge=0, le=1000)   # 0 = to the end of the race
+    require_tyres: bool = True
+    require_fuel: bool = False
+    min_fuel_l: int = Field(default=0, ge=0, le=500)
+    two_compounds: bool = False
+    unserved_s: int = Field(default=30, ge=1, le=600)
+
+    @model_validator(mode="after")
+    def _window(self):
+        if self.to_lap and self.to_lap < self.from_lap:
+            raise ValueError("mandatory_pit: to_lap before from_lap")
+        return self
+
+
 class Detectors(_Strict):
     cuts: CutRule | None = None   # None = off
     drs: DrsRule | None = None   # None = off
@@ -202,6 +222,7 @@ class Detectors(_Strict):
     give_back: GiveBackRule = Field(default_factory=GiveBackRule)
     vsc: VscCfg = Field(default_factory=VscCfg)
     pit: PitCfg = Field(default_factory=PitCfg)
+    mandatory_pit: MandatoryPitRule | None = None   # None = no mandatory stop
 
 
 class SlowCarRule(_Strict):

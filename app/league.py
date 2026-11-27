@@ -363,7 +363,7 @@ def effective_rules(server_id: int) -> dict:
                 neutral["mode"] = "off"   # stages = a NASCAR race, whatever the league says: NASCAR has its own cautions (app/live/caution.py) and no automatic VSC/FCY touches it
             neutral["category"] = (server.session or {}).get("category") or (server.rules or {}).get("preset") or "" if server else ""
             neutral["vsc"] = det.vsc.model_dump()   # (how the automatic VSC/FCY is run: the server's, a league only when its rulebook says something else)
-        out = {"cut": cut_rule, "give_back": give_back, "drs": drs, "flag_rules": {k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}, "flag_modes": modes, "neutralization": neutral,
+        out = {"cut": cut_rule, "give_back": give_back, "drs": drs, "flag_rules": {**{k: getattr(det, k).model_dump() for k in FLAG_RULE_KINDS}, "mandatory_pit": det.mandatory_pit.model_dump() if det.mandatory_pit else None}, "flag_modes": modes, "neutralization": neutral,
                "vsc": det.vsc.model_dump(), "pit": det.pit.model_dump() if det.pit.limit_kmh > 0 else None}
         if len(_EFFECTIVE) > 64:
             _EFFECTIVE.clear()
