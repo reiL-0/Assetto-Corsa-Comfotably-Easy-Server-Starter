@@ -1628,10 +1628,18 @@ class RaceControl:
 
     def driver_marks(self, now: float) -> dict:
         """What the director's table shows beside each driver (read-only, one look under the lock): who has a drive-through to serve, the black-and-white / orange / black flags, who is disqualified, who was
-        reported in the pit lane in the last seconds and who was judged under a VSC/FCY; `conduct` = the sanctions of each driver in this race (by Steam ID)."""
+        reported in the pit lane in the last seconds and who was judged under a VSC/FCY; `conduct` = the sanctions of each driver in this race (by Steam ID); `mpit` = the mandatory stop (`_mpit_marks`)."""
         with _lock:
             return {"dt": {p["car_id"] for p in self.penalties}, "bw": set(self.bw_shown), "black": set(self.black), "meatball": set(self.meatball), "dsq": set(self.disqualified),
-                    "conduct": dict(self.conduct), "pits": {c for c, t in self._pit_seen.items() if now - t < DRIVER_PITS_FOR}, "viol": {v["car_id"] for v in self.violations}}
+                    "conduct": dict(self.conduct), "pits": {c for c, t in self._pit_seen.items() if now - t < DRIVER_PITS_FOR}, "viol": {v["car_id"] for v in self.violations},
+                    "mpit": self._mpit_marks()}
+
+    def _mpit_marks(self) -> dict | None:
+        """The mandatory stop by driver (Steam ID) for the director's table: the rule, who made it, who was sanctioned for it. None = no rule. Under the lock."""
+        rule = self._mpit_rule()
+        if not rule:
+            return None
+        return {"rule": dict(rule), "made": {g for g in self.mpit_done if self._mpit_made(g, rule)}, "charged": set(self.mpit_charged)}
 
     def show_black(self, car: int) -> bool:
         """The DIRECTOR shows the black flag to a car: it has `pit_laps` laps to come into the pits or it is disqualified (the only way a black flag is given: no rule gives it by itself). False when the car has no
