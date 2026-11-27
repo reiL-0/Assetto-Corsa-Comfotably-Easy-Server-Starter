@@ -1408,14 +1408,14 @@ def pace_car_to_pits(server_id: int, sess: SessionDep) -> dict:
 
 @control_router.post("/pace-car/deploy")
 def pace_car_deploy(server_id: int, sess: SessionDep) -> dict:
-    """The director deploys the pace car (no yellow does it by itself). Under green the yellow goes out first, as the director's own yellow would."""
+    """The director deploys the pace car. Under green, or under a VSC / FCY (it ends), the yellow goes out first, as the director's own yellow would."""
     inst, rc = _control(server_id, sess)
     with _lock:   # (one look: a flag of another request cannot slip between the reading and the deployment)
-        green = rc.flag not in CAUTION
+        changed = rc.flag != "yellow"   # (green, or a VSC / FCY that the pace car replaces)
         actions = rc.pace_deploy(field=inst.acsp.field)
     if actions is None:
         raise HTTPException(409, "no hay pace car en el servidor")
-    if green:
+    if changed:
         _say(rc, SAY["yellow"], "flag")
         with _lock:
             apply_last_lap(inst, rc, "yellow")

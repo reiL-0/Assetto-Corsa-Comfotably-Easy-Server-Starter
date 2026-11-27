@@ -1858,3 +1858,22 @@ def test_the_director_puts_a_sector_flag_over_http(live):
     assert steward.post(url, json={'zone': 99, 'kind': 'yellow'}).status_code == 422
     assert steward.post(url, json={'zone': 0, 'kind': 'red'}).status_code == 422
     assert steward.post(url, json={'zone': None, 'kind': None}).json()['sector_flags'] == [] and rc.sector_flags == {}
+
+
+def test_deploying_the_pace_car_over_http_ends_a_vsc_keeps_the_caution_and_says_the_yellow(live):
+    sid, client, _ = live
+    rc = live_rc.state_of(sid, True, client.session, create=True)
+    rc.configure_nascar(70)
+    _field(client, c3=(0.50, 9), c4=(0.48, 9), c5=(0.30, 7))
+    client.cars[9] = {'driver_name': 'Safety Car', 'driver_guid': '76561190000000009'}
+    client.field.update(9, 0.60, 12)
+    steward = _client('steward')
+    assert steward.post(f'{V}/servers/{sid}/race-control/pace-car', json={'car_id': 9, 'kmh': 110}).status_code == 200
+    assert steward.post(f'{V}/servers/{sid}/race-control', json={'flag': 'vsc', 'pace_kmh': 80}).status_code == 200
+    caution, vsc = rc.caution, rc.vsc_id
+    assert rc.flag == 'vsc' and caution is not None
+    r = steward.post(f'{V}/servers/{sid}/race-control/pace-car/deploy')
+    assert r.status_code == 200 and r.json()['flag'] == 'yellow' and r.json()['pacecar']['mode'] == 'lead'
+    assert rc.caution is caution, 'the caution of the VSC goes on behind the pace car (same frozen order)'
+    assert rc.pace_kmh is None and rc.vsc_start == 0.0 and vsc and rc.vsc_id == 0, 'the VSC is over: no pace, no delta, no VSC id for the hubs'
+    assert any(t.startswith('BANDERA AMARILLA') for t in _break_notices(rc)), 'the drivers are told the yellow'
