@@ -679,6 +679,7 @@ def field_view(server_id: int, sess: SessionDep) -> dict:
     best = lambda d: (next(iter(d["Cars"].values()))["BestLap"] or 1 << 62)
     drivers.sort(key=(lambda d: d["Position"] or 999) if race else best)
     marks = rc.driver_marks(time.time())
+    mp = marks.get("mpit")   # (the mandatory stop: None when this race has no such rule)
     rows = []
     for i, d in enumerate(drivers):
         car = d["CarInfo"]["CarID"]
@@ -688,8 +689,9 @@ def field_view(server_id: int, sess: SessionDep) -> dict:
                                  ("dt", car in marks["dt"]), ("viol", car in marks["viol"]), ("boxes", car in marks["pits"])) if on]
         rows.append({"car_id": car, "driver_guid": guid, "name": d["CarInfo"]["DriverName"], "model": d["CarInfo"]["CarModel"], "position": i + 1, "laps": d["TotalNumLaps"],
                      "best_ms": round(lap["BestLap"] / 1_000_000) or None, "last_ms": round(lap["LastLap"] / 1_000_000) or None,
-                     "gap": _gap_to(drivers[0], d) if race and i else None, "conduct": marks["conduct"].get(guid, 0), "flags": flags})
-    return {"race": race, "session": lb.get("Name", ""), "rows": rows}
+                     "gap": _gap_to(drivers[0], d) if race and i else None, "conduct": marks["conduct"].get(guid, 0), "flags": flags,
+                     "mpit": None if mp is None or not guid else "charged" if guid in mp["charged"] else "made" if guid in mp["made"] else "pending"})   # (a sanction stays a sanction: a second compound fitted after it does not take it away)
+    return {"race": race, "session": lb.get("Name", ""), "rows": rows, "mandatory_pit": mp["rule"] if mp else None}
 
 
 class PitLimitIn(BaseModel):

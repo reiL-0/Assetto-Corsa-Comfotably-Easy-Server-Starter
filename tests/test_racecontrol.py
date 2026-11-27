@@ -540,3 +540,10 @@ def test_the_directors_field_table_has_the_race_order_gaps_and_what_each_driver_
     assert rows[2]["gap"] == {"laps": 1, "ms": None} and rows[2]["flags"] == ["dsq"]
     assert [x["driver_guid"] for x in rows] == ["G3", "G4", "G5"], "the table kick needs the driver GUID (kick checks who is in the slot)"
     assert _client("driver").get(f"{V}/servers/{sid}/race-control/field").status_code in (401, 403), "the director table is for stewards"
+    assert r.json()["mandatory_pit"] is None and rows[0]["mpit"] is None, "no rule: no column"
+    from app.rulebook import MandatoryPitRule
+    client.session["session_type"] = 3   # (the same session object: a new one would be a new race control state)
+    rc.rules = {**(rc.rules or {}), "mandatory_pit": MandatoryPitRule(from_lap=2, to_lap=4).model_dump()}
+    rc.mpit_done.add("G3"); rc.mpit_charged.add("G4")
+    r = steward.get(f"{V}/servers/{sid}/race-control/field").json()
+    assert r["mandatory_pit"]["to_lap"] == 4 and [x["mpit"] for x in r["rows"]] == ["made", "charged", "pending"], "the director sees who made the mandatory stop"
