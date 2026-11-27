@@ -33,6 +33,12 @@ no stracker. Everything here belongs to one running acServer instance.
   `Cars{model: BestLap, LastLap, NumLaps, TotalLapTime, TopSpeedBestLap}` (times in **ns**), `LastPos{X,Y,Z}`,
   `NormalisedSplinePos`. In a race `Position` = by laps, then total time. Not available from ACSP and left empty:
   `Ping`, `IsInPits`, `BestLapSplits`, `Split`, `TeamName`, `DriverInitials`.
+- **Ours, for the live page (additive; an ACSM board has none and the site hides what is missing):** per driver `Hits` (contacts this session; both
+  cars' reports of one contact count once), `LastLapCuts`, `SpeedKmh` (now), `Stopped` (connected and under 5 km/h), and in a race `GapMs`/`GapLaps`
+  (to the leader) and `IntervalMs`/`IntervalLaps` (to the car ahead), from when each car passed the same of 100 points of the lap, plus `PosChange`
+  (places won since the grid, read from the spline before the first crossing). Top level: `Events` (the last 30: `session`, `join`, `leave`, `best`,
+  `personal`, `cut`, `invalid`, `contact`, `wall`, each with an increasing `id` and `at` in epoch seconds) and `Contacts` (world `x`/`z` of the
+  contacts of the last 10 min, `car` = with a car, else the wall). Lists are replaced whole, so a request thread copies them with a slice.
 
 ### `acsm.py` — public read routes (`router`, prefix `/servers/{id}/acsm`)
 - `GET /api/live-timings/leaderboard.json` → `LiveBoard.leaderboard()`; 409 when the server is not running.
