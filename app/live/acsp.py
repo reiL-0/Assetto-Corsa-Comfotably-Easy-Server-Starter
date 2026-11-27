@@ -20,6 +20,7 @@ from collections import deque
 from app import csp, metrics
 from app.config import settings
 from app.live.board import LiveBoard
+from app.live import trackshape
 from app.live.field import Field
 from app.live.tracklen import TrackLength, lookup, oval_known, store_detected
 
@@ -381,6 +382,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         self.finish_flag_pending = False   # the winner was named under a caution: the chequered flag waits for the green
         self.board = LiveBoard()  # live timing table, read by app.live.acsm
         self.field = Field()  # where every car is along the track (laps + spline, unwrapped): the caution procedures read it, app/live/caution.py
+        self.tracer = trackshape.Tracer()  # each car's line in the lap it drives: the quickest clean one draws the track and finds its corners (app/live/trackshape.py)
         self.oval = False          # the layout being raced is an oval (the admin's word, its tags, or the shape of the laps): no danger warning there
         self._oval_known = False   # something has said so (False: still a road layout until the laps show otherwise)
         self.length = TrackLength()  # the track's length in metres (the blue flag and the danger warning say HOW FAR): from ui_track.json or estimated from the cars, app/live/tracklen.py
@@ -406,6 +408,16 @@ class ACSPClient(asyncio.DatagramProtocol):
     def _push(self, event: dict) -> None:
         self.events.append(event)
         self.n_events += 1
+
+    def _keep_shape(self, trace: list, info: dict) -> None:
+        """A finished lap's line (app/live/trackshape.py): a clean one may draw the layout. The database work runs off the event loop."""
+        if info["cuts"]:
+            return
+        args = (self.session.get("track"), self.session.get("track_config"), info["ms"], trace)
+        try:
+            asyncio.get_running_loop().run_in_executor(None, trackshape.submit, *args)
+        except RuntimeError:   # no loop (a test feeding events by hand)
+            trackshape.submit(*args)
 
     def _apply(self, event: dict) -> None:
         t = event["type"]
@@ -436,6 +448,7 @@ class ACSPClient(asyncio.DatagramProtocol):
                     self.run_release = {}   # single-run qualifying: the release times of this session (app/singlerunlive.py)
                     self.session_t0 = time.time() - (event.get("elapsed_ms") or 0) / 1000
                     self.field.clear()
+                    self.tracer.clear()
                     self.length.reset()
                     self.oval, self._oval_known = False, False
                     self._length_logged = None
@@ -489,6 +502,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             if (rec := self.board._by_car(event["car_id"])) and rec.guid:   # the best valid laps of the track, from any session (app/records.py)
                 from app import records
                 records.submit(self.session.get("track"), self.session.get("track_config"), rec.model, rec.guid, rec.name, event["laptime_ms"], event.get("cuts") or 0, rec.last_splits)
+            if (lap := self.tracer.lap_done(event["car_id"], {"ms": event["laptime_ms"], "cuts": event.get("cuts") or 0}, time.monotonic())):
+                self._keep_shape(*lap)
             from app.live.racecontrol import on_lap, state_of
             from app.racecontrol import nascar_actions  # adapter owns ACSP I/O, like timeline above
             rc0 = state_of(self.server_id, True, self.session)
@@ -519,7 +534,7 @@ class ACSPClient(asyncio.DatagramProtocol):
         elif t == "new_connection":
             from app import knockoutlive   # (an entrant of Q1, or a late one: app/knockoutlive.py)
             knockoutlive.on_connection(self, str(event.get("driver_guid") or ""), str(event.get("driver_name") or ""))
-            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])   # (the slot may be a new driver: they start from their own position)
+            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"]); self.tracer.drop(event["car_id"])   # (the slot may be a new driver: they start from their own position)
             self.cars[event["car_id"]] = event
             from app import bans   # (late, like timeline above)
             from app.live.racecontrol import state_of
@@ -536,7 +551,7 @@ class ACSPClient(asyncio.DatagramProtocol):
             from app.live.racecontrol import state_of
             if (rc := state_of(self.server_id, True, self.session)):
                 rc.drop_red(event["car_id"])
-            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"])
+            self.field.drop(event["car_id"]); self.length.estimator.forget(event["car_id"]); self.tracer.drop(event["car_id"])
         elif t == "client_loaded":
             if self.on_client_loaded:
                 self.on_client_loaded(event["car_id"])
@@ -563,6 +578,8 @@ class ACSPClient(asyncio.DatagramProtocol):
             d = self.board._by_car(event["car_id"])
             cid, mono = event["car_id"], time.monotonic()
             self.field.update(cid, event["spline_pos"], d.laps if d else None, mono)
+            if (p := event.get("pos")) and len(p) >= 3 and (lap := self.tracer.update(cid, event["spline_pos"], p[0], p[2], mono)):
+                self._keep_shape(*lap)
             v = event.get("velocity")
             if (self.length.configured is None or not self._oval_known) and v and len(v) >= 3:   # (a configured length needs no estimate; the shape of the laps is read until something has said if the layout is an oval)
                 self.length.estimator.observe(cid, self.field.progress[cid], math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2), mono, self.field.epoch[cid], self.field.generation.get(cid, 0), math.atan2(v[0], v[2]))

@@ -62,6 +62,26 @@ def track_records(server_id: int) -> dict:
     return {"Track": track, "TrackConfig": config, "Cars": records.top(track, config)}
 
 
+@router.get("/api/live-timings/track-shape.json")
+def track_shape(server_id: int) -> dict:
+    """The line and the corners (T1..Tn) of the layout this server is set up with, learnt from the quickest clean lap driven on it
+    (app/live/trackshape.py). 404 until a clean lap has been traced there. Works for a stopped server, like records.json."""
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.live import trackshape
+    from app.models import Server
+    with Session(engine) as s:
+        srv = s.get(Server, server_id)
+    if not srv:
+        raise HTTPException(404, "not found")
+    conf = (srv.config or {}).get("SERVER", {})
+    shape = trackshape.get(str(conf.get("TRACK", "")), str(conf.get("CONFIG_TRACK", "") or ""))
+    if not shape:
+        raise HTTPException(404, "no shape yet")
+    return shape
+
+
 def _asset(track: str, config: str, rel: str) -> Path:
     if not _NAME.match(track) or (config and not _NAME.match(config)):
         raise HTTPException(404, "not found")

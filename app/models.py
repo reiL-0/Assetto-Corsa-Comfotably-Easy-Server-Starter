@@ -540,3 +540,15 @@ class TrackRecord(SQLModel, table=True):
     s1_ms: int | None = None   # the three sectors of THAT lap (None: the board had no split for it, or the record is older than they were kept)
     s2_ms: int | None = None
     s3_ms: int | None = None
+
+
+class TrackShape(SQLModel, table=True):
+    """The line of a track layout and its corners, from the quickest clean lap seen on it (app/live/trackshape.py). A new table: create_all makes it."""
+    __tablename__ = "track_shapes"
+
+    track: str = Field(primary_key=True)
+    track_config: str = Field(default="", primary_key=True)
+    lap_ms: int
+    points: str = "[]"    # JSON [[x, z], ...]: 500 points along the lap (world metres)
+    corners: str = "[]"   # JSON [{name, x, z, spline, dir}]
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
