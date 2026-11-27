@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 NS = 1_000_000  # ACSM reports lap times in nanoseconds; ACSP gives milliseconds
 NO_TIME = 999_999_999  # acServer's smallest "no lap yet" sentinel (also 0xFFFFFFFF)
 RACE = 3  # ACSP / ACSM session type
+COLLISION_WITH_CAR = 10  # (acsp.py's client_event types)
+EVENTS_MAX = 30          # the live page's session feed: the newest events only
+CONTACT_KEEP_S = 600     # a contact stays on the live map for 10 min
+CONTACTS_MAX = 200       # (a pile-up in a full field fits; older ones than 10 min go anyway)
+MARKS = 100              # race gaps: the lap cut in 100 points; each car remembers when it passed each of them
+STOP_KMH = 5.0           # slower than this on track = "stopped"
 
 
 @dataclass
@@ -33,6 +39,9 @@ class Driver:
     best_sectors: list[int] = field(default_factory=list)  # [s1, s2, s3]: the quickest of each sector over the valid laps (not all from one lap); their sum is the potential lap
     pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     spline: float = 0.0
+    last_cuts: int = 0      # cuts of the last completed lap (the live page strikes it through)
+    hits: int = 0           # contacts this session, with a car or the wall
+    speed_kmh: float = 0.0  # now (last position packet)
 
 
 class LiveBoard:
@@ -45,6 +54,17 @@ class LiveBoard:
         self.drivers: list[Driver] = []
         self._sector_track: dict[int, dict] = {}  # car_id -> {"last_t", "last_s", "t_start", "t_s1", "t_s2", "pending"}
         self._lap_invalid: dict[int, object] = {}  # car_id -> the lap in progress was ruled invalid by the manager (DRS used while closed, in practice / qualifying): it is not a valid lap when completed (acServer's own table does not know it)
+        # the live page's feed (lists replaced or appended whole: a reader on another thread copies them with a slice)
+        self.events: list[dict] = []    # {"id", "at" (epoch s), "kind", "name", ...}: best | personal | cut | contact | wall | join | leave | session
+        self.contacts: list[dict] = []  # {"at", "x", "z", "car" (bool: with a car, else the wall), "name", "speed"}
+        self._event_id = 0
+        self._pairs: dict[frozenset, float] = {}   # two cars that touched -> when: both report the same contact, it is counted once
+        # race gaps: progress = laps counted here (spline wraps) + spline; _marks[car][point] = when the car passed that point of its race
+        self._wraps: dict[int, int] = {}
+        self._last_spline: dict[int, float] = {}
+        self._marks: dict[int, dict[int, float]] = {}
+        self.grid: dict[int, int] = {}   # car_id -> place on the grid (by spline before anybody crossed the line); frozen at the first crossing
+        self._grid_frozen = False
         self._inv_lock = threading.Lock()  # the mark is set from a request thread and everything that decides whose it is (a new session, a connection, a lap) runs on the event loop: the check of the driver and the mark, and every change of who sits in a slot with its clearing, are one step under this lock
 
     def has_kept(self) -> bool:
@@ -56,6 +76,7 @@ class LiveBoard:
         d.best_splits, d.best_sectors, d.last_splits = [], [], None
         d.top_kmh = 0.0
         d.valid_laps, d.best_valid_ms = None, 0
+        d.last_cuts = d.hits = 0
 
     def drop_kept(self) -> None:
         """The kept practice does not belong to this session: its drivers go (one already back on track starts from zero)."""
@@ -73,6 +94,66 @@ class LiveBoard:
                 return False
             self._lap_invalid[car_id] = True
             return True
+
+    def _event(self, kind: str, now: float, d: Driver | None, **extra) -> None:
+        self._event_id += 1
+        ev = {"id": self._event_id, "at": round(now, 1), "kind": kind, "name": d.name if d else "", "car": d.model if d else "", **extra}
+        self.events = (self.events + [ev])[-EVENTS_MAX:]
+
+    def _progress(self, car_id: int) -> float | None:
+        d, w = self._by_car(car_id), self._wraps.get(car_id)   # (read from a request thread: one look at the dict, which a new session replaces)
+        return None if d is None or w is None else w + d.spline
+
+    def _forget_slot(self, car_id: int) -> None:
+        """The slot changed hands (or emptied): its race progress is not the next driver's."""
+        for m in (self._wraps, self._marks, self._last_spline):
+            m.pop(car_id, None)
+
+    def _race_progress(self, car_id: int, spline: float, now: float) -> None:
+        """Count the line crossings of a car (spline 0.9.. -> ..0.1) and note when it passed each of the MARKS points.
+        The count starts from the laps acServer has given the car (a car joining late or back from a reconnection is not lap 0): wraps = laps + 1 once past the line,
+        laps alone before a first crossing (the grid behind the line). ponytail: a teleport from the end of the lap to its start counts as a crossing (5 Hz positions make it rare),
+        and a car that reconnects in the second half of its FIRST lap is taken for one still before the line (one lap behind) until its next crossing.
+        The race order is the official one (laps, then total time), so a pass in the middle of a lap shows at the line; until then that pair has no gap (never a negative one)."""
+        d = self._by_car(car_id)
+        last = self._last_spline.get(car_id)
+        self._last_spline[car_id] = spline
+        if last is None or car_id not in self._wraps:
+            laps = d.laps if d else 0
+            self._wraps[car_id] = laps + (0 if laps == 0 and spline >= 0.5 else 1)
+        elif last > 0.9 and spline < 0.1:
+            self._wraps[car_id] += 1
+            self._grid_frozen = True
+        if not self._grid_frozen:   # before the start: places by where they stand (a car just past the line is ahead of one just before it)
+            ahead = sorted(self._last_spline, key=lambda c: -(self._last_spline[c] + (1 if self._last_spline[c] < 0.5 else 0)))
+            self.grid = {c: i + 1 for i, c in enumerate(ahead)}
+        p = int((self._wraps[car_id] + spline) * MARKS)
+        marks = self._marks.setdefault(car_id, {})
+        if p in marks:
+            return
+        prev = max(marks) if marks else None
+        if prev is not None and 0 < p - prev <= MARKS // 4:   # points passed between two packets (a short lap): their time is interpolated, so the car behind finds them
+            t_prev = marks[prev]
+            for k in range(prev + 1, p):
+                marks[k] = t_prev + (now - t_prev) * (k - prev) / (p - prev)
+        marks[p] = now
+        if len(marks) > 2 * MARKS:   # a lap and a bit is all a gap needs
+            for k in sorted(marks)[: len(marks) - int(1.5 * MARKS)]:
+                del marks[k]
+
+    def _gap(self, behind: int, ahead: int, now: float) -> tuple[int | None, int]:
+        """(ms, laps) between two cars: laps > 0 when `ahead` is that many laps in front, else ms = when `behind` reached its point minus when `ahead` passed it."""
+        pb, pa = self._progress(behind), self._progress(ahead)
+        if pb is None or pa is None:
+            return None, 0
+        if pa - pb >= 1.0:
+            return None, int(pa - pb)
+        p = int(pb * MARKS)   # (its latest point: noted on its last packet)
+        ta = self._marks.get(ahead, {}).get(p)
+        tb = self._marks.get(behind, {}).get(p)
+        if ta is None or tb is None:
+            return None, 0
+        return max(0, round((tb - ta) * 1000)), 0
 
     def _by_car(self, car_id: int) -> Driver | None:
         """Newest driver that used this car slot (slots are reused by whoever joins next)."""
@@ -139,12 +220,16 @@ class LiveBoard:
                     for d in self.drivers:
                         self._reset(d)
                     self._lap_invalid.clear()
+                self._wraps, self._marks, self._last_spline, self.grid, self._grid_frozen = {}, {}, {}, {}, False
+                self.contacts, self.events = [], []
+                self._event("session", now, None, session=e.get("name", ""), sessionType=e.get("session_type"))
             self.keep_next = False   # the first session event (new_session or the session_info that finds it) is the one the kept practice belongs to; a later one is another session
         elif t == "new_connection":
             here = self._by_car(e["car_id"])
             same = bool(e.get("answer") and here and e["driver_guid"] and here.guid == e["driver_guid"])   # only acServer's ANSWER (car_info) about the same driver still in the slot: the manager asks every SWEEP_S
             if not same:   # (it reset his sectors and his invalid lap every 10 s: no lap ever got its sectors, 2026-11-26; a real connection, even of the same driver, starts from nothing)
                 self._sector_track.pop(e["car_id"], None)
+                self._forget_slot(e["car_id"])
             old = next((d for d in self.drivers if e["driver_guid"] and d.guid == e["driver_guid"]), None)
             d = old or Driver(car_id=e["car_id"])
             with self._inv_lock:
@@ -155,20 +240,30 @@ class LiveBoard:
                     self.drivers.append(d)
                 if not same:
                     self._lap_invalid.pop(e["car_id"], None)   # (whoever sat there before leaves nothing behind)
+            if not e.get("answer"):
+                self._event("join", now, d)
         elif t == "connection_closed":
             self._sector_track.pop(e["car_id"], None)
+            self._forget_slot(e["car_id"])
             with self._inv_lock:
                 d = self._by_car(e["car_id"])
                 if d:
                     d.connected = False
                 self._lap_invalid.pop(e["car_id"], None)   # (a lap ruled invalid does not follow the driver to his next slot)
+            if d:
+                self._event("leave", now, d)
         elif t == "car_update":
             cid = e["car_id"]
             d = self._by_car(cid)
             if d:
                 d.pos, d.spline = tuple(e["pos"]), e["spline_pos"]
-                d.top_kmh = max(d.top_kmh, math.hypot(*e["velocity"]) * 3.6)  # ponytail: top speed of the session, ACSM gives it for the best lap
+                d.speed_kmh = math.hypot(*e["velocity"]) * 3.6
+                d.top_kmh = max(d.top_kmh, d.speed_kmh)  # ponytail: top speed of the session, ACSM gives it for the best lap
+                if self.session.get("session_type") == RACE:
+                    self._race_progress(cid, e["spline_pos"], now)
                 self._track_sectors(cid, e["spline_pos"], now)
+        elif t == "client_event":
+            self._contact(e, now)
         elif t == "lap_completed":
             cid = e["car_id"]
             d = self._by_car(cid)
@@ -206,6 +301,15 @@ class LiveBoard:
                 with self._inv_lock:
                     ruled_invalid = self._lap_invalid.pop(e["car_id"], None) is not None   # (read and clear in one step: it was for the lap that just ended)
                 valid = e.get("cuts", 0) == 0 and 0 < lap_ms < NO_TIME and not ruled_invalid
+                d.last_cuts = int(e.get("cuts", 0) or 0)
+                if 0 < lap_ms < NO_TIME:
+                    session_best = min((x.best_valid_ms for x in self.drivers if 0 < x.best_valid_ms < NO_TIME), default=0)
+                    if not valid:
+                        self._event("cut" if d.last_cuts else "invalid", now, d, lapMs=lap_ms, cuts=d.last_cuts)   # (invalid: ruled so by the manager, e.g. DRS used while closed)
+                    elif not session_best or lap_ms < session_best:
+                        self._event("best", now, d, lapMs=lap_ms)
+                    elif 0 < d.best_valid_ms < NO_TIME and lap_ms < d.best_valid_ms:
+                        self._event("personal", now, d, lapMs=lap_ms)
                 d.valid_laps = (d.valid_laps or 0) + valid
                 if valid:
                     d.best_valid_ms = min(d.best_valid_ms or NO_TIME, lap_ms)
@@ -227,11 +331,30 @@ class LiveBoard:
                         if row["car_id"] == cid and lap_splits and (r.best_ms == row["laptime_ms"] or r.best_ms != old_best or not r.best_splits):
                             r.best_splits = lap_splits
 
+    def _contact(self, e: dict, now: float) -> None:
+        d = self._by_car(e["car_id"])
+        other = self._by_car(e["other_car_id"]) if e.get("other_car_id") is not None else None
+        with_car = e.get("event_type") == COLLISION_WITH_CAR
+        if with_car:
+            pair = frozenset((e["car_id"], e.get("other_car_id")))
+            self._pairs = {k: v for k, v in self._pairs.items() if now - v < 2.0}
+            if pair in self._pairs:
+                return   # the other car's report of the same contact
+            self._pairs[pair] = now
+        speed = round(float(e.get("speed") or 0))
+        for x in (d, other):
+            if x:
+                x.hits += 1
+        wp = e.get("world_pos") or [0.0, 0.0, 0.0]
+        self.contacts = [c for c in self.contacts if now - c["at"] < CONTACT_KEEP_S][-(CONTACTS_MAX - 1):] + [
+            {"at": round(now, 1), "x": wp[0], "z": wp[2], "car": with_car, "name": d.name if d else "", "speed": speed}]
+        self._event("contact" if with_car else "wall", now, d, other=other.name if other else "", speed=speed)
+
     def elapsed_ms(self, now: float | None = None) -> int:
         now = time.time() if now is None else now
         return int(self.session.get("elapsed_ms", 0) + max(0.0, now - self.session_at) * 1000)
 
-    def _entry(self, d: Driver, position: int) -> dict:
+    def _entry(self, d: Driver, position: int, extra: dict | None = None) -> dict:
         best_lap = (d.best_ms * NS) if 0 < d.best_ms < NO_TIME else 0
         last_lap = (d.last_ms * NS) if 0 < d.last_ms < NO_TIME else 0
         best_valid = (d.best_valid_ms * NS) if 0 < d.best_valid_ms < NO_TIME else 0
@@ -262,6 +385,10 @@ class LiveBoard:
             "LastPos": {"X": d.pos[0], "Y": d.pos[1], "Z": d.pos[2]},
             "NormalisedSplinePos": d.spline,
             "SteerAngle": 0, "DRSActive": False, "BlueFlag": False,
+            # (ours, not ACSM's: the live page) contacts this session, cuts of the last lap, speed now
+            "Hits": d.hits, "LastLapCuts": d.last_cuts, "SpeedKmh": round(d.speed_kmh),
+            "Stopped": d.connected and d.speed_kmh < STOP_KMH,
+            **(extra or {}),
         }
 
     def leaderboard(self, now: float | None = None) -> dict:
@@ -271,8 +398,23 @@ class LiveBoard:
         order = sorted(self.drivers, key=lambda d: (-d.laps, d.total_ms)) if race else []
         pos = {id(d): i + 1 for i, d in enumerate(order)}
 
+        now = time.time() if now is None else now
+        extra: dict[int, dict] = {}   # race only: gap to the leader / interval to the car ahead (ms, or whole laps), places won since the grid
+        for i, d in enumerate(order):
+            x = extra.setdefault(id(d), {})
+            g = self.grid.get(d.car_id)
+            if g and d.connected:
+                x["PosChange"] = g - (i + 1)
+            if i and d.connected:
+                for key, ahead in (("Gap", order[0]), ("Interval", order[i - 1])):
+                    ms, laps = self._gap(d.car_id, ahead.car_id, now) if ahead.connected else (None, 0)
+                    if laps:
+                        x[key + "Laps"] = laps
+                    elif ms is not None:
+                        x[key + "Ms"] = ms
+
         def group(connected: bool) -> list[dict]:
-            return [self._entry(d, pos.get(id(d), 0)) for d in self.drivers if d.connected == connected]
+            return [self._entry(d, pos.get(id(d), 0), extra.get(id(d))) for d in self.drivers if d.connected == connected]
 
         return {
             "ServerName": s.get("server_name", ""), "Track": s.get("track", ""), "TrackConfig": s.get("track_config", ""),
@@ -280,4 +422,5 @@ class LiveBoard:
             "Laps": s.get("laps", 0), "ElapsedMilliseconds": self.elapsed_ms(now),
             "AmbientTemp": s.get("ambient_temp"), "RoadTemp": s.get("road_temp"),
             "ConnectedDrivers": group(True), "DisconnectedDrivers": group(False),
+            "Events": self.events[:], "Contacts": [c for c in self.contacts[:] if now - c["at"] < CONTACT_KEEP_S],   # (ours: the live page's feed and map)
         }
