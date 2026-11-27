@@ -157,3 +157,26 @@ def test_a_broken_racing_line_does_not_hide_a_good_pit_lane():
     (d / "fast_lane.ai").write_bytes(b"\x07\x00")   # truncated
     marks = trackshape.landmarks("half_trk", "")
     assert "start" not in marks and marks["pit"][0] == [0.0, 0.0]
+
+
+def test_a_layout_nobody_lapped_is_drawn_from_its_ai_racing_line_with_its_corners():
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app.config import settings
+    from app.db import engine
+    from app.main import app
+    from app.models import Server
+    d = Path(settings.data_dir) / "pace_lines" / "ai_only_trk" / "-"
+    _ai(d / "fast_lane.ai", _rounded_rect())
+    with Session(engine) as s:
+        s.add(Server(id=963, name="ai only", base_port=18963, config={"SERVER": {"TRACK": "ai_only_trk", "CONFIG_TRACK": ""}}))
+        s.commit()
+    api = TestClient(app)
+    url = "/api/v1/servers/963/acsm/api/live-timings/track-shape.json"
+    for _ in range(2):   # (the second answer comes from the cache: still whole)
+        body = api.get(url).json()
+        assert body["source"] == "ai" and len(body["points"]) == trackshape.N and [c["name"] for c in body["corners"]] == ["T1", "T2", "T3", "T4"]
+        assert "line" not in body and body["start"][:2] == [0.0, 0.0]

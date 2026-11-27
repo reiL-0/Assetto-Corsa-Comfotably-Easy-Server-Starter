@@ -212,6 +212,24 @@ def submit(track: str | None, config: str | None, lap_ms: int, samples: list | N
         return False
 
 
+def by_distance(line: list[tuple[float, float]], n: int = N) -> list[tuple[float, float]]:
+    """A closed line on `n` points equally spaced along its length (an AI line's points are dense and uneven at the ends)."""
+    seg = [math.dist(line[i], line[(i + 1) % len(line)]) for i in range(len(line))]
+    total = sum(seg)
+    if total <= 0:
+        return list(line[:n])
+    out, i, acc = [], 0, 0.0
+    for k in range(n):
+        target = total * k / n
+        while i < len(seg) - 1 and acc + seg[i] < target:
+            acc += seg[i]
+            i += 1
+        a, b = line[i], line[(i + 1) % len(line)]
+        f = 0.0 if seg[i] == 0 else min(1.0, max(0.0, (target - acc) / seg[i]))
+        out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+    return out
+
+
 _marks: dict[tuple[str, str], tuple[float, dict]] = {}
 PIT_STEP_M = 4.0   # the pit lane drawn every few metres: enough for a map, a fraction of the file
 
@@ -236,6 +254,8 @@ def landmarks(track: str | None, config: str | None) -> dict:
             return None
 
     line, pit = read("fast_lane.ai"), read("pit_lane.ai")
+    if line and len(line) >= 20:
+        out["line"] = [[round(x, 1), round(z, 1)] for x, z in by_distance(line)]   # the racing line itself: the shape of a layout nobody has lapped yet
     if line:
         j = next((i for i in range(1, len(line)) if math.dist(line[0], line[i]) > 2.0), None)   # (a few metres on, for the direction of the line)
         if j:
