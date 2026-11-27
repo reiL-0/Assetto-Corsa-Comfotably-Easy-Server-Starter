@@ -226,6 +226,9 @@ class RaceControl:
         self._yellow_id = 0
         self._was_yellow = False
         self.flag_dt_open: dict[tuple, tuple[int, float]] = {}   # blue drive-throughs not served yet: due key -> (car, issued at)
+        self.mpit_done: set[str] = set()                     # drivers whose mandatory stop (rule `mandatory_pit`) is made: by guid, so a reconnection keeps it
+        self.mpit_compounds: dict[str, set[int]] = {}        # driver -> the tyre compounds his hub said he ran (before and after each tyre change): two of them for `two_compounds`
+        self.mpit_charged: set[str] = set()                  # drivers already sanctioned for the mandatory stop: once per race
         self.flag_new: list[dict] = []                       # what the adapter has to tell the drivers (`take_flag_messages`): offences, the yellow's give-back, the discs and black flags
         self._neutral_end = 0.0                              # wall time the race was last not under green or white: a lap that began before it is not a clean lap
         self._pace_owner: dict[int, str] = {}                # slot -> the driver whose laps are in its pace
@@ -373,6 +376,8 @@ class RaceControl:
                 self._fcy_green_dues(now)   # (before _clear_vsc: the judges still hold what each car gained over the flag)
             self._clear_vsc()
             self.flag, self.pace_kmh = flag, None
+            if flag == "checkered":
+                self._mpit_finish(now)
             if flag == "green" and self.pace_out:
                 self.pace_park = True   # (also after "to go": it keeps being told to come in once the caution is over)
             self.pace_out = self.pace_out and flag in CAUTION
@@ -1115,11 +1120,13 @@ class RaceControl:
 
     # ---- the VSC monitor ------------------------------------------------------------------------------------------------------------------------------------------------
     @fieldrec.capture(_lock)
-    def report_pit(self, car_id: int, in_pit: bool, now: float | None = None, kmh: float | None = None) -> None:
+    def report_pit(self, car_id: int, in_pit: bool, now: float | None = None, kmh: float | None = None, stop: dict | None = None) -> None:
         """The hub of that car says whether it is in the pit lane. Only a yes is kept (a no never cancels one), and it expires: see the module docstring. `kmh` = the manager's own reading of the car's speed
         (a visit in which the car stood still is a stop, not a drive-through); a no ends the visit (`_close_visit`)."""
         if not in_pit:
             with _lock:
+                if car_id in self._visit_start:   # (a "no" also comes every few seconds under a caution from a car on the track: only the end of a real visit is a stop)
+                    self._mpit_visit(car_id, car_id in self._visit_stopped, stop or {})
                 self._close_visit(car_id)
             return
         if in_pit:
@@ -1412,6 +1419,7 @@ class RaceControl:
                 for old_lap in [n for n in self.lap_times if n < laps - 3]:
                     del self.lap_times[old_lap]
             self._flags_lap(car, car in self._pit_lap, now)
+            self._mpit_lap(car, laps, now)
 
     def _rule(self, kind: str) -> dict:
         return (self.rules or FLAG_DEFAULTS)[kind]
@@ -1502,6 +1510,63 @@ class RaceControl:
                     m.update(kmh=round(kmh), limit=lim["limit_kmh"])
                     break
             return {"kmh": round(kmh), "limit": lim["limit_kmh"], "step": lim["penalty_s"]}
+
+    def _mpit_rule(self) -> dict | None:
+        """The mandatory stop rule of this race (app/rulebook.py MandatoryPitRule as a dict), None = none (or not a race)."""
+        rule = (self.rules or {}).get("mandatory_pit")
+        return rule if rule and self._is_race() else None
+
+    def _mpit_visit(self, car: int, stopped: bool, stop: dict) -> None:
+        """A pit-lane visit of `car` is over (its hub said it is out): `stop` = what the hub measured on its own car ({tyres: bool, fuel: litres added, cfrom / cto: compound index before / after}).
+        It is THE mandatory stop when the manager saw the car stand still (`stopped`: its own reading, not the hub's), on a lap of the window, and it did what the rule asks. Under the lock."""
+        rule = self._mpit_rule()
+        guid = str(self.audit_guids.get(car) or "")
+        if not rule or not guid or car == self.pace_car:
+            return
+        if stopped and stop.get("tyres"):   # (tyres are only changed standing still: a visit the manager did not see stop brings no compound)
+            self.mpit_compounds.setdefault(guid, set()).update(c for c in (stop.get("cfrom"), stop.get("cto")) if isinstance(c, int))
+        lap = self._laps_of.get(car, 0) + 1   # (the lap the car is on)
+        in_window = lap >= rule["from_lap"] and (not rule["to_lap"] or lap <= rule["to_lap"])
+        ok = stopped and in_window and (not rule["require_tyres"] or bool(stop.get("tyres"))) \
+            and (not rule["require_fuel"] or float(stop.get("fuel") or 0) >= max(rule["min_fuel_l"], 0.5))
+        self.audit("mandatory_pit_visit", car=car, driver=guid, lap=lap, stopped=stopped, in_window=in_window, stop=stop, valid=ok, executed=True)
+        if ok and guid not in self.mpit_done:
+            self.mpit_done.add(guid)
+            self._bump()
+
+    def _mpit_made(self, guid: str, rule: dict) -> bool:
+        return guid in self.mpit_done and (not rule["two_compounds"] or len(self.mpit_compounds.get(guid, ())) >= 2)
+
+    def _mpit_charge(self, car: int, guid: str, rule: dict, now: float, step: int) -> None:
+        """The mandatory stop was not made: `step` 0 = a drive-through (its `unserved_s` on the result if never served), N = N s on the result. Once per driver and race. Under the lock."""
+        if self._flag_sanction("mandatory_pit", car, {"ladder": [step], "unserved_s": rule["unserved_s"]}, now, conduct=False, two_compounds=guid in self.mpit_done):
+            self.mpit_charged.add(guid)   # (only when it was written down: a full ledger tries again at the next lap)
+
+    def _mpit_lap(self, car: int, laps: int, now: float) -> None:
+        """`car` completed lap `laps`: the window closed behind it (`to_lap`) without the stop = a drive-through. Under the lock."""
+        rule = self._mpit_rule()
+        guid = str(self.audit_guids.get(car) or "")
+        if rule and guid and car != self.pace_car and rule["to_lap"] and laps >= rule["to_lap"] and guid not in self.mpit_charged and not self._mpit_made(guid, rule):
+            self._mpit_charge(car, guid, rule, now, 0)
+
+    def _mpit_finish(self, now: float) -> None:
+        """The chequered flag: whoever reached the window and still has not made the stop gets `unserved_s` on the result (no lap is left to serve a drive-through). Under the lock.
+        ponytail: a car on its last lap that stops after the flag is still charged; nobody does that in a race."""
+        rule = self._mpit_rule()
+        if not rule:
+            return
+        for car, laps in list(self._laps_of.items()):
+            guid = str(self.audit_guids.get(car) or "")
+            if guid and car != self.pace_car and laps + 1 >= rule["from_lap"] and guid not in self.mpit_charged and not self._mpit_made(guid, rule):
+                self._mpit_charge(car, guid, rule, now, rule["unserved_s"])
+
+    def mpit_view(self) -> dict | None:
+        """The mandatory stop for the hub and the director: the rule, and the cars (slots now) that made it / were sanctioned for it. None = no rule."""
+        rule = self._mpit_rule()
+        if not rule:
+            return None
+        cars = {c: str(g or "") for c, g in self.audit_guids.items()}
+        return {**rule, "made": sorted(c for c, g in cars.items() if g and self._mpit_made(g, rule)), "charged": sorted(c for c, g in cars.items() if g in self.mpit_charged)}   # (slots, not Steam IDs: the hub reads this)
 
     def _close_visit(self, car: int) -> None:
         """The pit-lane visit of `car` is over (its hub said it is out, or it completed a lap with no report since): the drive-throughs (cuts, flags, DRS) that came out BEFORE the visit began are served if
@@ -2153,6 +2218,7 @@ class RaceControl:
                     "vsc_penalty": dict(self.vsc_penalty) if self.flag in SLOWING else None, "violations": list(self.violations), "exempt": list(self.exempt), "nascar": nascar, "start_hold": self.start_hold_view(), "caution": self.caution.snapshot() if self.caution else None, "caution_eta": self.caution_eta(),
                     "proposal": self.watch.proposal, "auto_yellow": self.auto_yellow, "auto_pace": self.auto_pace, "pacecar": self.pace_car_state(), "pace_steam_id": self.pace_guid,
                     "nascar_next_delay_min": self.next_delay_s // 60, "drs": self.drs.view() if self.drs else None, "zones": list(self.zones), "sector_flags": [{**self.zones[i], "kind": k} for i, k in sorted(self.sector_flags.items()) if i < len(self.zones)],
+                    "mandatory_pit": self.mpit_view(),
                     "pit_limit": {"limit_kmh": self.pit_limit["limit_kmh"], "tolerance_kmh": self.pit_limit["tolerance_kmh"], **({"entry": self.pit_entry} if self.pit_entry is not None else {})} if self.pit_limit else None, **self.cuts_view(rule), **self.give_back_view(self.clock.time() if now is None else now)}
 
 

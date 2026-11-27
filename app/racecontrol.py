@@ -86,6 +86,10 @@ class PitIn(BaseModel):
     car_id: int = Field(ge=0, le=255)
     name: str = Field(max_length=80)
     pit: bool
+    tyres: bool | None = None   # (pit = false, the rule `mandatory_pit`: what the driver's own hub measured in the stop; client evidence)
+    fuel: float | None = Field(default=None, ge=0, le=500)   # litres added
+    cfrom: int | None = Field(default=None, ge=0, le=50)   # tyre compound index before / after
+    cto: int | None = Field(default=None, ge=0, le=50)
 
 
 def _live(server_id: int):
@@ -181,6 +185,9 @@ def _flag_messages(inst, rc) -> None:
         elif kind == "pitspeed":
             how = "drive-through" if step == 0 else f"+{step} s"
             _say(rc, f"PENALIZACIÓN: exceso de velocidad en boxes · {o.get('kmh', '?')} km/h, límite {o.get('limit', '?')} · {how}", "penalty", car)   # (from the flag ledger)
+        elif kind == "mandatory_pit":
+            how = "drive-through" if step == 0 else f"+{step} s"
+            _say(rc, f"PENALIZACIÓN: no hiciste la parada obligatoria · {how}", "penalty", car)
         elif kind == "meatball":
             _say(rc, f"PENALIZACIÓN: no reparaste el daño en boxes · drive-through ({o['laps']} vueltas)", "penalty", car)
         elif kind == "black":
@@ -598,7 +605,7 @@ def report_pit(server_id: int, body: PitIn, sess: SessionDep) -> None:
         raise HTTPException(409, "that car is not that driver")
     rc = state_of(server_id, True, inst.acsp.session)
     if rc:
-        rc.report_pit(body.car_id, body.pit, kmh=speed_kmh(car))
+        rc.report_pit(body.car_id, body.pit, kmh=speed_kmh(car), stop=body.model_dump(include={"tyres", "fuel", "cfrom", "cto"}, exclude_none=True))
         if body.pit and rc.pace_car_in and body.car_id == rc.pace_car:
             auto_green(server_id, rc, body.car_id)   # (alone on the track the pace car IS the restart: its arrival in the pits brings the green)
 

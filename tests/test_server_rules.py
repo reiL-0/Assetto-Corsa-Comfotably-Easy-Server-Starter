@@ -30,7 +30,7 @@ def test_the_servers_own_drs_and_flags_apply_with_no_league_and_a_preset_sits_un
     assert r["drs"]["start_laps_off"] == 4 and r["drs"].live_only, "the server's DRS, live only"
     assert r["flag_modes"]["yellow"] == "off" and r["flag_modes"]["blue"] == "live", "the rest stay as the defaults say"
     bare = league.effective_rules(_server(21011, rules={"preset": "vrl-base"}))
-    assert set(bare["flag_modes"].values()) == {"live"} and set(bare["flag_rules"]) == set(league.FLAG_RULE_KINDS), "a preset alone reads like any other rules"
+    assert set(bare["flag_modes"].values()) == {"live"} and set(bare["flag_rules"]) == set(league.FLAG_RULE_KINDS) | {"mandatory_pit"} and bare["flag_rules"]["mandatory_pit"] is None, "a preset alone reads like any other rules"
 
 
 def test_the_session_own_cuts_and_drs_win_over_the_server_and_its_preset():
