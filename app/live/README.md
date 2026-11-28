@@ -72,6 +72,12 @@ and `pit` (the pit lane every 4 m) from the AI lines kept for the pace bot; a la
 and corners from the AI racing line itself (`source: ai`, resampled by distance) (`landmarks`, app/pitentry.py `lines_path`); 404 when there is none of it. The site
 labels the corners and draws the line and the pit lane on the map.
 
+Corner names: a corner that falls in a section of the layout's `data/sections.ini` (IN/OUT fractions of the lap, TEXT) carries that name as `label`
+(«Tamburello»; a bare «T2» is no name); the site shows it when the pointer is over the corner.
+
+The live map routes (`acsm.py` map.png / map.ini) serve first a map drawn from the track's `.kn5` at upload, when the pack had none or a placeholder
+(app/kn5map.py, `<data_dir>/track_maps/`).
+
 ### `logboard.py` — `LogBoard`
 El tablero en vivo leído del **log de acServer**, para cuando no hay socket ACSP. acServer imprime su clasificación tras cada vuelta (`SendLapCompletedMessage` + una línea `N) nombre BEST: … TOTAL: … Laps:n SesID:i HasFinished:b` por plaza), quién ocupa cada plaza (`Dispatching TCP message to <auto> (<plaza>) [<nombre> []]`, con el Steam ID en la línea `Looking for available slot … GUID` anterior) y la sesión (`SENDING session name/type/time/laps`, `NextSession`). `feed(línea)` (lo llama `supervisor.Instance._tail` con cada línea nueva) mantiene un `LiveBoard`, la misma estructura que rellena ACSP, así que `acsm.leaderboard` sirve el mismo JSON de cualquiera de las dos fuentes. Sabe menos que ACSP: sin posición en pista, velocidad punta ni última vuelta. Un bloque completo manda sobre quién está conectado.
 

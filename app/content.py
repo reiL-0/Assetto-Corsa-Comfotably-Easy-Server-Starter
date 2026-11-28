@@ -330,6 +330,7 @@ def _install_one(top: Path, found: str | None, asked: str | None, dest_parent: P
     """Installs ONE unpacked car or track folder (`top`, of kind `found`) into its content folder: cut down to the server pack, checked against rights claims and the plan's
     space under the catalog lock, copied, sealed and recorded. Raises HTTPException / uploadguard.Rejected when that one cannot be installed."""
     stage = None   # the pace bot's copy of the track's AI lines: made before the cut, kept only if the track is installed
+    kstage = None  # the .kn5 of layouts without a good map.png, moved aside before the cut: drawn into a map after the install (app/kn5map.py)
     layouts = []
     try:
         root = _safe(top.name)
@@ -351,6 +352,16 @@ def _install_one(top: Path, found: str | None, asked: str | None, dest_parent: P
                 except Exception:
                     import logging
                     logging.getLogger("acmanager.content").exception("pit entry of an uploaded track could not be worked out; the upload goes on")
+                try:
+                    from app import kn5map
+                    kn5map.cleanup(_scratch())
+                    kstage = Path(tempfile.mkdtemp(prefix="kn5-", dir=_scratch()))
+                    if not kn5map.stage(top, kstage):   # (before the cut: the server pack keeps no .kn5)
+                        shutil.rmtree(kstage, ignore_errors=True)
+                        kstage = None
+                except Exception:
+                    import logging
+                    logging.getLogger("acmanager.content").exception("the .kn5 of an uploaded track could not be set aside for its map; the upload goes on")
             uploadguard.prune(top, "car" if dest_parent == _cars_dir() else "track")
             if dest_parent == _cars_dir():
                 acd.pack_folder(top)   # loose `data/` (a car straight from Content Manager's editor) -> data.acd, the key is the installed folder name
@@ -375,6 +386,9 @@ def _install_one(top: Path, found: str | None, asked: str | None, dest_parent: P
                 except Exception:
                     import logging
                     logging.getLogger("acmanager.content").exception("the pace lines of an uploaded track could not be kept; the upload goes on")
+            if dest_parent == _tracks_dir():
+                from app import kn5map
+                kn5map.forget(root)   # (the maps drawn for the old upload go: the new pack's own map.png, or the one drawn from it, takes their place)
             res = Installed(root)
             res.layouts = layouts
             if cataloged:
@@ -382,10 +396,16 @@ def _install_one(top: Path, found: str | None, asked: str | None, dest_parent: P
                 integrity.seal_installed(kind, root)
                 catalog.record_upload(kind, root, digest, size, nfiles, catalog.LEAGUE, "upload", source_url)
         res.note = note
+        if kstage is not None:
+            from app import kn5map
+            kn5map.start(kstage, root)   # (in the background: the upload answers now; the stage and its .kn5 are deleted when the drawing ends)
+            kstage = None
         return res
     finally:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
+        if kstage is not None:   # (the install failed: nothing to draw)
+            shutil.rmtree(kstage, ignore_errors=True)
 
 
 def _room(extra: int = 0) -> None:

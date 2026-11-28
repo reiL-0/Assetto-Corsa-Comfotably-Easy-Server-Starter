@@ -107,10 +107,12 @@ def _asset(track: str, config: str, rel: str) -> Path:
 @router.get("/content/tracks/{track}/map.png")
 @router.get("/content/tracks/{track}/{config}/map.png")
 def map_png(track: str, config: str = "") -> FileResponse:
-    return FileResponse(_asset(track, config, "map.png"), media_type="image/png")
+    from app import kn5map   # (a map drawn from the track's .kn5 at upload, when the pack had none or a placeholder: it comes first)
+    return FileResponse(kn5map.generated(track, config, "map.png") or _asset(track, config, "map.png"), media_type="image/png")
 
 
 @router.get("/content/tracks/{track}/data/map.ini")
 @router.get("/content/tracks/{track}/{config}/data/map.ini")
 def map_ini(track: str, config: str = "") -> FileResponse:
-    return FileResponse(_asset(track, config, "data/map.ini"), media_type="text/plain")
+    from app import kn5map
+    return FileResponse(kn5map.generated(track, config, "map.ini") or _asset(track, config, "data/map.ini"), media_type="text/plain")
