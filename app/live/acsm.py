@@ -87,6 +87,7 @@ def track_shape(server_id: int) -> dict:
     out.update(marks)   # start/finish line and pit lane, from the AI lines (when the track came with them)
     if not out["points"] and line:   # nobody has lapped it yet: the track's own racing line draws it, and gives its corners
         out["points"], out["corners"], out["source"] = line, trackshape.find_corners([tuple(p) for p in line]), "ai"
+    out["corners"] = trackshape.name_corners(out["corners"], trackshape.sections(track, config))   # «Tamburello» for T2, from the track's sections.ini
     if "start" not in out and len(out["points"]) > 1:   # no AI lines: the traced lap starts at the line too
         (x0, z0), (x1, z1) = out["points"][0], out["points"][1]
         out["start"] = [x0, z0, round(x1 - x0, 2), round(z1 - z0, 2)]
@@ -106,10 +107,12 @@ def _asset(track: str, config: str, rel: str) -> Path:
 @router.get("/content/tracks/{track}/map.png")
 @router.get("/content/tracks/{track}/{config}/map.png")
 def map_png(track: str, config: str = "") -> FileResponse:
-    return FileResponse(_asset(track, config, "map.png"), media_type="image/png")
+    from app import kn5map   # (a map drawn from the track's .kn5 at upload, when the pack had none or a placeholder: it comes first)
+    return FileResponse(kn5map.generated(track, config, "map.png") or _asset(track, config, "map.png"), media_type="image/png")
 
 
 @router.get("/content/tracks/{track}/data/map.ini")
 @router.get("/content/tracks/{track}/{config}/data/map.ini")
 def map_ini(track: str, config: str = "") -> FileResponse:
-    return FileResponse(_asset(track, config, "data/map.ini"), media_type="text/plain")
+    from app import kn5map
+    return FileResponse(kn5map.generated(track, config, "map.ini") or _asset(track, config, "data/map.ini"), media_type="text/plain")

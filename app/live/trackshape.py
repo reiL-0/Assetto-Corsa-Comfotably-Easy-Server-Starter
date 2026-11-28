@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 
 log = logging.getLogger("acm.trackshape")
@@ -270,6 +271,49 @@ def landmarks(track: str | None, config: str | None) -> dict:
             keep.append([round(pit[-1][0], 1), round(pit[-1][1], 1)])
         out["pit"] = keep
     _marks[key] = (time.monotonic(), out)
+    return out
+
+
+_GENERIC = re.compile(r"^\s*(T|TURN|CURVA|C)\s*\d+\s*$", re.I)   # «T2», «Turn 2»: no name worth showing
+
+
+def sections(track: str | None, config: str | None) -> list[tuple[float, float, str]]:
+    """(in, out, text) of the layout's data/sections.ini (the names of its corners and straights, as fractions of the lap); [] without one."""
+    from app.content import _tracks_dir
+    t, c = _key(track, config)
+    from app import pitentry
+    if not t or not pitentry.NAME.fullmatch(t) or (c and not pitentry.NAME.fullmatch(c)) or ".." in t + c:
+        return []
+    f = _tracks_dir() / t / (c or "") / "data" / "sections.ini"
+    try:
+        if not f.is_file() or f.stat().st_size > 64_000:
+            return []
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out, cur = [], {}
+    for line in text.splitlines() + ["[END]"]:
+        line = line.split(";")[0].strip()
+        if line.startswith("["):
+            try:
+                if "IN" in cur and "OUT" in cur and cur.get("TEXT"):
+                    out.append((float(cur["IN"]), float(cur["OUT"]), cur["TEXT"][:40]))
+            except ValueError:
+                pass
+            cur = {}
+        elif "=" in line:
+            k, _, v = line.partition("=")
+            cur[k.strip().upper()] = v.strip()
+    return out[:200]
+
+
+def name_corners(corners: list[dict], secs: list[tuple[float, float, str]]) -> list[dict]:
+    """Each corner gets `label` = the name of the section of sections.ini it falls in (not a bare «T2»); a copy, the cached list is not touched."""
+    out = []
+    for c in corners:
+        s = c.get("spline", 0.0)
+        hit = next((t for a, b, t in secs if (a <= s <= b if a <= b else (s >= a or s <= b))), None)   # (a section across the line: in > out)
+        out.append({**c, "label": hit} if hit and not _GENERIC.match(hit) and hit != c.get("name") else dict(c))
     return out
 
 

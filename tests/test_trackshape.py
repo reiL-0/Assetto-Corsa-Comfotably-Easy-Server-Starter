@@ -180,3 +180,32 @@ def test_a_layout_nobody_lapped_is_drawn_from_its_ai_racing_line_with_its_corner
         body = api.get(url).json()
         assert body["source"] == "ai" and len(body["points"]) == trackshape.N and [c["name"] for c in body["corners"]] == ["T1", "T2", "T3", "T4"]
         assert "line" not in body and body["start"][:2] == [0.0, 0.0]
+
+
+def test_corners_take_their_name_from_sections_ini_and_a_bare_t2_is_no_name():
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app.content import _tracks_dir
+    from app.db import engine
+    from app.main import app
+    from app.models import Server
+    assert trackshape.name_corners([{"name": "T1", "spline": 0.97}, {"name": "T2", "spline": 0.30}, {"name": "T3", "spline": 0.6}],
+                                   [(0.95, 0.02, "Tamburello"), (0.25, 0.35, "T2"), (0.5, 0.7, "Rivazza")]) == [
+        {"name": "T1", "spline": 0.97, "label": "Tamburello"},   # (a section across the line)
+        {"name": "T2", "spline": 0.30},                          # (a generic name says nothing new)
+        {"name": "T3", "spline": 0.6, "label": "Rivazza"}]
+    data = _tracks_dir() / "named_trk" / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "sections.ini").write_text("[SECTION_0]\nIN=0.0\nOUT=1.0\nTEXT=Variante Alta ; the whole lap, for the test\n\n[SECTION_1]\nIN=x\nOUT=0.2\nTEXT=bad\n")
+    assert trackshape.sections("named_trk", "") == [(0.0, 1.0, "Variante Alta")], "a section with a broken number is skipped"
+    from pathlib import Path
+
+    from app.config import settings
+    _ai(Path(settings.data_dir) / "pace_lines" / "named_trk" / "-" / "fast_lane.ai", _rounded_rect())
+    with Session(engine) as s:
+        s.add(Server(id=964, name="named", base_port=18964, config={"SERVER": {"TRACK": "named_trk", "CONFIG_TRACK": ""}}))
+        s.commit()
+    body = TestClient(app).get("/api/v1/servers/964/acsm/api/live-timings/track-shape.json").json()
+    assert {c.get("label") for c in body["corners"]} == {"Variante Alta"}
+    assert trackshape.sections("../etc", "") == [], "only a plain folder name is read"
